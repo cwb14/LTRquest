@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""reconcile_nests.py
-
-Reconcile nested-LTR-RT calls across multiple rounds of ltrharvest5.py
+"""Reconcile nested-LTR-RT calls across multiple rounds of ltrquest.detect
 into depth-bucketed libraries.
 
 Each surviving element is assigned an inward-chain depth:
@@ -16,7 +14,7 @@ for every observed depth N (shadows the raw per-round files, which are
 left untouched).
 
 Usage:
-  python reconcile_nests.py \
+  python -m ltrquest.reconcile \
       --out-prefix mafft_update \
       --tsv mafft_update_r1_ltr.tsv mafft_update_r2_ltr.tsv ... \
       --fa  mafft_update_r1_ltr.fa  mafft_update_r2_ltr.fa  ... \
@@ -25,26 +23,23 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# Import shared helpers from ltrharvest5
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ltrharvest5 import (  # noqa: E402
+from .detect import (
     _is_contained,
     _ltrs_shared,
     _sub_dedup_shared_ltr_group,
-    load_scn_ltr_boundaries,
     iter_fasta,
+    load_scn_ltr_boundaries,
 )
 
 COORD_RE = re.compile(r"^([^:]+):(\d+)-(\d+)")
 
-# Depth -> IUPAC mask char. Must match ltrharvest_wrapper2.sh's IUPAC_SEQ so a
+# Depth -> IUPAC mask char. Must match ltrquest's IUPAC_SEQ so a
 # cross-round N from a round-1 element (already embedded in the extracted outer
 # sequence) lines up with depth0's char here, depth1 -> R, depth2 -> D, etc.
 # V is reserved for the wrapper's far-character and is NOT in this list.
@@ -106,7 +101,7 @@ def build_all_in(survivors: List[dict],
     for e in survivors:
         by_chr[e["chrom"]].append(e)
 
-    for chrom, arr in by_chr.items():
+    for _chrom, arr in by_chr.items():
         # Sort by start asc, then end desc (outer-first on ties)
         arr.sort(key=lambda x: (x["s"], -x["e"]))
         n = len(arr)
@@ -132,7 +127,6 @@ def build_direct_children(all_in: Dict[str, List[str]]) -> Dict[str, List[str]]:
     has y in all_in[z]."""
     children: Dict[str, List[str]] = defaultdict(list)
     for xk, descendants in all_in.items():
-        desc_set = set(descendants)
         for y in descendants:
             is_direct = True
             for z in descendants:
@@ -258,7 +252,7 @@ def cross_round_dedup(pool: List[dict],
     for i, e in enumerate(pool):
         by_chr[e["chrom"]].append(i)
 
-    for chrom, idxs in by_chr.items():
+    for _chrom, idxs in by_chr.items():
         m = len(idxs)
         for ii in range(m):
             i = idxs[ii]

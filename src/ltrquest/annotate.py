@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""ltr_annotate.py
-
-Add `strand` and `family` columns to the depth-bucketed LTR-RT tables written by
-reconcile_nests.py (and FP-purged by flag_fp_families.py).
+"""Add `strand` and `family` columns to the depth-bucketed LTR-RT tables written by
+ltrquest.reconcile (and FP-purged by flag_fp_families.py).
 
 Both {prefix}_depth{N}_ltr.tsv and {prefix}_depth{N}_clean_ltr.tsv are rewritten
 in place, gaining two columns immediately after `tsd`:
 
     ... 16 ltr3_start | 17 tsd | 18 strand | 19 family | 20 domains | 21 nest_status
 
-The columns go *before* `domains`/`nest_status` on purpose. ltrharvest_plot_struct.py
-and TEGV.py both read those two fields from the end of the row (parts[-2], parts[-1]);
+The columns go *before* `domains`/`nest_status` on purpose. ltrquest.plot_struct
+and ltrquest.tegv both read those two fields from the end of the row (parts[-2], parts[-1]);
 appending would silently feed them the new columns instead, emptying the domain track
 in the structure PDFs and the TEGV viewer. This placement also leaves every positional
 index intact for consumers that count from the front (cols[10] == K2P_d, etc).
@@ -23,15 +21,14 @@ Strand is resolved by a four-tier cascade, most authoritative first:
   4. .            unknown
 
 A fifth tier was tried and removed: orienting an unstranded element against
-stranded members of its own family. See memo_module2_edits.md -- it returned
-'+' for every element it touched and was wrong on 5 of 5 elements whose own
-domains said '-'.
+stranded members of its own family. It returned '+' for every element it
+touched, and was wrong on 5 of the 5 elements whose own domains said '-'.
 
 Family labels ({prefix}_fam00001, ...) come from the Kmer2LTR/mmseqs consensus
 cluster table, numbered by descending family size.
 
 Usage:
-  python ltr_annotate.py --prefix Athal_tair10_chr2_LTRs [--indir .] [-v]
+  python -m ltrquest.annotate --prefix Athal_tair10_chr2_LTRs [--indir .] [-v]
 
 Missing inputs degrade rather than abort: with no .work directories every element
 gets strand '.', with no cluster table every element gets family '.'. A non-zero
@@ -78,7 +75,7 @@ ELEMENT_RE = re.compile(r"^(.+):(\d+)-(\d+)$")
 DOMAIN_TOKEN_RE = re.compile(r"^([^|@;]+)\|([^@;]*)@(\d+)-(\d+)$")
 
 # Canonical 5'->3' internal-domain order per superfamily. Mirrors
-# ltrharvest_plot_struct.py's _CANON_RANK_* tables; the two must stay in sync so
+# ltrquest.plot_struct's _CANON_RANK_* tables; the two must stay in sync so
 # that the strand written here and the strand the structure plots infer agree.
 _CANON_RANK_COPIA = {"GAG": 0, "PROT": 1, "INT": 2, "RT": 3, "RH": 4}
 _CANON_RANK_GYPSY = {"GAG": 0, "PROT": 1, "RT": 2, "RH": 3, "INT": 4}
@@ -120,7 +117,7 @@ def select_annotation_set(prefix: str, indir: str = "."
                           ) -> Tuple[str, List[DepthTable]]:
     """The set a consumer should read: FP-purged if any exists, else raw.
 
-    Mirrors ltrharvest_plots.sh. A depth whose _clean_ table is absent while
+    Mirrors plots.sh. A depth whose _clean_ table is absent while
     other _clean_ tables exist was fully purged by flag_fp_families.py and is
     correctly omitted -- never back-filled from the raw table.
     """
@@ -300,7 +297,7 @@ def infer_strand_from_domains(domains: Sequence[Tuple[str, int, int]],
     genomic order matches canonical order votes '+', otherwise '-'. Majority
     wins; a tie, or fewer than two ranked types, is unknown.
 
-    Mirrors ltrharvest_plot_struct.py:infer_strand_from_domains, but returns '.'
+    Mirrors ltrquest.plot_struct:infer_strand_from_domains, but returns '.'
     rather than '?' for unknown to match this table's placeholder convention.
     """
     sf = (superfamily or "").lower()
@@ -740,7 +737,7 @@ def annotate(prefix: str, indir: str = ".", verbose: bool = False,
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Add strand and family columns to the depth-bucketed "
-                    "LTR-RT tables produced by ltrharvest_wrapper2.sh.")
+                    "LTR-RT tables produced by ltrquest.")
     parser.add_argument("--prefix", required=True,
                         help="Wrapper output prefix, e.g. Athal_tair10_chr2_LTRs")
     parser.add_argument("--indir", default=".",

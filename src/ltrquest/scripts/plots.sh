@@ -1,22 +1,29 @@
 #!/usr/bin/env bash
-# ltrharvest_plots.sh — post-completion plotting driver for ltrharvest_wrapper2.
+# plots.sh — post-completion plotting driver for the ltrquest pipeline.
 #
-# Discovers the final annotation files a wrapper run left behind (preferring
+# Discovers the final annotation files an ltrquest run left behind (preferring
 # the FP-purged *_depth<N>_clean_ltr.* set), derives the small inputs the
 # plotters need (chrom sizes, combined TSV), and runs:
-#   1. ltrharvest_plot_struct.py  — per-family structure PDFs, drawn both with
-#                                   nested insertions in place and excised
-#   2. ltrharvest_plot.py         — multi-page summary PDF (K2P, karyotype, sizes)
-#   3. TEGV.py                    — interactive HTML viewer
+#   1. ltrquest.plot_struct   — per-family structure PDFs, drawn both with
+#                               nested insertions in place and excised
+#   2. ltrquest.plot_summary  — multi-page summary PDF (K2P, karyotype, sizes)
+#   3. ltrquest.tegv          — interactive HTML viewer
 # Each plotter is independent: a failure prints [WARN] and the others still
 # run. Exit code = number of failed plotters (0 = all good). Missing/invalid
 # inputs die immediately with a clear message.
 #
-# Also runnable standalone on any existing wrapper output directory.
+# Also runnable standalone on any existing ltrquest output directory.
 set -euo pipefail
 
+# Python steps run as modules of the installed package, so this behaves the same
+# from `pip install .`, from a source checkout with PYTHONPATH=src, and in the
+# container. The `ltrquest` console script exports LTRQUEST_PYTHON as the
+# interpreter that owns the package; running this file directly falls back to
+# whatever python3 is on PATH.
+PY="${LTRQUEST_PYTHON:-python3}"
+
 die() { echo "ERROR: $*" >&2; exit 1; }
-log() { echo "[ltrharvest_plots] $*"; }
+log() { echo "[ltrquest-plots] $*"; }
 warn() { echo "[WARN] $*" >&2; }
 vlog() { [[ "$VERBOSE" == true ]] && echo "  \$ $*" || true; }
 
@@ -24,10 +31,10 @@ abspath() ( cd "$(dirname "$1")" && printf '%s/%s\n' "$PWD" "$(basename "$1")" )
 
 usage() {
   cat <<'EOF'
-Usage: ltrharvest_plots.sh --prefix PREFIX --genome GENOME[.gz] [options]
+Usage: plots.sh --prefix PREFIX --genome GENOME[.gz] [options]
 
 Required:
-  --prefix PREFIX      Output prefix used by ltrharvest_wrapper2.sh
+  --prefix PREFIX      Output prefix used by the ltrquest run
                        (e.g. Athal_tair10_chr2_LTRs).
   --genome FASTA       Genome FASTA (plain or .gz). Streamed once for
                        chromosome sizes; never loaded into memory.
@@ -35,8 +42,6 @@ Required:
 Options:
   --indir DIR          Directory holding the wrapper outputs (default: .).
   --out-dir DIR        Plot output directory (default: <indir>/<prefix>_plots).
-  --script_path DIR    Directory holding the plotting .py scripts
-                       (default: directory of this script).
   --nesting MODE       Structure PDFs: expanded | collapsed | both
                        (default: both -- writes <family>_individual_expanded.pdf
                        and <family>_individual_collapsed.pdf; any other mode
@@ -51,7 +56,7 @@ Options:
 EOF
 }
 
-PREFIX="" GENOME="" INDIR="." OUT_DIR="" SCRIPT_PATH="" VERBOSE=false
+PREFIX="" GENOME="" INDIR="." OUT_DIR="" VERBOSE=false
 NESTING="both" K2P_MODE="hist" K2P_BIN_WIDTH="" FAMILY_K2P_XMAX=""
 [[ $# -eq 0 ]] && { usage; exit 1; }
 while [[ $# -gt 0 ]]; do
@@ -60,7 +65,6 @@ while [[ $# -gt 0 ]]; do
     --genome) GENOME="${2:-}"; shift 2;;
     --indir) INDIR="${2:-}"; shift 2;;
     --out-dir) OUT_DIR="${2:-}"; shift 2;;
-    --script_path) SCRIPT_PATH="${2:-}"; shift 2;;
     --nesting) NESTING="${2:-}"; shift 2;;
     --k2p-mode) K2P_MODE="${2:-}"; shift 2;;
     --k2p-bin-width) K2P_BIN_WIDTH="${2:-}"; shift 2;;
@@ -77,10 +81,8 @@ case "$K2P_MODE" in hist|kde) ;; *) die "--k2p-mode must be hist or kde (got: $K
 [[ -n "$GENOME" ]] || die "--genome is required"
 [[ -f "$GENOME" ]] || die "Genome not found: $GENOME"
 [[ -d "$INDIR" ]] || die "Input directory not found: $INDIR"
-[[ -z "$SCRIPT_PATH" ]] && SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-for s in ltrharvest_plot_struct.py ltrharvest_plot.py TEGV.py; do
-  [[ -f "${SCRIPT_PATH}/${s}" ]] || die "Missing plotting script: ${SCRIPT_PATH}/${s}"
-done
+"$PY" -c 'import ltrquest' 2>/dev/null \
+  || die "the ltrquest package is not importable by '$PY'; pip install ltrquest, or point LTRQUEST_PYTHON at an interpreter that has it"
 INDIR="$(abspath "$INDIR")"
 GENOME="$(abspath "$GENOME")"
 [[ -z "$OUT_DIR" ]] && OUT_DIR="${INDIR}/${PREFIX}_plots"
@@ -102,7 +104,7 @@ for v in clean raw; do
   if ((${#found[@]} > 0)); then depth_tsvs=("${found[@]}"); variant="$v"; break; fi
 done
 ((${#depth_tsvs[@]} > 0)) \
-  || die "No ${PREFIX}_depth<N>[_clean]_ltr.tsv files found in ${INDIR} — is this a completed wrapper output directory?"
+  || die "No ${PREFIX}_depth<N>[_clean]_ltr.tsv files found in ${INDIR} — is this a completed ltrquest output directory?"
 [[ "$variant" == raw ]] \
   && warn "no *_clean_ltr.tsv files found; falling back to raw depth files (FP families not purged)"
 log "annotation set (${variant}): $(basename -a "${depth_tsvs[@]}" | tr '\n' ' ')"
@@ -140,8 +142,8 @@ run_plotter() {
 plot_struct() {
   local args=(--prefix "$PREFIX" --indir "$INDIR" --out_dir "${OUT_DIR}/struct" \
               --depth all --nesting "$NESTING")
-  vlog python "${SCRIPT_PATH}/ltrharvest_plot_struct.py" "${args[*]}"
-  python "${SCRIPT_PATH}/ltrharvest_plot_struct.py" "${args[@]}"
+  vlog "$PY" -m ltrquest.plot_struct "${args[*]}"
+  "$PY" -m ltrquest.plot_struct "${args[@]}"
 }
 
 plot_summary() {
@@ -156,8 +158,8 @@ plot_summary() {
   else
     log "no consensus cluster TSV; skipping per-family pages"
   fi
-  vlog "(cd ${OUT_DIR} &&) python ${SCRIPT_PATH}/ltrharvest_plot.py ${args[*]}"
-  (cd "$OUT_DIR" && python "${SCRIPT_PATH}/ltrharvest_plot.py" "${args[@]}")
+  vlog "(cd ${OUT_DIR} &&) $PY -m ltrquest.plot_summary ${args[*]}"
+  (cd "$OUT_DIR" && "$PY" -m ltrquest.plot_summary "${args[@]}")
 }
 
 plot_tegv() {
@@ -172,12 +174,12 @@ plot_tegv() {
   else
     log "no single r1 genic.gff found; TEGV runs without a gene track"
   fi
-  vlog python "${SCRIPT_PATH}/TEGV.py" "${args[*]}"
-  python "${SCRIPT_PATH}/TEGV.py" "${args[@]}"
+  vlog "$PY" -m ltrquest.tegv "${args[*]}"
+  "$PY" -m ltrquest.tegv "${args[@]}"
 }
 
-run_plotter "ltrharvest_plot_struct" plot_struct
-run_plotter "ltrharvest_plot (summary PDF)" plot_summary
+run_plotter "plot_struct" plot_struct
+run_plotter "plot_summary (summary PDF)" plot_summary
 if ((${#depth_fas[@]} > 0)); then
   run_plotter "TEGV" plot_tegv
 else

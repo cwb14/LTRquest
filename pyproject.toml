@@ -1,0 +1,108 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ltrquest"
+version = "1.0.0"
+description = "Iterative detection of nested LTR retrotransposons"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.9"
+authors = [{ name = "Chris Benson", email = "oulab.osu@gmail.com" }]
+keywords = ["bioinformatics", "genomics", "transposable-elements", "LTR", "retrotransposon"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+# Detection, masking, reconciliation, annotation and GFF3 need nothing beyond the
+# standard library. numpy and matplotlib are here because the plotting stage runs
+# by default; disable it with --no-plots and they go unused.
+dependencies = [
+    "matplotlib>=3.5",
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+# Per-sample coverage and transcript tracks in the TEGV browser.
+bam = ["pysam>=0.22"]
+dev = ["pytest>=7.0", "ruff>=0.5"]
+
+[project.urls]
+Homepage = "https://github.com/cwb14/LTRquest"
+Source = "https://github.com/cwb14/LTRquest"
+Issues = "https://github.com/cwb14/LTRquest/issues"
+
+[project.scripts]
+ltrquest = "ltrquest.cli:main"
+ltrquest-plots = "ltrquest.cli:plots"
+# Individual stages, so the Nextflow modules and ad-hoc reruns do not have to
+# reach into the package with `python -m`.
+ltrquest-detect = "ltrquest.detect:main"
+ltrquest-mask = "ltrquest.mask:main"
+ltrquest-reconcile = "ltrquest.reconcile:main"
+ltrquest-annotate = "ltrquest.annotate:main"
+ltrquest-gff3 = "ltrquest.gff3:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ltrquest"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/docs",
+    "/main.nf",
+    "/nextflow.config",
+    "/nextflow_schema.json",
+    "/conf",
+    "/modules",
+    "/subworkflows",
+    "/assets",
+    "/environment.yml",
+    "/Dockerfile",
+    "/CHANGELOG.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: end-to-end runs needing the full external toolchain (deselect with '-m \"not slow\"')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Real defects, import hygiene, and the bug-prone-pattern rules. The pyupgrade
+# (UP) family is deliberately absent: it wants to rewrite ~200 typing.Dict/
+# Optional annotations to PEP 585/604 syntax across the detection and plotting
+# stages, which is churn on working numerical code for no runtime benefit at a
+# 3.9 floor.
+select = ["E4", "E7", "E9", "F", "W", "I", "B", "C4"]
+ignore = [
+    "E501",  # long lines: the tabular output builders are more readable wide
+    "E741",  # `l` reads fine for a left-LTR local
+    "B905",  # zip(strict=) is 3.10+; the floor is 3.9
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Loop variables kept for documentation value in the plotting code.
+"src/ltrquest/plot_struct.py" = ["B007"]
+# B023: the flagged closures (a defaultdict factory, a page-writing nested def)
+# are called within the same loop iteration that defines them, so the late-
+# binding B023 warns about cannot happen here.
+"src/ltrquest/plot_summary.py" = ["B007", "B023"]

@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
-"""
-te_viewer.py — Interactive nested TE + gene genome browser
-Generates a self-contained HTML file with D3.js visualization.
+"""TEGV - a self-contained interactive genome browser for nested LTR-RTs.
 
-Now supports --bam and --bam-labels to add per-sample:
-  • Coverage barplots over exon/TE positions
-  • Collapsed transcript tracks (spliced alignments shown as exon boxes + intron lines)
+Renders genes, LTR-RTs (nested elements drawn at their own depth), protein
+domains and LTR divergence into a single HTML file with an inlined D3.js
+bundle, so the output opens in any browser with no server and no assets.
 
-Usage:
-    python TEGV.py \
-        --gff3 genes.gff3 \
-        --te-fastas level0.fa level1.fa level2.fa \
-        --ltr-divergence level0.div level1.div level2.div \
-        --domains level0.domains level1.domains level2.domains \
-        --bam wt.bam met1.bam ddm1.bam \
-        --bam-labels wt met1 ddm1 \
-        --output viewer.html
+Optional ``--bam`` / ``--bam-labels`` add, per sample, a coverage barplot over
+exon and TE positions plus a collapsed transcript track (spliced alignments as
+exon boxes joined by intron lines).
 
-python TEGV.py --gff3 Col0_ltr_r1.work/Col0_ltr_r1.genic.gff  --te-fastas Col0_ltr_r1.ltrharvest.full_length.dedup.fa.rexdb-plant.cls.lib.fa Col0_ltr_r2.ltrharvest.full_length.dedup.fa.rexdb-plant.cls.lib.fa Col0_ltr_r3.ltrharvest.full_length.dedup.fa.rexdb-plant.cls.lib.fa --ltr-divergence Col0_ltr_r1_kmer2ltr_dedup Col0_ltr_r2_kmer2ltr_dedup  Col0_ltr_r3_kmer2ltr_dedup --domains  Col0_ltr_r1.work/Col0_ltr_r1.ltrtools.intact_for_tesorter.fa.rexdb-plant.dom.gff3 Col0_ltr_r2.work/Col0_ltr_r2.ltrtools.intact_for_tesorter.fa.rexdb-plant.dom.gff3 Col0_ltr_r3.work/Col0_ltr_r3.ltrtools.intact_for_tesorter.fa.rexdb-plant.dom.gff3 --bam ltr_rt_validation/bam/wt.bam ltr_rt_validation/bam/met1.bam ltr_rt_validation/bam/ddm1.bam --bam-labels wt met1 ddm1 --output Col0_viewer_new.html --bin-size 200 --threads 200
+Called by ``plots.sh`` as the last plotting stage; see ``--help`` to drive it
+directly.
 """
 
 import argparse
@@ -27,7 +20,6 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-
 
 # ─────────────────────────────────────────────
 #  Data classes
@@ -426,8 +418,8 @@ def _process_bam_chrom(bam_path, chrom, regions, bin_size):
       • read.get_blocks() (C-level) instead of Python CIGAR walk.
       • Tuples instead of dicts for intermediate storage.
     """
-    import pysam
     import numpy as np
+    import pysam
 
     try:
         bam = pysam.AlignmentFile(bam_path, "rb")
@@ -572,8 +564,8 @@ def compute_coverage_and_transcripts(bam_paths, bam_labels, genes, all_elements,
       coverage_data:   { label: { chrom: [ {s, e, d}, ... ] } }
       transcript_data: { label: [ {c, s, e, st, b, d}, ... ] }
     """
-    from concurrent.futures import ProcessPoolExecutor, as_completed
     import time
+    from concurrent.futures import ProcessPoolExecutor, as_completed
 
     # Collect regions of interest per chrom
     regions_by_chrom = defaultdict(list)
@@ -2008,7 +2000,7 @@ def main():
 
     if args.bam:
         try:
-            import pysam
+            import pysam  # noqa: F401  (imported purely to probe availability)
         except ImportError:
             print("Error: pysam is required for BAM processing. Install with: pip install pysam",
                   file=sys.stderr)

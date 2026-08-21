@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""ltr_tsv_to_gff3.py
-
-Turn the annotated depth-bucketed LTR-RT tables into GFF3.
+"""Turn the annotated depth-bucketed LTR-RT tables into GFF3.
 
 Writes:
   {prefix}_all_depth_LTR_cleaned.gff3
@@ -26,11 +24,11 @@ two are mutually consistent on every row, while LTR_len disagrees with both on a
 minority of elements.
 
 Usage:
-  python ltr_tsv_to_gff3.py --prefix Athal_tair10_chr2_LTRs [--indir .]
+  python -m ltrquest.gff3 --prefix Athal_tair10_chr2_LTRs [--indir .]
                             [--genome genome.fa[.gz]] [--miniprot-gff FILE] [-v]
 
 Input tables must already carry the strand and family columns added by
-ltr_annotate.py; missing columns degrade to '.' rather than aborting.
+ltrquest.annotate; missing columns degrade to '.' rather than aborting.
 """
 from __future__ import annotations
 
@@ -42,11 +40,9 @@ import os
 import sys
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from ltr_annotate import (  # noqa: E402
-    UNKNOWN,
+from .annotate import (
     ELEMENT_RE,
+    UNKNOWN,
     collect_elements,
     element_key,
     header_names,
@@ -61,7 +57,7 @@ from ltr_annotate import (  # noqa: E402
     select_annotation_set,
 )
 
-SOURCE = "synLTR"
+SOURCE = "LTRquest"
 
 # Attribute values needing escaping in GFF3 column 9. '%' is in the table so it
 # is escaped too, which keeps the encoding reversible.
@@ -247,7 +243,7 @@ def build_element_blocks(prefix: str, tables, ranker: SeqidRanker,
                          ) -> Tuple[List[Block], int]:
     """One Block per element across all depth tables. Returns (blocks, skipped).
 
-    Tables are read as written by ltr_annotate.py, i.e. with the strand and
+    Tables are read as written by ltrquest.annotate, i.e. with the strand and
     family columns present; a table lacking them degrades to '.' per column
     rather than failing.
     """
@@ -378,7 +374,7 @@ def find_miniprot_gff(prefix: str, indir: str) -> Optional[str]:
 
     Round 1 specifically: later rounds run on LTR-masked genomes, so their
     alignments are incomplete over exactly the regions of interest. Same glob
-    ltrharvest_plots.sh uses for TEGV's gene track.
+    plots.sh uses for TEGV's gene track.
     """
     hits = sorted(glob.glob(os.path.join(indir, f"{prefix}_r1.work", "*.genic.gff")))
     hits = [p for p in hits if os.path.getsize(p) > 0]
@@ -611,7 +607,7 @@ def convert(prefix: str, indir: str = ".", genome: Optional[str] = None,
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Write GFF3 annotation from the depth-bucketed LTR-RT "
-                    "tables produced by ltrharvest_wrapper2.sh.")
+                    "tables produced by ltrquest.")
     parser.add_argument("--prefix", required=True,
                         help="Wrapper output prefix, e.g. Athal_tair10_chr2_LTRs")
     parser.add_argument("--indir", default=".",

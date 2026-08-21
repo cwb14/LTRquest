@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# nest_ltr_detector.sh
-# Iterative nested LTR-RT detection wrapper for synLTR/module2 pipeline.
+# ltrquest.sh -- the LTRquest pipeline driver.
+#
+# Iterative nested LTR-RT detection: every round masks what it found and re-runs,
+# so elements nested inside other elements surface one layer at a time.
 #
 # Usage:
-#   bash nest_ltr_detector.sh --genome genome.fa [genome2.fa ...] [--proteins prot.fa] [--terminate_count 100]
-#       [--max-rounds N] [--script_path ./synLTR/module2/] [--threads 20] [--out_prefix PREFIX]
-#       [--wfa-align] [--run-sdust] [--ltrharvest5-args "KEY=VALUE ..."] [--ltrharvest5-args-from-round N "KEY=VALUE ..."]
+#   ltrquest --genome genome.fa [genome2.fa ...] [--proteins prot.fa] [--terminate_count 100]
+#       [--max-rounds N] [--threads 20] [--out_prefix PREFIX]
+#       [--wfa-align] [--run-sdust] [--detect-args "KEY=VALUE ..."] [--detect-args-from-round N "KEY=VALUE ..."]
 #
 # Notes:
 # - Runs Round 1 on the original genome, then masks the ORIGINAL genome each round to build genome_r{N}.fa for next round.
-# - Stops when: detected LTR-RTs < terminate_count, max-rounds reached, or ltrharvest5.py exits early
+# - Stops when: detected LTR-RTs < terminate_count, max-rounds reached, or ltrquest.detect exits early
 #   (e.g. no LTR-RT candidates found) -- early exits are handled gracefully.
-# - After the loop, reconcile_nests.py pools all rounds, detects cross-round containment,
+# - After the loop, ltrquest.reconcile pools all rounds, detects cross-round containment,
 #   and writes depth-bucketed {OUT_PREFIX}_depth{N}_ltr.{tsv,fa} files. The raw per-round
 #   {OUT_PREFIX}_r{N}_ltr.* files are preserved. depth{N} = elements with N layers of
 #   LTR-RT nested inside (depth0 = no inner, i.e. "unnested"; depth1 = single-nested; etc.).
@@ -31,21 +33,21 @@
 #   Filtering here rather than later spares TEsorter2, the TSD pass, and Kmer2LTR
 #   the work of classifying satellite arrays.
 #
-# Extra ltrharvest5.py args:
-#   --ltrharvest5-args "KEY=VALUE [KEY2=VALUE2 ...]"
+# Extra detection options:
+#   --detect-args "KEY=VALUE [KEY2=VALUE2 ...]"
 #       Applied to ALL rounds. Boolean flags: KEY=true (e.g. clean=true).
 #       Can be specified multiple times.
 #
-#   --ltrharvest5-args-from-round N "KEY=VALUE [...]"
+#   --detect-args-from-round N "KEY=VALUE [...]"
 #       Applied starting from round N onward. For the same KEY, later from-round
 #       values override earlier ones (last-wins per key, per round).
 #       Can be specified multiple times.
 #
 #   Examples:
-#     --ltrharvest5-args "clean=true verbose=true"
-#     --ltrharvest5-args-from-round 2 "clean=true"
-#     --ltrharvest5-args-from-round 1 "tesorter-rule=70-70-80"
-#     --ltrharvest5-args-from-round 3 "tesorter-rule=70-40-80"
+#     --detect-args "clean=true verbose=true"
+#     --detect-args-from-round 2 "clean=true"
+#     --detect-args-from-round 1 "tesorter-rule=70-70-80"
+#     --detect-args-from-round 3 "tesorter-rule=70-40-80"
 
 # FALSE-POSITIVE (FP) FAMILY CORRECTION (post-detection):
 #   High-abundance non-LTR repeats (SINEs, DNA/low-complexity) can seed spurious
@@ -65,13 +67,13 @@
 #   debugging. See the "FP-correction orchestrator" section below.
 
 # ANNOTATION ADD-ONS (post FP-correction):
-#   (a) ltr_annotate.py inserts `strand` and `family` columns into every
+#   (a) ltrquest.annotate inserts `strand` and `family` columns into every
 #       {OUT_PREFIX}_depth{N}_ltr.tsv and _depth{N}_clean_ltr.tsv, between `tsd`
 #       and `domains`. Strand is TEsorter2's call, falling back to protein-domain
 #       order and then to the minimap2 pass-2 homology target; elements with no
 #       usable evidence keep '.'. Family is the Kmer2LTR/mmseqs consensus
 #       cluster, labelled {OUT_PREFIX}_fam00001 onward.
-#   (b) ltr_tsv_to_gff3.py pools those tables into
+#   (b) ltrquest.gff3 pools those tables into
 #       {OUT_PREFIX}_all_depth_LTR_cleaned.gff3, and - when round 1 produced a
 #       miniprot genic GFF - {OUT_PREFIX}_all_depth_protein_LTR_cleaned.gff3,
 #       which additionally carries every miniprot protein alignment. Each
@@ -81,14 +83,14 @@
 #   --genome accepts several FASTAs. Closely-related species then share one
 #   family vocabulary, which is what makes between-species family comparisons
 #   meaningful. The pipeline splits into three phases:
-#     (1) per genome, sequentially: detection rounds + reconcile_nests.py,
+#     (1) per genome, sequentially: detection rounds + ltrquest.reconcile,
 #         producing {P_g}_depth{N}_ltr.{tsv,fa} for each genome. This is the
 #         detect-only worker, re-exec'd once per genome.
 #     (2) pooled, once: every genome's depth FASTAs are concatenated into
 #         {RUN}_all_ltr.fa, clustered by a single Kmer2LTR pass, and
 #         FP-corrected by flag_fp_families.py -- so family membership and
 #         false-positive calls are computed over the union, not per species.
-#     (3) split back out, per genome: ltr_annotate.py and ltr_tsv_to_gff3.py
+#     (3) split back out, per genome: ltrquest.annotate and ltrquest.gff3
 #         run once per genome against that one pooled cluster table, so
 #         {RUN}_fam00001 denotes the same family in every genome's outputs.
 #   Naming: each genome keeps its own <basename>_LTRs prefix; --out_prefix
@@ -100,11 +102,16 @@
 
 set -euo pipefail
 
-# Print the exact command for reproducibility
-echo "Command: $0 $*"
+# Print the exact command for reproducibility. LTRQUEST_ARGV0 is set by the
+# console script so this echoes `ltrquest ...` rather than the site-packages
+# path of this file.
+echo "Command: ${LTRQUEST_ARGV0:-$0} $*"
 echo ""
 
 WRAPPER_START=$SECONDS
+
+# plots.sh is a sibling inside the package, not something the user points at.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Capture the original argv up-front (before parsing consumes it) so the
 # FP-correction orchestrator can re-invoke this script as a worker on a masked
@@ -121,7 +128,6 @@ RUN_PREFIX=""      # names the shared family namespace + merged artifacts
 PROTEINS=""
 TERMINATE_COUNT=100
 MAX_ROUNDS_OVERRIDE=""   # empty = use IUPAC_SEQ length (10)
-SCRIPT_PATH=""
 THREADS=20
 OUT_PREFIX=""
 RUN_TRF=true
@@ -140,7 +146,7 @@ DEV_KEEP_FP_ROUNDS=false   # hidden dev flag: keep every FP-round staging dir
 MAX_FP_ROUNDS=10           # hidden safety cap on automatic FP-masking re-runs
                            # (overridable via --dev-max-fp-rounds)
 
-# Storage for extra ltrharvest5.py arg directives
+# Storage for extra ltrquest.detect arg directives
 # Each entry is tab-separated: "FROMROUND\tKEY\tVALUE\tIS_BOOL"
 declare -a EXTRA_ARG_DIRECTIVES=()
 
@@ -152,11 +158,11 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 usage() {
   cat >&2 <<'USAGE_EOF'
 Usage:
-  bash nest_ltr_detector.sh --genome genome.fa [genome2.fa ...] [--proteins prot.fa]
+  ltrquest --genome genome.fa [genome2.fa ...] [--proteins prot.fa]
       [--terminate_count 100]
-      [--max-rounds N] [--script_path ./synLTR/module2/] [--threads 20] [--out_prefix PREFIX]
+      [--max-rounds N] [--threads 20] [--out_prefix PREFIX]
       [--wfa-align] [--run-sdust] [--fp-mask-threshold 0.10]
-      [--ltrharvest5-args "KEY=VALUE ..."] [--ltrharvest5-args-from-round N "KEY=VALUE ..."]
+      [--detect-args "KEY=VALUE ..."] [--detect-args-from-round N "KEY=VALUE ..."]
 
 Required:
   --genome              Genome FASTA (.fa/.fasta, plain or .gz). One or more,
@@ -168,13 +174,12 @@ Required:
                         up front, before any work starts).
 
 Optional:
-  --proteins            Protein FASTA for ltrharvest5.py. One file, shared by
+  --proteins            Protein FASTA for ltrquest.detect. One file, shared by
                         every genome.
   --terminate_count     Stop if detected LTR-RTs in latest library < this count (default 100)
   --max-rounds          Maximum number of rounds to run (default: up to 10, limited by IUPAC codes).
                         Use 1 for non-nested only, 2 for single-level nesting, etc.
-  --script_path         Path containing ltrharvest5.py and mask_ltr.py (default: same dir as this script)
-  --threads             Threads for ltrharvest5.py (default 20)
+  --threads             Threads for ltrquest.detect (default 20)
   --out_prefix          With ONE genome: output prefix (default
                         <genome_prefix>_LTRs), which also names the families.
                         With 2+ genomes: names the shared family namespace and
@@ -201,9 +206,9 @@ Optional:
                         hard-masked and the whole pipeline is automatically re-run
                         on the masked genome (default 0.10; higher tolerates more
                         false positives before masking/re-running).
-  --no-plots                Skip the post-completion plotting stage
-                            (ltrharvest_plots.sh: structure PDFs, summary PDF,
-                            TEGV HTML into <out_prefix>_plots/). Default: run it.
+  --no-plots            Skip the post-completion plotting stage (structure
+                        PDFs, summary PDF, TEGV HTML into <out_prefix>_plots/).
+                        Default: run it.
 
 Post-detection FP-family correction runs automatically: it clusters the detected
 LTR-RTs with Kmer2LTR, purges false-positive families into
@@ -216,40 +221,34 @@ Annotation add-ons then run automatically: every depth table gains `strand` and
 <out_prefix>_all_depth_protein_LTR_cleaned.gff3 when --proteins was given, which
 also carries the miniprot alignments).
 
-Extra ltrharvest5.py options:
-  --ltrharvest5-args "KEY=VALUE [KEY2=VALUE2 ...]"
-      Pass additional options to ltrharvest5.py for ALL rounds.
+Extra detection options:
+  --detect-args "KEY=VALUE [KEY2=VALUE2 ...]"
+      Pass additional options to ltrquest.detect for ALL rounds.
       KEY is the option name without leading '--'. Use '=' to separate key and value.
       Boolean flags (no value): KEY=true  (e.g. clean=true, verbose=true)
       Can be specified multiple times.
 
-  --ltrharvest5-args-from-round N "KEY=VALUE [...]"
-      Pass additional options to ltrharvest5.py starting from round N onward.
+  --detect-args-from-round N "KEY=VALUE [...]"
+      Pass additional options to ltrquest.detect starting from round N onward.
       For the same KEY, the directive with the highest applicable from-round wins.
       Can be specified multiple times.
 
   Examples:
       # Always clean workdirs and be verbose
-      --ltrharvest5-args "clean=true verbose=true"
+      --detect-args "clean=true verbose=true"
 
       # Clean only from round 2 onward
-      --ltrharvest5-args-from-round 2 "clean=true"
+      --detect-args-from-round 2 "clean=true"
 
       # Use a relaxed tesorter-rule for rounds 1-2, stricter from round 3
-      --ltrharvest5-args-from-round 1 "tesorter-rule=70-70-80"
-      --ltrharvest5-args-from-round 3 "tesorter-rule=70-40-80"
+      --detect-args-from-round 1 "tesorter-rule=70-70-80"
+      --detect-args-from-round 3 "tesorter-rule=70-40-80"
 
 Notes:
   - Rounds 2+ automatically receive --exclude-run-char V (no need to specify manually).
-  - If ltrharvest5.py exits with an error (e.g. no LTR-RT candidates / Kmer2LTR failure),
+  - If ltrquest.detect exits with an error (e.g. no LTR-RT candidates / Kmer2LTR failure),
     the run stops gracefully rather than crashing the whole pipeline.
 USAGE_EOF
-}
-
-abspath_dir() {
-  local d
-  d="$(cd "$(dirname "$1")" && pwd)"
-  echo "$d"
 }
 
 count_fasta_headers() {
@@ -293,7 +292,7 @@ parse_kv_string() {
   done
 }
 
-# Build the extra ltrharvest5.py args for a given round.
+# Build the extra ltrquest.detect args for a given round.
 # Reads EXTRA_ARG_DIRECTIVES; writes result into the array named by $2 (nameref).
 # For the same KEY, the directive with the highest from_round that is <= round wins.
 build_extra_args_for_round() {
@@ -367,7 +366,7 @@ check_unique_basenames() {
 
 # A seqid shared by two genomes is a correctness hazard, not a cosmetic one:
 # flag_fp_families.py purges by bare 'chrom:start-end', so one species' false
-# positives would delete the other species' real elements, and ltr_annotate.py's
+# positives would delete the other species' real elements, and ltrquest.annotate's
 # by_coord fallback would silently drop the ambiguous coordinates.
 check_unique_seqids() {
   local pairs dupes id i
@@ -418,7 +417,7 @@ abspath() {
 # ----------------------------
 # FP-correction orchestrator helpers
 # ----------------------------
-# Ensure the Kmer2LTR clone used by the FP stage is available. ltrharvest5.py
+# Ensure the Kmer2LTR clone used by the FP stage is available. ltrquest.detect
 # normally clones it into TOOLS_DIR during the rounds; clone defensively if the
 # rounds produced nothing or the layout ever changes.
 ensure_kmer2ltr_dir() {
@@ -482,6 +481,12 @@ depth_tables_for() {
 # workers left a complete one behind, else clone into a run-level dir.
 resolve_merged_tools_dir() {
   local p
+  # A pre-built tools directory (the container bakes one in) wins outright:
+  # nothing needs cloning, and it lives outside the per-attempt staging dir.
+  if [[ -n "${LTRQUEST_TOOLS_DIR:-}" ]]; then
+    TOOLS_DIR="$LTRQUEST_TOOLS_DIR"
+    return
+  fi
   for p in "${OUT_PREFIXES[@]}"; do
     if [[ -f "./${p}_tools/Kmer2LTR/Kmer2LTR.py" \
        && -f "./${p}_tools/Kmer2LTR/flag_fp_families.py" ]]; then
@@ -511,7 +516,7 @@ run_fp_stage() {
   # not wait for >(...) to finish, so the log would still be empty when the
   # fraction is parsed out of it a moment later. A pipeline is waited on.
   set -x
-  { python "$flag_fp" \
+  { "$PY" "$flag_fp" \
       --consensus-cluster "$cons" \
       --internal-cluster "$int" \
       --ltr-fasta "$cons_fa" \
@@ -535,7 +540,7 @@ run_fp_stage() {
   for (( i=1; i<N_GENOMES; i++ )); do
     p="${OUT_PREFIXES[$i]}"
     set -x
-    { python "$flag_fp" \
+    { "$PY" "$flag_fp" \
         --consensus-cluster "$cons" \
         --internal-cluster "$int" \
         --ltr-fasta "$cons_fa" \
@@ -601,14 +606,14 @@ run_annotation_stage() {
     echo "============================================================"
     echo "Annotating ${#annot_tsvs[@]} depth table(s) for ${p} with strand + family..."
     set -x
-    python "$ANNOTATOR" --prefix "$p" --indir . "${fam_opts[@]}"
+    "${ANNOTATE[@]}" --prefix "$p" --indir . "${fam_opts[@]}"
     set +x
 
     echo ""
     echo "============================================================"
     echo "Writing LTR-RT GFF3 for ${p}..."
     set -x
-    python "$GFF3_WRITER" --prefix "$p" --indir . \
+    "${GFF3[@]}" --prefix "$p" --indir . \
       --genome "${p}.input_genome.fa" "${fam_opts[@]}"
     set +x
   done
@@ -661,7 +666,7 @@ run_merged_stage() {
 
   # (2) One clustering pass over the pooled elements -> the shared family basis.
   set -x
-  python "$KMER2LTR_PY" \
+  "$PY" "$KMER2LTR_PY" \
     -i "$all_ltr_fa" \
     -o "${RUN_PREFIX}_all_ltr" \
     --ltr-cluster --internal-cluster \
@@ -710,8 +715,8 @@ genome_needs_rerun() {
 
 # Reuse a genome's detection outputs when its input did not change. .work dirs
 # are hardlinked (bulk data, never rewritten downstream -- only read by
-# reconcile_nests.py and the miniprot GFF lookup). Everything else is a real
-# copy, because ltr_annotate.py rewrites the depth TSVs IN PLACE and a hardlink
+# ltrquest.reconcile and the miniprot GFF lookup). Everything else is a real
+# copy, because ltrquest.annotate rewrites the depth TSVs IN PLACE and a hardlink
 # there would corrupt the previous attempt's directory. The input symlink is
 # re-created per attempt, and _clean_/_FP_masked outputs belong to the attempt
 # that produced them, so all three are skipped.
@@ -747,10 +752,9 @@ carry_forward_genome() {
 # -- the attempt is final, gets annotated, and is promoted to the user's
 # working directory.
 run_fp_orchestrator() {
-  local final_dir staging abs_self abs_proteins abs_script
+  local final_dir staging abs_self abs_proteins
   final_dir="$PWD"
   abs_self="$(abspath "${BASH_SOURCE[0]}")"
-  abs_script="$(abspath "$SCRIPT_PATH")"
   [[ -n "$PROTEINS" ]] && abs_proteins="$(abspath "$PROTEINS")"
 
   staging="${final_dir}/${RUN_PREFIX}_FPstaging"
@@ -796,12 +800,11 @@ run_fp_orchestrator() {
       # values. The env var flips the re-exec'd script into worker mode.
       local worker_args=( "${ORIG_ARGS[@]}"
           --genome "${p}.input_genome.fa"
-          --out_prefix "$p"
-          --script_path "$abs_script" )
+          --out_prefix "$p" )
       [[ -n "${abs_proteins:-}" ]] && worker_args+=( --proteins "$abs_proteins" )
 
       rc=0
-      ( cd "$adir" && _LTRHARVEST_WRAPPER2_WORKER=1 bash "$abs_self" "${worker_args[@]}" ) || rc=$?
+      ( cd "$adir" && _LTRQUEST_WORKER=1 bash "$abs_self" "${worker_args[@]}" ) || rc=$?
       if (( rc != 0 )); then
         die "Detection failed for genome '${GENOMES[$i]}' (prefix ${p}, FP round ${attempt}, exit ${rc}).
   A genome that yields no LTR-RTs aborts the whole run rather than producing a
@@ -854,6 +857,8 @@ run_fp_orchestrator() {
 
   [[ -n "$final_adir" ]] || die "FP orchestrator produced no final attempt (internal error)"
 
+  # Only the staging dir's own tools clones are disposable; a pre-built
+  # LTRQUEST_TOOLS_DIR lives elsewhere and is never touched.
   for p in "${OUT_PREFIXES[@]}"; do rm -rf "${final_adir}/${p}_tools"; done
   rm -rf "${final_adir}/${RUN_PREFIX}_tools"
 
@@ -876,9 +881,9 @@ run_fp_orchestrator() {
     echo "Post-completion plotting (disable with --no-plots)..."
     for i in "${!GENOMES[@]}"; do
       p="${OUT_PREFIXES[$i]}"
-      if bash "${SCRIPT_PATH}/ltrharvest_plots.sh" \
+      if bash "${SELF_DIR}/plots.sh" \
            --prefix "$p" --genome "${abs_genomes[$i]}" \
-           --indir "$final_dir" --script_path "$SCRIPT_PATH"; then
+           --indir "$final_dir"; then
         echo "Plots written to: ${final_dir}/${p}_plots"
       else
         echo "[WARN] plotting stage reported failures for ${p}; annotation outputs are unaffected." >&2
@@ -911,7 +916,6 @@ while [[ $# -gt 0 ]]; do
     --proteins) PROTEINS="${2:-}"; shift 2;;
     --terminate_count) TERMINATE_COUNT="${2:-}"; shift 2;;
     --max-rounds) MAX_ROUNDS_OVERRIDE="${2:-}"; shift 2;;
-    --script_path) SCRIPT_PATH="${2:-}"; shift 2;;
     --threads) THREADS="${2:-}"; shift 2;;
     --out_prefix) OUT_PREFIX="${2:-}"; shift 2;;
     --run-trf) RUN_TRF=true; shift;;
@@ -926,13 +930,13 @@ while [[ $# -gt 0 ]]; do
     --no-plots) RUN_PLOTS=false; shift;;
     --dev-keep-fp-rounds) DEV_KEEP_FP_ROUNDS=true; shift;;      # hidden dev flag
     --dev-max-fp-rounds) MAX_FP_ROUNDS="${2:-}"; shift 2;;       # hidden dev flag
-    --ltrharvest5-args)
+    --detect-args)
       parse_kv_string 1 "${2:-}"
       shift 2;;
-    --ltrharvest5-args-from-round)
+    --detect-args-from-round)
       _from="${2:-}"
       _kv="${3:-}"
-      [[ "$_from" =~ ^[1-9][0-9]*$ ]] || die "--ltrharvest5-args-from-round requires a positive integer round number as the next argument"
+      [[ "$_from" =~ ^[1-9][0-9]*$ ]] || die "--detect-args-from-round requires a positive integer round number as the next argument"
       parse_kv_string "$_from" "$_kv"
       shift 3;;
     -h|--help) usage; exit 0;;
@@ -986,7 +990,7 @@ if (( N_GENOMES == 1 )); then
   fi
   OUT_PREFIXES=( "$OUT_PREFIX" )
   RUN_PREFIX="$OUT_PREFIX"
-  TOOLS_DIR="./${tools_base}_tools"
+  TOOLS_DIR="${LTRQUEST_TOOLS_DIR:-./${tools_base}_tools}"
 else
   # Multi genome: every genome keeps its own auto-derived prefix; --out_prefix
   # names only the shared pool (families, merged cluster tables, staging).
@@ -995,7 +999,7 @@ else
     OUT_PREFIXES+=( "${_p}_LTRs" )
   done
   OUT_PREFIX="${OUT_PREFIXES[0]}"
-  TOOLS_DIR="./${RUN_PREFIX}_tools"
+  TOOLS_DIR="${LTRQUEST_TOOLS_DIR:-./${RUN_PREFIX}_tools}"
 fi
 
 if (( N_GENOMES > 1 )); then
@@ -1017,31 +1021,31 @@ if (( N_GENOMES > 1 )); then
   check_unique_seqids
 fi
 
-if [[ -z "$SCRIPT_PATH" ]]; then
-  SCRIPT_PATH="$(abspath_dir "${BASH_SOURCE[0]}")"
-else
-  SCRIPT_PATH="${SCRIPT_PATH%/}"
-fi
+# Every Python step is a module of the installed package rather than a file
+# sitting next to this script, so the driver behaves identically whether it was
+# installed with `pip install .`, run from a source checkout with PYTHONPATH=src,
+# or run inside the container. The `ltrquest` console script exports
+# LTRQUEST_PYTHON to pin the interpreter that owns the package; invoking this
+# file directly as `bash ltrquest.sh` falls back to python3 on PATH.
+PY="${LTRQUEST_PYTHON:-python3}"
+"$PY" -c 'import ltrquest' 2>/dev/null || die \
+  "the ltrquest package is not importable by '$PY'.
+  Install it (pip install ltrquest) or point LTRQUEST_PYTHON at an interpreter that has it."
 
-LTRHARVEST="${SCRIPT_PATH}/ltrharvest5.py"
-MASKLTR="${SCRIPT_PATH}/mask_ltr.py"
-RECONCILER="${SCRIPT_PATH}/reconcile_nests.py"
-ANNOTATOR="${SCRIPT_PATH}/ltr_annotate.py"
-GFF3_WRITER="${SCRIPT_PATH}/ltr_tsv_to_gff3.py"
-[[ -f "$LTRHARVEST" ]] || die "Missing: $LTRHARVEST"
-[[ -f "$MASKLTR" ]] || die "Missing: $MASKLTR"
-[[ -f "$RECONCILER" ]] || die "Missing: $RECONCILER"
-[[ -f "$ANNOTATOR" ]] || die "Missing: $ANNOTATOR"
-[[ -f "$GFF3_WRITER" ]] || die "Missing: $GFF3_WRITER"
+DETECT=(    "$PY" -m ltrquest.detect    )
+MASK=(      "$PY" -m ltrquest.mask      )
+RECONCILE=( "$PY" -m ltrquest.reconcile )
+ANNOTATE=(  "$PY" -m ltrquest.annotate  )
+GFF3=(      "$PY" -m ltrquest.gff3      )
 
 # ----------------------------
 # Orchestrator vs. worker
 # ----------------------------
 # The top-level invocation orchestrates the (possibly iterated) FP-masking
 # re-runs, each isolated in its own staging dir. Every attempt re-execs this
-# script with _LTRHARVEST_WRAPPER2_WORKER=1 set, which skips orchestration and
+# script with _LTRQUEST_WORKER=1 set, which skips orchestration and
 # runs exactly one detection pipeline in the current (isolated) directory.
-if [[ -z "${_LTRHARVEST_WRAPPER2_WORKER:-}" ]]; then
+if [[ -z "${_LTRQUEST_WORKER:-}" ]]; then
   run_fp_orchestrator
   exit $?
 fi
@@ -1180,7 +1184,7 @@ for (( round=1; round<=MAX_ROUNDS; round++ )); do
     pass2_opts+=(
       --pass2-classified-fasta "$temp_lib"
       --require-run-chars "$req"
-      --exclude-run-char "$FAR_CHARACTER"   # Edit (4): always exclude V from round 2+
+      --exclude-run-char "$FAR_CHARACTER"   # rounds 2+ always exclude V
     )
   fi
 
@@ -1189,7 +1193,6 @@ for (( round=1; round<=MAX_ROUNDS; round++ )); do
     protein_opts+=( --proteins "$PROTEINS" )
   fi
 
-  # Edit (3): Build per-round extra args
   declare -a extra_round_args=()
   build_extra_args_for_round "$round" extra_round_args
 
@@ -1211,13 +1214,12 @@ for (( round=1; round<=MAX_ROUNDS; round++ )); do
     echo "  sdust filter:       ${SDUST_ARGS} (max-dust-frac ${MAX_DUST_FRAC})"
   fi
   if [[ "${#extra_round_args[@]}" -gt 0 ]]; then
-    echo "  extra ltrharvest5:  ${extra_round_args[*]}"
+    echo "  extra detect args:  ${extra_round_args[*]}"
   fi
 
-  # Edit (2): Run ltrharvest5.py, catching non-zero exit gracefully
   ltrharvest_exit=0
   set -x
-  python "$LTRHARVEST" \
+  "${DETECT[@]}" \
     --genome "$genome_in" \
     "${protein_opts[@]}" \
     --threads "$THREADS" \
@@ -1248,11 +1250,10 @@ for (( round=1; round<=MAX_ROUNDS; round++ )); do
     || ltrharvest_exit=$?
   set +x
 
-  # Edit (2): Graceful handling of early ltrharvest5.py failure
   if [[ "$ltrharvest_exit" -ne 0 ]]; then
     echo "" >&2
     echo "============================================================" >&2
-    echo "WARNING: ltrharvest5.py exited with code ${ltrharvest_exit} on round ${round}." >&2
+    echo "WARNING: ltrquest.detect exited with code ${ltrharvest_exit} on round ${round}." >&2
     echo "This typically means no LTR-RT candidates were found (e.g. Kmer2LTR" >&2
     echo "reported no usable data). Stopping gracefully after ${round} round(s)." >&2
     echo "============================================================" >&2
@@ -1306,7 +1307,7 @@ for (( round=1; round<=MAX_ROUNDS; round++ )); do
   fi
 
   set -x
-  python "$MASKLTR" \
+  "${MASK[@]}" \
     --features-fasta "$lib" \
     --genome "$orig_genome" \
     --feature-character "$next_feature_char" \
@@ -1351,7 +1352,7 @@ if (( ${#completed_round_prefixes[@]} > 0 )); then
   echo "============================================================"
   echo "Reconciling ${#completed_round_prefixes[@]} round(s) into depth-bucketed outputs..."
   set -x
-  python "$RECONCILER" \
+  "${RECONCILE[@]}" \
     --out-prefix "$OUT_PREFIX" \
     --tsv "${recon_tsv_args[@]}" \
     --fa  "${recon_fa_args[@]}" \

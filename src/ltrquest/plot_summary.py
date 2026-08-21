@@ -8,10 +8,10 @@ Takes genome FAI and the dedup results of the FAI to plot LTR-RT annotation feat
 (5) Chrom locations.
 
 # Plot.
-python ltrharvest_plot.py --species Slati --aln-suffix _ltr_kmer2ltr_dedup --outpdf Slati_ltr.pdf --bin 100 --k2p-xmax 0.1 --legend-page --timing --k2p-mode hist
-# Cluster, and and plot family-level. 
+python -m ltrquest.plot_summary --species Slati --aln-suffix _ltr_kmer2ltr_dedup --outpdf Slati_ltr.pdf --bin 100 --k2p-xmax 0.1 --legend-page --timing --k2p-mode hist
+# Cluster, and and plot family-level.
 mmseqs easy-cluster Slati_ltr.ltrharvest.full_length.dedup.fa.rexdb-plant.cls.lib.fa ltr_808080 tmp_mmseqs --min-seq-id 0.8 -c 0.8 --cov-mode 1 --cluster-reassign 1 --threads 32 --seq-id-mode 1  --cluster-mode 2
-python ltrharvest_plot.py --species Slati --aln-suffix _ltr_kmer2ltr_dedup --outpdf Slati_ltr.pdf --bin 100 --k2p-xmax 0.1 --legend-page --timing --k2p-mode hist --mmseqs-tsv Slati_ltr_808080_cluster.tsv
+python -m ltrquest.plot_summary --species Slati --aln-suffix _ltr_kmer2ltr_dedup --outpdf Slati_ltr.pdf --bin 100 --k2p-xmax 0.1 --legend-page --timing --k2p-mode hist --mmseqs-tsv Slati_ltr_808080_cluster.tsv
 
 LTR-RT multi-page PDF plots across species.
 
@@ -77,20 +77,19 @@ Assumptions:
 - Full-length LTR-RT length is (end - start) (NOT +1), per your example (100-200 => 100)
 """
 
+import argparse
+import math
 import os
 import re
-import math
-import argparse
 import sys
 import time
+from collections import OrderedDict, defaultdict
 from datetime import datetime
-from collections import defaultdict, OrderedDict
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.patches import Patch
-
 
 COL1_RE = re.compile(r"^(?P<chrom>[^:]+):(?P<start>\d+)-(?P<end>\d+)#(?P<typ>.+)$")
 
@@ -646,7 +645,6 @@ def compute_chrom_k2p_window_stats(records, chrom2len, window_bp=1_000_000, step
 
         nwin = int(math.floor((max(L - 1, 0)) / step_bp)) + 1
         w_starts = np.arange(0, nwin * step_bp, step_bp, dtype=np.int64)
-        w_ends = w_starts + window_bp
         centers_bp = w_starts + window_bp / 2.0
 
         s = np.zeros(nwin, dtype=np.float64)
@@ -1253,7 +1251,7 @@ def plot_k2p_panel(ax, sp_label, k2p_data, type_colors, y_max=None,
 
     ax.grid(True, alpha=0.2)
     ax.tick_params(labelsize=8)
-    
+
 def offaxis_note(records, x_max, min_fraction=0.02):
     """'12% off axis (>0.21)' when a locked x-axis crops a real slice of a family.
 
@@ -1957,7 +1955,7 @@ def main():
                             k2p_mode=args.k2p_mode,
                             type_counts=global_type_counts,
                         )
-                        
+
                         ax.set_xlabel("K2P divergence")
                         ax.set_ylabel("Density")
                         maybe_embed_legend(fig)

@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-hardmask_genome.py
-
-Hard-mask a genome FASTA based on feature coordinates in a TSV or a features FASTA.
+"""Hard-mask a genome FASTA based on feature coordinates in a TSV or a features FASTA.
 
 Behavior:
 - Coordinates come from either:
@@ -40,7 +37,7 @@ import argparse
 import gzip
 import re
 import sys
-from typing import Dict, List, Tuple, Iterator, Optional
+from typing import Dict, Iterator, List, Optional, Tuple
 
 COORD_RE = re.compile(r"^([^:]+):(\d+)-(\d+)(?:#.*)?$")
 
@@ -128,7 +125,7 @@ def parse_features_fasta_headers_only(features_fa: str) -> Dict[str, List[Tuple[
             end0 = e
             feats.setdefault(contig, []).append((start0, end0))
     return feats
-    
+
 
 def parse_features_fasta_with_overrides(features_fa: str) -> Tuple[
     Dict[str, List[Tuple[int, int]]],

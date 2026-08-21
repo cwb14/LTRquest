@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""
-ltrharvest_plot_struct.py
-
-Plot LTR-RT structure from the reconciler-era depth-bucketed outputs of
-ltrharvest_wrapper2.sh (ltrharvest5.py -> reconcile_nests.py). Protein domains
+"""Plot LTR-RT structure from the reconciler-era depth-bucketed outputs of
+ltrquest (ltrquest.detect -> ltrquest.reconcile). Protein domains
 and their genomic coordinates are embedded in the TSV's 'domains' column, so no
 separate GFF/SCN is needed; strand is inferred from the genomic order of domains.
 
 Usage:
   # From a depth TSV directly:
-  python ltrharvest_plot_struct.py --tsv Aare_depth0_ltr.tsv --out_dir plot_struct \
+  python -m ltrquest.plot_struct --tsv Aare_depth0_ltr.tsv --out_dir plot_struct \
       [--genome Aare_At4.fa] [--html]
 
   # Or by sample prefix (resolves <indir>/<prefix>_depth<depth>_ltr.tsv):
-  python ltrharvest_plot_struct.py --prefix Aare --depth 0 --out_dir plot_struct \
+  python -m ltrquest.plot_struct --prefix Aare --depth 0 --out_dir plot_struct \
       [--genome Aare_At4.fa] [--html]
 
 Inputs:
@@ -40,7 +37,7 @@ Key features:
 - Prints per-family summary stats + 95% CI to terminal.
 - Flags potential false positives: elements with outlier-long lengths that lack expected proteins.
 
-python synLTR/module2/ltrharvest_plot_struct.py --prefix Athal --depth all --genome Athal.fa --out_dir Ahal_plot --nesting both
+python ltrquest.plot_struct --prefix Athal --depth all --genome Athal.fa --out_dir Ahal_plot --nesting both
 """
 
 import argparse
@@ -49,19 +46,18 @@ import io
 import json
 import math
 import os
-import re
 import random
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
-from matplotlib.backends.backend_pdf import PdfPages
-
 
 # -----------------------------
 # Feature colors (edit freely)
@@ -428,7 +424,7 @@ def detect_false_positives(
             flagged.add(el.element_id)
         else:
             # Check how many expected proteins this element has
-            el_prots = set(p.name for p in el.proteins)
+            el_prots = {p.name for p in el.proteins}
             hits = sum(1 for ep in expected_proteins if ep in el_prots)
             total_distinct = len(el_prots)
 
@@ -744,7 +740,7 @@ def infer_strand_from_position(proteins: List[Feature], superfamily: str,
     rank = _canon_rank_for(superfamily)
     maxr = max(rank.values()) if rank else 0
     ranked = [p for p in proteins if p.name in rank]
-    names = set(p.name for p in ranked)
+    names = {p.name for p in ranked}
     if len(names) != 1 or maxr == 0:
         return "?"
     g = next(iter(names))
@@ -1105,7 +1101,7 @@ def compute_family_averages_with_ci(
 
     prot_presence: Dict[str, int] = {}
     for e in fam_elements:
-        present = set(p.name for p in e.collapsed_proteins)
+        present = {p.name for p in e.collapsed_proteins}
         for name in present:
             prot_presence[name] = prot_presence.get(name, 0) + 1
 
@@ -1162,7 +1158,7 @@ def print_family_summary(family_key: str, avg: FamilyAverages, flagged_ids: Set[
             for eid in sorted(flagged_ids):
                 print(f"     - {eid}")
         else:
-            print(f"  No potential false positives detected.")
+            print("  No potential false positives detected.")
 
 
 # -----------------------------
@@ -1231,11 +1227,11 @@ def plot_family_individual(family_key: str, fam_elements: List[Element], out_pat
     n = len(fam_elements)
     if nesting == "collapsed":
         max_len = max((e.collapsed_length for e in fam_elements), default=1)
-        prots_seen = sorted(set(p.name for e in fam_elements
-                                for p in e.collapsed_proteins))
+        prots_seen = sorted({p.name for e in fam_elements
+                                for p in e.collapsed_proteins})
     else:
         max_len = max((e.length for e in fam_elements), default=1)
-        prots_seen = sorted(set(p.name for e in fam_elements for p in e.proteins))
+        prots_seen = sorted({p.name for e in fam_elements for p in e.proteins})
 
     features_present = ["LTR"] + prots_seen
     has_flagged = any(e.element_id in flagged_ids for e in fam_elements)
@@ -2215,7 +2211,7 @@ def main():
         # Excluded proteins info
         present_counts = {}
         for e in fam_elements:
-            for p in set(pp.name for pp in e.proteins):
+            for p in {pp.name for pp in e.proteins}:
                 present_counts[p] = present_counts.get(p, 0) + 1
         excluded = []
         for p, c in sorted(present_counts.items(), key=lambda x: (-x[1], x[0])):
@@ -2257,7 +2253,8 @@ def main():
             for f in avg.features:
                 s = max(1, min(f.start_center, L))
                 e = max(1, min(f.end_center, L))
-                if e < s: s, e = e, s
+                if e < s:
+                    s, e = e, s
                 center_feats.append(Feature(f.name, s, e))
             draw_element(ax_avg, y=1.0, el_len=L, ltr_len=ltr,
                          proteins=sorted(center_feats, key=lambda x: x.start), height=0.55)
@@ -2282,7 +2279,7 @@ def main():
             # PDF expanded view; --nesting only affects the PDF filenames).
             n = len(fam_elements)
             max_len = max((e.length for e in fam_elements), default=1)
-            prots_seen = sorted(set(p.name for e in fam_elements for p in e.proteins))
+            prots_seen = sorted({p.name for e in fam_elements for p in e.proteins})
             multi_depth = len({e.depth for e in fam_elements}) > 1
             fig_h = max(3.0, 0.18 * n + 1.8)
             fig_ind, ax_ind = plt.subplots(figsize=(14, fig_h))
@@ -2348,7 +2345,8 @@ def main():
             for f in a.features:
                 s = max(1, min(f.start_center, L))
                 e = max(1, min(f.end_center, L))
-                if e < s: s, e = e, s
+                if e < s:
+                    s, e = e, s
                 feats.append(Feature(f.name, s, e))
             draw_element(ax_all, y=y, el_len=L, ltr_len=ltr,
                          proteins=sorted(feats, key=lambda x: x.start), label=fk, height=0.65)
@@ -2441,7 +2439,7 @@ def main():
                 for el in fam_els:
                     if el.element_id not in flagged_ids:
                         continue
-                    el_prots = sorted(set(p.name for p in el.proteins))
+                    el_prots = sorted({p.name for p in el.proteins})
                     k2p_str = f"{el.k2p:.4f}" if el.k2p is not None else "NA"
                     reasons = []
 
@@ -2509,12 +2507,12 @@ def main():
         print(f"[INFO] Filtered TSV written: {filtered_tsv_path} "
               f"(kept={n_kept}, removed={n_removed})")
 
-    print(f"\n[INFO] Done.")
+    print("\n[INFO] Done.")
     print(f"[INFO] Output directory: {args.out_dir}")
     print(f"[INFO] Average plots exclude proteins with presence < {args.min_presence:.2f} "
           f"and show 95% bootstrap CI whiskers.")
     if args.no_fp:
-        print(f"[INFO] False-positive detection: DISABLED (--no_fp)")
+        print("[INFO] False-positive detection: DISABLED (--no_fp)")
     else:
         print(f"[INFO] False-positive detection: IQR (N>=15) / MAD (N<15) + gap analysis, "
               f"iqr_mul={args.iqr_mul:.2f}, min_family_size={args.min_family_size}, "
@@ -2522,7 +2520,7 @@ def main():
               f"recovery_k2p={args.recovery_k2p:.0%}, "
               f"dubious_k2p={args.dubious_k2p:.0%}, min_ltr_aln={args.min_ltr_aln}")
         if args.skip_unknown_iqr:
-            print(f"[INFO] IQR skipped for 'unknown' clades (--skip_unknown_iqr)")
+            print("[INFO] IQR skipped for 'unknown' clades (--skip_unknown_iqr)")
         print(f"[INFO] Total potential false positives flagged: {total_flagged}")
     if args.html:
         print(f"[INFO] Master HTML: {os.path.join(args.out_dir, 'index.html')}")

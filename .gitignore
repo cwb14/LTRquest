@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Nextflow
+.nextflow/
+.nextflow.log*
+work/
+results*/
+null/
+
+# Pipeline outputs, if someone runs in-tree
+*_depth*_ltr.*
+*_depth*_clean_ltr.*
+*_all_depth_*.gff3
+*_plots/
+*_tools/
+*_FPstaging/
+*.work/

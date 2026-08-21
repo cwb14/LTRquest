@@ -1,41 +1,23 @@
 #!/usr/bin/env python3
-"""
-(1) Masks genes and non-LTR TEs.
-(2) Runs ltrharvest and ltr_finder and merges results.
-(3) Identify those with TSD, those with LTR-RT protein, and those with homology to those with either TSD or protein. 
-(4) Runs kmer2ltr on the short-list of candidates. 
-(5) Purges duplicate LTR-RTs based on kmer2ltr LTR divergence.
+"""One detection round: find full-length LTR-RTs in a single genome.
 
-# I could consider adding DeepTE or CREATE as an alternative to TEsorter although I need to check their speed and efficiency feasiblility. 
-# This script differs from 'ltrharvest3.py' in that it performs TSD searching before TEsorter, then feeds those TSD-containing LTR-RTs into TEsorter for detection durring 2-pass. thus improving annotation of unknown TEs. 
+    1. Mask genes and non-LTR TEs (miniprot protein alignment, optional TRF
+       tandem-repeat and sdust low-complexity gates).
+    2. Run LTRharvest and LTRfinder over overlapping chunks; merge and stitch
+       the two candidate sets.
+    3. Short-list candidates carrying a TSD, an LTR-RT protein domain, or
+       homology to a candidate that has either; classify with TEsorter2.
+    4. Measure 5'-LTR / 3'-LTR divergence with Kmer2LTR and date the insertion.
+    5. Purge duplicates and boundary-overextended calls.
 
-# The bash below runs this script:
-bash synLTR/module2/ltrharvest_wrapper.sh --genome burnin.fasta --proteins ../PrinTE/data/TAIR10.pep.fa.gz --threads 20 --out_prefix burnin_ltr
-# It runs in 5:17.57 minutes with 20 threads.
-python ../PrinTE/util/bedtools.py -pass_scn <( awk 'BEGIN{OFS="\t"} { sub(/#.*/, "", $1); print }' burnin_ltr_r1_kmer2ltr_dedup) -bed <(grep LTR  burnin.bed | grep -v _FRAG) -r 0.9
-   Overlapping entries: 4328 (4328 unique) = 4328/4468 = 0.96866 = true positives.
-   Entries unique to SCN/PASS file: 170 = 170/4468 = 0.038 = false positive.
-   Entries unique to BED file: 140 = 140/4468 = 0.03133 = false negative.
-grep LTR  burnin.bed | grep -v _FRAG | wc -l
-   4468
-   F1 = 0.966
+Writes ``{out_prefix}_ltr.{tsv,fa}`` and a ``{out_prefix}.work/`` directory that
+the reconcile step reads back. The ``ltrquest`` driver calls this once per round
+against a progressively masked genome; run it directly for a single pass.
 
-# Compare to LTR_retriever gold-standard.
-perl EDTA/EDTA_raw.pl --genome burnin.fasta --type ltr --threads 20
-# It runs in 20:28.15 minutes with 20 threads.
-python ../PrinTE/util/bedtools.py -pass_scn burnin.fasta.mod.EDTA.raw/LTR/burnin.fasta.mod.pass.list -bed <(grep LTR  burnin.bed | grep -v _FRAG) -r 0.9
-   Overlapping entries: 2085 (2085 unique) = 2085/4468 = 0.46665 = true positives.
-   Entries unique to SCN/PASS file: 0 = 0/4468 = 0.0 = false positive.
-   Entries unique to BED file: 2383 = 2383/4468 = 0.533348 = false negative.
-   F1 = 0.64
-
-# NOTES; It now resolves multiple layers of nesting in a single round. I was sometimes observing catching outer-nest LTR-RTs and missing the inner-nest. I modified to fix this, but it unearthers two areas of improvement. 
-(1) TEsorter classification: Nested TEs fed to TEsorter may be missclassified. Ie, a Tork nested in an Ogre may lead to the Ogre being misclassified as a Tork or mixture. Eg:
-    chr1:907045-918753#LTR/Copia/Bianca     340     330     32      17      15      0.096970        1616162 0.103837        1730621 0.104197        1736609 0   0.       INT|Reina@907840-908727;RH|Reina@909001-909432  nest-outer:chr1:909422-915750
-    chr1:909422-915750#LTR/Copia/Bianca     334     323     21      12      9       0.065015        1083591 0.068008        1133462 0.068221        1137014 0   0.       RH|Bianca@910002-910364;RT|Bianca@910695-911483;INT|Bianca@912348-912953;PROT|Bianca@913164-913376;GAG|Bianca@914136-914405     nest-inner:chr1:907045-918753
-Line 2 (inner) is nested in line 1 (outer). Line 2 inner looks like Bianca. Line 1 outer looks like Reina. They both get Bianca though since they were fed to TEsorter as a single unit. 
-
-(2) Nest unraveling archetectire: The script uses rounds to resolve complicated nesting, but if its now resolving nesting in a single round, it may be nice to reconcile the round approach with the ones that are detected with a single scan. 
+Helper tools (Kmer2LTR, TEsorter2, TRF-mod, sdust, minimap2, miniprot) are
+resolved from ``--tools-dir``, and fetched and built there on first use if
+absent. The published container pre-builds them, so it never reaches the
+network.
 """
 
 import argparse
@@ -47,12 +29,11 @@ import shutil
 import subprocess
 import sys
 import time
-from collections import defaultdict, Counter
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Set, Tuple, Iterable, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 # -----------------------------
 # utilities
@@ -595,7 +576,7 @@ def ltrfinder_w2_to_ltrharvest_scn(raw_text: str, out_scn_path: str):
             loc = toks[2]
             lens = toks[3]
             ltr_len = toks[4]
-            direction = toks[12]
+            # toks[12] is the strand; the boundary refiner recomputes it later.
             similarity = toks[15]
 
             mloc = re.match(r"^(\d+)\-(\d+)$", loc)
@@ -877,7 +858,7 @@ def merge_stitched_scns(stitched_scns: List[str], merged_out: str):
 
     if n_written == 0:
         Path(merged_out).touch()
-        
+
 def filter_scn_by_lengths(
     in_scn: str,
     out_scn: str,
@@ -1052,7 +1033,7 @@ def filter_scn_by_sdust(
     The fraction is taken over ACGT bases ONLY, which is what makes it a statement
     about the element itself rather than about its nested inners. Every other
     character in an extracted candidate is either a nested inner element (an IUPAC
-    round letter painted in by mask_ltr.py, so from round 2 on the inner arrives
+    round letter painted in by ltrquest.mask, so from round 2 on the inner arrives
     pre-masked in the genome this round was called on) or far-mask filler ('V').
     sdust maps every non-ACGT byte to 4 and treats it as a hard break -- such
     positions are never reported as masked -- so numerator and denominator agree:
@@ -1652,7 +1633,8 @@ def load_tebinsorter_domains_from_db(db_path: str, pipeline_py_path: str,
     Returns the same Dict[str, list] shape as load_tesorter_gff3_domains
     so dedup_kmer2ltr_tsv can keep using it without changes.
     """
-    import sqlite3, sys
+    import sqlite3
+
     import numpy as np
 
     result: Dict[str, list] = {}
@@ -1758,7 +1740,6 @@ def load_tebinsorter_domains_from_db(db_path: str, pipeline_py_path: str,
     best_idx = hmm2best(hits, config)
     filtered_idx = apply_filters(hits, best_idx)
 
-    remap = config.get("domain_remap", {})
     clade_parser = config.get("clade_parser", "rexdb")
 
     for i in filtered_idx:
@@ -1946,8 +1927,8 @@ def ensure_tools(tools_dir: Path) -> Tuple[str, str]:
                 mm2_bin = Path(sys_mm2)
             else:
                 raise RuntimeError(
-                    f"minimap2 build failed and no system minimap2 found on PATH.\n"
-                    f"Try: conda install -c bioconda minimap2"
+                    "minimap2 build failed and no system minimap2 found on PATH.\n"
+                    "Try: conda install -c bioconda minimap2"
                 )
 
     # ---- miniprot ----
@@ -1968,12 +1949,12 @@ def ensure_tools(tools_dir: Path) -> Tuple[str, str]:
                 mp_bin = Path(sys_mp)
             else:
                 raise RuntimeError(
-                    f"miniprot build failed and no system miniprot found on PATH.\n"
-                    f"Try: conda install -c bioconda miniprot"
+                    "miniprot build failed and no system miniprot found on PATH.\n"
+                    "Try: conda install -c bioconda miniprot"
                 )
 
     return str(mm2_bin), str(mp_bin)
-    
+
 # -----------------------------
 # Step 9: TEsorter
 # -----------------------------
@@ -2440,7 +2421,7 @@ def _rescue_weak_hmm_pass2_matches(
             out.write(f"{name}\tLTR\tunknown\tunknown\tnone\t?\tnone\n")
 
     return len(rescue)
-    
+
 def run_kmer2ltr(kmer2ltr_py: str, in_fa: str, out_prefix: str, outdir: Path,
                 threads: int, max_win_overdisp: float, min_retained_fraction: float,
                 domain_file: Optional[str] = None,
@@ -2489,7 +2470,7 @@ def run_kmer2ltr(kmer2ltr_py: str, in_fa: str, out_prefix: str, outdir: Path,
         raise RuntimeError(f"Kmer2LTR finished but did not create expected output: {main_out}")
 
     return str(main_out)
-    
+
 def _parse_interval_from_kmer2ltr_col1(col1: str) -> Optional[Tuple[str, int, int]]:
     left = col1.split("#", 1)[0]
     if ":" not in left:
@@ -3119,7 +3100,7 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
                     inside_genes, n_inside, n_total = _outer_domains_inside_inner(
                         outer_key, inner_s, inner_e)
 
-                    print(f"[dedup] NESTED_PAIR:")
+                    print("[dedup] NESTED_PAIR:")
                     print(f"  outer: {outer_key} | aln={outer_rec['aln']} "
                           f"p={float(outer_rec['p']):.6f} mbases={outer_mb:.1f} | "
                           f"TSD={outer_tsd}")
@@ -3173,7 +3154,7 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
                             deduped_nest.append(m)
                             break
 
-            # Prune stale partner references from nest_rels: nest-inner refs to deduped outer would be dangling pointers. 
+            # Prune stale partner references from nest_rels: nest-inner refs to deduped outer would be dangling pointers.
             surviving_keys = {_rec_key(survivors[i]) for i in deduped_nest}
             for rec_id in list(nest_rels.keys()):
                 nest_rels[rec_id] = [
@@ -3823,7 +3804,7 @@ def main():
     ap.add_argument("--seq-ident", type=float, default=0.60, help="Min identity (matches/aln_len) for masking hits")
     ap.add_argument("--aln-len", type=int, default=10, help="Min alignment length for masking hits")
     ap.add_argument("--qcov", type=float, default=0.01, help="Min query coverage for masking hits")
-    
+
     # chunking
     ap.add_argument("--size", type=int, default=5_000_000, help="Chunk size (bp)")
     ap.add_argument("--overlap", type=int, default=30_000, help="Chunk overlap (bp)")
@@ -3849,7 +3830,7 @@ def main():
                     help="Overlap threshold (fraction of shorter interval) for dedup (default: 0.80)")
     ap.add_argument("--wfa-align", action="store_true", dest="wfa_align",
                     help="Pass --wfa-align to Kmer2LTR: use WFA instead of mafft for pairwise LTR alignment (~30-50x faster)")
-    
+
     ap.add_argument(
         "--kmer2ltr-domains",
         dest="kmer2ltr_domains",
@@ -4045,7 +4026,7 @@ def main():
 
     ap.add_argument(
         "--ltrfinder-args",
-        default="-w 2 -C -D 15000 -d 100 -L 7000 -l 100 -p 20 -M 0.00 -S 0.0", 
+        default="-w 2 -C -D 15000 -d 100 -L 7000 -l 100 -p 20 -M 0.00 -S 0.0",
         help="Quoted string of args appended to ltr_finder (NOTE: -w 2 is required)"
     )
 
@@ -4087,7 +4068,7 @@ def main():
 
     kmer2ltr_py = ensure_kmer2ltr(tools_dir)
     trfmod_path = None
- 
+
     trf_args = None
     if args.use_trf:
         trfmod_path = ensure_trfmod(tools_dir)
@@ -4251,7 +4232,6 @@ def main():
     total = len(chunks)
     completed = 0
 
-    start = time.monotonic()
     last_update = 0.0
     update_interval = 1.0  # seconds
 
