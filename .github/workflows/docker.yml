@@ -1,0 +1,103 @@
+name: container
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/ltrquest
+
+jobs:
+  build:
+    name: build and smoke-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+
+      # Pull requests build but do not publish: a fork must not be able to push
+      # an image to the org's registry.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ltrquest:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The Dockerfile already asserts the toolchain during the build. This is
+      # the outside-in check: does the published entry point actually run a
+      # genome, from a clean working directory, with no network?
+      - name: Smoke-test the image
+        run: |
+          mkdir -p smoke && cd smoke
+          zcat ../tests/data/Athal_tair10_chr2.fa.gz \
+            | awk 'NR==1 { print ">chr_test"; next } NR <= 8334 { print }' \
+            > slice.fa
+          printf '>chr_test:1001-2000#LTR/Gypsy/Tekay\nACGT\n' > feats.fa
+
+          run() {
+            docker run --rm --network none \
+              -v "$PWD:/data" -w /data -u "$(id -u):$(id -g)" ltrquest:ci "$@"
+          }
+
+          run ltrquest --help > /dev/null
+          run ltrquest-detect --help > /dev/null
+
+          run ltrquest-mask \
+            --features-fasta feats.fa --genome slice.fa \
+            --feature-character N --far-character V --distance 15000 \
+            > masked.fa
+
+          # 1000 masked bases where the feature was, and the sequence is intact.
+          python3 - <<'EOF'
+          seq = "".join(l.strip() for l in open("masked.fa") if not l.startswith(">"))
+          assert seq[1000:2000] == "N" * 1000, "feature not masked"
+          assert len(seq) == len("".join(l.strip() for l in open("slice.fa") if not l.startswith(">")))
+          print("masking correct; image runs with --network none")
+          EOF
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # The `slow` tests drive GenomeTools, MMseqs2, HMMER and the rest of the
+      # external stack; they belong in the container, not on a CI runner.
+      # Everything else runs here, against synthetic fixtures and the real
+      # Arabidopsis chromosome that ships with the repo.
+      - name: Test
+        run: pytest -m "not slow" -q
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ruff
+        run: pip install "ruff>=0.5"
+
+      - name: ruff check
+        run: ruff check --output-format github .
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning src/ltrquest/scripts/*.sh
+
+  package:
+    name: pip install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # A wheel that imports is not the same as a wheel whose entry points work:
+      # the driver is a shell script shipped as package data, and a packaging
+      # mistake would leave it out without breaking the import.
+      - name: Build and install the wheel
+        run: |
+          pip install build
+          python -m build --wheel
+          pip install dist/*.whl
+
+      - name: Entry points resolve
+        run: |
+          for cmd in ltrquest ltrquest-plots ltrquest-detect ltrquest-mask \
+                     ltrquest-reconcile ltrquest-annotate ltrquest-gff3; do
+              command -v "$cmd" > /dev/null || { echo "missing: $cmd"; exit 1; }
+              "$cmd" --help > /dev/null || { echo "--help failed: $cmd"; exit 1; }
+              echo "ok: $cmd"
+          done
+
+  nextflow:
+    name: nextflow stub
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported, and whatever is current.
+        nxf: ["24.04.4", "latest-stable"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: nf-core/setup-nextflow@v2
+        with:
+          version: ${{ matrix.nxf }}
+
+      # Every process carries a `stub:` block, so the whole DAG -- the round
+      # chain, its termination gate, the pooled family stage and the per-genome
+      # split back out -- is exercised without a single external tool.
+      - name: Stub run
+        run: nextflow run . -profile test -stub-run --outdir results
+
+      - name: The expected outputs exist
+        run: |
+          test -s results/test_LTRs/test_LTRs_all_depth_LTR_cleaned.gff3
+          test -s results/test_LTRs/test_LTRs_depth0_clean_ltr.tsv
+          test -s results/families/test_all_ltr.consensus_id0.75_cluster.tsv
+          echo "outputs present"
+
+      - name: A single round stops after round 1
+        run: |
+          nextflow run . -profile test -stub-run --max_rounds 1 --outdir results_r1
+          test -s results_r1/test_LTRs/test_LTRs_all_depth_LTR_cleaned.gff3

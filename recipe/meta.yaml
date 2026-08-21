@@ -1,0 +1,105 @@
+{% set name = "ltrquest" %}
+{% set version = "1.0.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  url: https://github.com/cwb14/LTRquest/archive/refs/tags/v{{ version }}.tar.gz
+  # Replace with the sha256 of the release tarball before submitting:
+  #   curl -sL <url> | sha256sum
+  sha256: 0000000000000000000000000000000000000000000000000000000000000000
+
+build:
+  number: 0
+  noarch: python
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+  run_exports:
+    - {{ pin_subpackage(name, max_pin="x") }}
+  entry_points:
+    - ltrquest = ltrquest.cli:main
+    - ltrquest-plots = ltrquest.cli:plots
+    - ltrquest-detect = ltrquest.detect:main
+    - ltrquest-mask = ltrquest.mask:main
+    - ltrquest-reconcile = ltrquest.reconcile:main
+    - ltrquest-annotate = ltrquest.annotate:main
+    - ltrquest-gff3 = ltrquest.gff3:main
+
+requirements:
+  host:
+    - python >=3.9
+    - pip
+    - hatchling >=1.21
+  run:
+    - python >=3.9
+    # --- Python ---
+    - matplotlib-base >=3.5
+    - numpy >=1.21
+    # --- LTR detection ---
+    - genometools-genometools >=1.6.6
+    - ltr_finder >=1.07
+    - bedtools >=2.31
+    # --- clustering, alignment, classification ---
+    - mmseqs2
+    - mafft
+    - trimal
+    - hmmer >=3.4
+    - blast
+    - minimap2
+    - miniprot
+    # --- pulled in by the bundled Kmer2LTR / TEsorter2 helpers ---
+    - biopython
+    - networkx
+    - pyfaidx
+    - pyhmmer >=0.10
+    - pyfastx
+
+test:
+  imports:
+    - ltrquest
+    - ltrquest.detect
+    - ltrquest.mask
+    - ltrquest.reconcile
+    - ltrquest.annotate
+    - ltrquest.gff3
+  commands:
+    - ltrquest --help
+    - ltrquest-detect --help
+    - ltrquest-mask --help
+    - ltrquest-reconcile --help
+    - ltrquest-annotate --help
+    - ltrquest-gff3 --help
+    - ltrquest-plots --help
+    # The driver is a shell script shipped as package data; a packaging mistake
+    # would leave it out without breaking the imports above.
+    - test -f $PREFIX/lib/python*/site-packages/ltrquest/scripts/ltrquest.sh
+    - gt --version
+    - ltr_finder -h 2>&1 | head -n1
+
+about:
+  home: https://github.com/cwb14/LTRquest
+  license: GPL-3.0-or-later
+  license_family: GPL3
+  license_file: LICENSE
+  summary: Iterative detection of nested LTR retrotransposons
+  description: |
+    LTRquest finds full-length LTR retrotransposons, including elements nested
+    inside other elements. An element with another element inserted into it no
+    longer matches the LTR-internal-LTR structure a single-pass scanner looks
+    for, so both the insertion and its host are missed. LTRquest scans, masks
+    what it found, and scans again; each round exposes the next layer out. The
+    rounds are then reconciled into nesting-depth buckets and annotated with
+    family, strand, protein domains and insertion age.
+  dev_url: https://github.com/cwb14/LTRquest
+  doc_url: https://github.com/cwb14/LTRquest#readme
+
+extra:
+  recipe-maintainers:
+    - cwb14
+  notes: |
+    Two helper repositories -- Kmer2LTR (LTR divergence and family clustering)
+    and TEsorter2 (classification) -- are not on Bioconda. LTRquest fetches and
+    builds them into `--tools-dir` on first use, or reads a pre-built copy from
+    $LTRQUEST_TOOLS_DIR. The published container has both baked in, so a
+    container run never touches the network.
