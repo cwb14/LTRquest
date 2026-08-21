@@ -1,0 +1,9 @@
+name: ltrquest_plots
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - matplotlib-base
+  - numpy
+  - pysam

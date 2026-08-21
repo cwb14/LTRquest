@@ -1,0 +1,2 @@
+sample,genome,proteins
+test,../tests/data/Athal_tair10_chr2.fa.gz,../tests/data/Athal.pep.gz

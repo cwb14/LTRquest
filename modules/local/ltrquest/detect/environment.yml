@@ -1,0 +1,22 @@
+name: ltrquest_detect
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - genometools-genometools=1.6.6
+  - ltr_finder=1.07
+  - bedtools=2.31.1
+  - mmseqs2=16.747c6
+  - mafft=7.526
+  - trimal=1.5.1
+  - hmmer=3.4
+  - blast
+  - minimap2
+  - miniprot
+  - biopython
+  - numpy
+  - networkx
+  - pyfaidx
+  - pyhmmer>=0.10
+  - pyfastx

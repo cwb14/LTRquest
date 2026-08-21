@@ -1,0 +1,112 @@
+process LTRQUEST_DETECT {
+    tag "${meta.id}|r${round}"
+    label 'process_high'
+
+    conda "${moduleDir}/environment.yml"
+    container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
+        'oras://ghcr.io/cwb14/ltrquest:1.0.0-singularity' :
+        'ghcr.io/cwb14/ltrquest:1.0.0' }"
+
+    input:
+    tuple val(meta), path(genome), path(proteins), path(prior_libs, stageAs: 'prior/*'), val(round)
+
+    output:
+    tuple val(meta), val(round), path("${prefix}_ltr.tsv") , emit: tsv
+    tuple val(meta), val(round), path("${prefix}_ltr.fa")  , emit: fasta
+    tuple val(meta), val(round), path("${prefix}.work")    , emit: workdir
+    tuple val(meta), path("${prefix}.work/*.genic.gff")    , emit: genic, optional: true
+    path "versions.yml"                                    , emit: versions
+
+    when:
+    task.ext.when == null || task.ext.when
+
+    script:
+    def args = task.ext.args ?: ''
+    prefix   = task.ext.prefix ?: "${meta.id}_r${round}"
+
+    // Detection widens its search window each round, because a nested element's
+    // host spans more sequence than the element itself: masking round N-1's hits
+    // leaves a run of IUPAC characters that the round-N candidate has to cover.
+    def scn_max_ret = 150000 + (round - 1) * 15000
+    def scn_max_int = 140000 * round
+    def maxdistltr  = 15000  + (round - 1) * 15000
+    def ltrf_d      = 15000  + (round - 1) * 15000
+    def overlap     = 25000  + (round - 1) * 15000
+
+    // Round N paints its own same-round inners with IUPAC_SEQ[N-1]. From round 2
+    // on, a candidate must contain at least one earlier round's character (it is
+    // only interesting if something is nested in it) and must not contain 'V',
+    // which marks sequence too far from any element to be worth revisiting.
+    def iupac      = ['N', 'R', 'D', 'Y', 'S', 'W', 'K', 'M', 'B', 'H']
+    def round_char = iupac[round - 1]
+    def require    = round > 1 ? iupac[0..(round - 2)].join(',') : ''
+
+    def protein_opt = proteins ? "--proteins ${proteins}" : ''
+    def pass2_opt   = round > 1
+        ? "--pass2-classified-fasta pass2_lib.fa --require-run-chars ${require} --exclude-run-char V"
+        : ''
+    """
+    ${round > 1 ? """
+    # Pass-2 reference library: every prior round's elements, reduced to A/C/G/T
+    # so the IUPAC nest markers do not leak into the homology search.
+    cat prior/* \\
+      | awk '/^>/ {printf("\\n%s\\n",\$0);next;} {printf("%s",\$0);} END {printf("\\n");}' \\
+      | sed '/^>/! s/[^ATCGatcg]//g' > pass2_lib.fa
+    """ : ''}
+    ltrquest-detect \\
+        --genome ${genome} \\
+        ${protein_opt} \\
+        --threads ${task.cpus} \\
+        --out-prefix ${prefix} \\
+        --tools-dir \${LTRQUEST_TOOLS_DIR:-./tools} \\
+        --scn-min-ltr-len 10 \\
+        --scn-min-ret-len 80 \\
+        --scn-max-ret-len ${scn_max_ret} \\
+        --scn-min-int-len 0 \\
+        --scn-max-int-len ${scn_max_int} \\
+        --ltrharvest-args "-mindistltr 100 -minlenltr 100 -maxlenltr 7000 -mintsd 0 -maxtsd 0 -similar 70 -vic 60 -seed 15 -seqids yes -xdrop 10 -maxdistltr ${maxdistltr}" \\
+        --ltrfinder-args "-w 2 -C -D ${ltrf_d} -d 100 -L 7000 -l 100 -p 20 -M 0.00 -S 0.0" \\
+        --size 500000 \\
+        --overlap ${overlap} \\
+        --tesorter-use-ret \\
+        --tesorter-rule 70-75-80 \\
+        --tsd-pass2 \\
+        --nested-flank-min 10 \\
+        --nested-base-min 800 \\
+        --same-round-inner-char ${round_char} \\
+        ${pass2_opt} \\
+        ${args}
+
+    cat <<-END_VERSIONS > versions.yml
+    "${task.process}":
+        ltrquest: \$(python -c 'import ltrquest; print(ltrquest.__version__)')
+        genometools: \$(gt --version 2>&1 | head -n1 | sed 's/^gt (GenomeTools) //')
+        ltr_finder: \$(ltr_finder -h 2>&1 | grep -oE 'v[0-9.]+' | head -n1 | tr -d 'v')
+    END_VERSIONS
+    """
+
+    stub:
+    prefix = task.ext.prefix ?: "${meta.id}_r${round}"
+    // Two elements in round 1, one in round 2, none from round 3 on -- enough to
+    // exercise the terminate-count gate and the cross-round nesting path.
+    def n = round == 1 ? 2 : (round == 2 ? 1 : 0)
+    """
+    mkdir -p ${prefix}.work
+    touch ${prefix}.work/${prefix}.ltrtools.stitched.scn
+    printf '#name\\tLTR_len\\taln_len\\ttsd\\tdomains\\tnest_status\\n' > ${prefix}_ltr.tsv
+    : > ${prefix}_ltr.fa
+    for i in \$(seq 1 ${n}); do
+        s=\$(( ${round} * 1000 + i * 100 ))
+        e=\$(( s + 5000 ))
+        printf 'chr1:%s-%s#LTR/Gypsy/Tekay\\t500\\t480\\tTGCAA\\t.\\t.\\n' "\$s" "\$e" >> ${prefix}_ltr.tsv
+        printf '>chr1:%s-%s#LTR/Gypsy/Tekay\\nACGTACGTAC\\n' "\$s" "\$e" >> ${prefix}_ltr.fa
+    done
+
+    cat <<-END_VERSIONS > versions.yml
+    "${task.process}":
+        ltrquest: 1.0.0
+        genometools: 1.6.6
+        ltr_finder: 1.07
+    END_VERSIONS
+    """
+}

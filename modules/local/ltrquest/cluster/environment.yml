@@ -1,0 +1,11 @@
+name: ltrquest_cluster
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - mmseqs2=16.747c6
+  - mafft=7.526
+  - networkx
+  - pyfaidx
+  - numpy
