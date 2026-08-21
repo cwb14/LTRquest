@@ -1,25 +1,30 @@
-A pipeline that finds full-length **LTR retrotransposons (LTR-RTs)**, including
-elements nested inside other elements.
+# LTRquest output reference
+
+The full format of everything an LTRquest run writes. For what the tool is and
+how to install it, see the [README](../README.md); for the Nextflow pipeline,
+see [nextflow.md](nextflow.md).
 
 ---
 
 ## 1. Install
 
 ```bash
-mamba env create -f module2/ltrharvest_env.yml
-mamba activate ltrharvest4
+mamba env create -f environment.yml
+mamba activate ltrquest
+pip install .
 ```
 
 ## 2. Quick start (test data)
 
-Verify your installation using the test data.  It should finish in a few minutes.
+Verify your installation against the *Arabidopsis* chromosome that ships with
+the repo. It should finish in a few minutes.
 
 ```bash
 mkdir athal_test && cd athal_test
 
-bash ../module2/ltrharvest_wrapper2.sh \
-  --genome   ../test/Athal_tair10_chr2.fa.gz \
-  --proteins ../test/Athal.pep.gz \
+ltrquest \
+  --genome   ../tests/data/Athal_tair10_chr2.fa.gz \
+  --proteins ../tests/data/Athal.pep.gz \
   --threads  20 --max-rounds 1
 ```
 
@@ -125,9 +130,9 @@ Pass several genomes to give closely-related species **one family vocabulary**,
 which is what makes between-species family comparisons meaningful:
 
 ```bash
-bash ../module2/ltrharvest_wrapper2.sh \
-  --genome   ../test/Athal_tair10_chr2.fa.gz Alyrata_chr2.fa \
-  --proteins ../test/Athal.pep.gz \
+ltrquest \
+  --genome   ../tests/data/Athal_tair10_chr2.fa.gz Alyrata_chr2.fa \
+  --proteins ../tests/data/Athal.pep.gz \
   --threads  40
 ```
 
@@ -176,13 +181,13 @@ stage never ran):
 Each element is one block:
 
 ```
-chr  synLTR  LTR_retrotransposon   13031  17307  .  -  .  ID=…_LTRRT_00001;Name=chr:13031-17307;
+chr  LTRquest  LTR_retrotransposon   13031  17307  .  -  .  ID=…_LTRRT_00001;Name=chr:13031-17307;
                                                             classification=LTR/Gypsy/Tekay;superfamily=Gypsy;clade=Tekay;
                                                             family=…_fam00001;family_size=5;depth=0;
                                                             K2P_d=0.026305;K2P_T=438418;strand_source=tesorter
-chr  synLTR  long_terminal_repeat  13031  14048  .  -  .  ID=…_LTRRT_00001.lLTR;Parent=…_LTRRT_00001
-chr  synLTR  long_terminal_repeat  16290  17307  .  -  .  ID=…_LTRRT_00001.rLTR;Parent=…_LTRRT_00001
-chr  synLTR  protein_match         14482  14712  .  -  .  ID=…_LTRRT_00001.CHD.1;Parent=…;Name=CHD;clade=Tekay
+chr  LTRquest  long_terminal_repeat  13031  14048  .  -  .  ID=…_LTRRT_00001.lLTR;Parent=…_LTRRT_00001
+chr  LTRquest  long_terminal_repeat  16290  17307  .  -  .  ID=…_LTRRT_00001.rLTR;Parent=…_LTRRT_00001
+chr  LTRquest  protein_match         14482  14712  .  -  .  ID=…_LTRRT_00001.CHD.1;Parent=…;Name=CHD;clade=Tekay
 ###
 ```
 
@@ -212,5 +217,5 @@ scored at ≥90% reciprocal overlap:
 
 | Tool | Runtime | TP | FP | FN | F1 |
 |---|---|---|---|---|---|
-| **this pipeline** | **5:18** | 4,328 | 170 | 140 | **0.966** |
+| **LTRquest** | **5:18** | 4,328 | 170 | 140 | **0.966** |
 | EDTA raw LTR module (LTR_retriever) | 20:28 | 2,085 | 0 | 2,383 | 0.64 |

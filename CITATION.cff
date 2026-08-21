@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use LTRquest, please cite it as below."
+title: "LTRquest: iterative detection of nested LTR retrotransposons"
+abstract: >-
+  LTRquest finds full-length LTR retrotransposons, including elements nested
+  inside other elements, by scanning a genome, masking what it found, and
+  scanning again. Rounds are reconciled into nesting-depth buckets.
+type: software
+authors:
+  - family-names: Benson
+    given-names: Chris
+repository-code: "https://github.com/cwb14/LTRquest"
+license: GPL-3.0-or-later
+version: 1.0.0
+date-released: "2026-08-21"
+keywords:
+  - bioinformatics
+  - genomics
+  - transposable elements
+  - LTR retrotransposon
