@@ -34,15 +34,40 @@ On a simulated genome with 4,468 true intact elements (20 threads, scored at
 
 ## Install
 
-LTRquest orchestrates a stack of external tools (GenomeTools, LTR_finder,
-MMseqs2, HMMER, miniprot, …), so the container is the path of least resistance:
+LTRquest drives a stack of external tools (GenomeTools, LTR_finder, MMseqs2,
+HMMER, miniprot, …). You do not have to install any of them — the container has
+them all, and needs neither `sudo` nor a package manager.
+
+### Apptainer / Singularity — recommended
+
+The right choice on a shared cluster, where you cannot install Docker and do not
+have root. The whole tool is one file you own:
 
 ```bash
-docker pull ghcr.io/cwb14/ltrquest:1.0.0
+apptainer pull ltrquest.sif docker://ghcr.io/cwb14/ltrquest:1.0.1
 ```
 
-<details>
-<summary>conda / mamba</summary>
+That is the install. Put `apptainer exec ltrquest.sif` in front of any command:
+
+```bash
+apptainer exec ltrquest.sif ltrquest --help
+```
+
+Apptainer already mounts your working directory and already runs as you, so
+there are no paths to bind or permissions to set — commands look exactly as they
+would if the tool were installed natively.
+
+> **On a cluster** you may need `module load apptainer` (or `module load
+> singularity`) first. `singularity` works identically — just swap the command
+> name. If your home directory is small, send the download cache to scratch
+> before pulling:
+> ```bash
+> export APPTAINER_CACHEDIR=/your/scratch/.apptainer
+> ```
+
+### conda / mamba
+
+If you would rather have the tools on your `PATH` than in a container:
 
 ```bash
 mamba env create -f environment.yml
@@ -50,44 +75,108 @@ mamba activate ltrquest
 pip install .
 ```
 
-Or, once the Bioconda recipe lands:
+<details>
+<summary><b>Docker</b> — for your own machine, where you have root</summary>
 
 ```bash
-mamba create -n ltrquest -c conda-forge -c bioconda ltrquest
+docker pull ghcr.io/cwb14/ltrquest:1.0.1
+```
+
+Docker has to be told which directory to work in and which user to be, so its
+commands are longer than the Apptainer equivalents:
+
+```bash
+docker run --rm -v "$PWD:/data" -w /data -u "$(id -u):$(id -g)" \
+  ghcr.io/cwb14/ltrquest:1.0.1 ltrquest --help
 ```
 </details>
 
 <details>
-<summary>pip (Python parts only)</summary>
+<summary><b>pip</b> — Python parts only, external tools not included</summary>
 
 ```bash
 pip install ltrquest
 ```
 
-This gives you the `ltrquest` driver and every stage, but you must supply the
-external binaries yourself — see [`environment.yml`](environment.yml) for the
-list. Kmer2LTR, TEsorter2, TRF-mod and sdust are fetched and built into
-`--tools-dir` on first use; the container pre-builds them and never reaches the
-network.
+You then have to supply the external binaries yourself; see
+[`environment.yml`](environment.yml) for the list. Kmer2LTR, TEsorter2, TRF-mod
+and sdust are fetched and built into `--tools-dir` on first use. The container
+pre-builds all four and never reaches the network.
 </details>
 
-## Quickstart
+### One command, whichever route you took
 
-The repo ships a real chromosome (*Arabidopsis thaliana* chr2) to check the
-install. One round, a few minutes:
+Every example below is written as plain `ltrquest …`. If you installed with
+conda or pip, that already works. If you are using a container, either put
+`apptainer exec ltrquest.sif` in front, or set this once and forget it:
 
 ```bash
-mkdir athal && cd athal
-
-ltrquest \
-  --genome   ../tests/data/Athal_tair10_chr2.fa.gz \
-  --proteins ../tests/data/Athal.pep.gz \
-  --threads  20 \
-  --max-rounds 1
+alias ltrquest='apptainer exec /full/path/to/ltrquest.sif ltrquest'
 ```
 
-Drop `--max-rounds 1` for the full nested search. `--proteins` accepts a protein
-FASTA from *any* related species — it does not have to match the genome.
+## Try it on real data
+
+LTRquest ships a real chromosome — *Arabidopsis thaliana* chr2, 19.7 Mb — so you
+can see it work on something real before pointing it at your own genome.
+
+Copy-paste the whole block. It takes a few minutes on 20 cores:
+
+```bash
+mkdir ltrquest-demo && cd ltrquest-demo
+
+# the tool
+apptainer pull ltrquest.sif docker://ghcr.io/cwb14/ltrquest:1.0.1
+
+# the data: one chromosome, and a protein set to guide the search
+curl -sLO https://github.com/cwb14/LTRquest/raw/main/tests/data/Athal_tair10_chr2.fa.gz
+curl -sLO https://github.com/cwb14/LTRquest/raw/main/tests/data/Athal.pep.gz
+
+# go
+apptainer exec ltrquest.sif ltrquest \
+  --genome Athal_tair10_chr2.fa.gz --proteins Athal.pep.gz --threads 20 --max-rounds 1
+```
+
+<details>
+<summary>The same run, if you installed another way</summary>
+
+**conda / mamba, or pip:**
+
+```bash
+ltrquest --genome Athal_tair10_chr2.fa.gz --proteins Athal.pep.gz --threads 20 --max-rounds 1
+```
+
+**Docker:**
+
+```bash
+docker run --rm -v "$PWD:/data" -w /data -u "$(id -u):$(id -g)" \
+  ghcr.io/cwb14/ltrquest:1.0.1 \
+  ltrquest --genome Athal_tair10_chr2.fa.gz --proteins Athal.pep.gz --threads 20 --max-rounds 1
+```
+
+Already cloned the repo? The same files are in `tests/data/`.
+</details>
+
+When it finishes, open **`*_plots/*_TEGV.html`** in a web browser: a genome
+browser of everything it found, in one self-contained file you can email to a
+collaborator.
+
+### Your own genome
+
+Three flags cover almost every run:
+
+```bash
+ltrquest --genome your_genome.fa --proteins any_related_species.pep.fa --threads 20
+```
+
+| | |
+|---|---|
+| `--genome` | Your genome, `.fa` or `.fa.gz`. **The only required flag.** |
+| `--proteins` | Optional but recommended. Can come from **any related species** — it does not have to match your genome. |
+| `--threads` | How many cores to use. Default 20 — set it to what your machine actually has. |
+
+Dropping `--max-rounds 1` is what turns on the nested search: LTRquest keeps
+going until a round stops finding anything new. Everything else has a sensible
+default — `ltrquest --help` lists them.
 
 ## A worked example
 
@@ -139,17 +228,27 @@ Every flag: `ltrquest --help`.
 
 ## Nextflow
 
-The round loop is also a Nextflow DSL2 pipeline, laid out to nf-core
-conventions, for running many genomes in parallel on HPC or in the cloud:
+Have more than a couple of genomes? The round loop is also a Nextflow DSL2
+pipeline, laid out to nf-core conventions, which runs them in parallel and
+picks up where it left off if a node dies. Nextflow fetches the container for
+you — there is nothing to install but Nextflow itself:
 
 ```bash
-nextflow run cwb14/LTRquest -profile test,docker --outdir results
-nextflow run cwb14/LTRquest -profile docker --input samplesheet.csv --outdir results
-nextflow run cwb14/LTRquest -profile awsbatch --input s3://bucket/samplesheet.csv --outdir s3://bucket/results
+nextflow run cwb14/LTRquest -profile singularity --input samplesheet.csv --outdir results
 ```
 
-See **[docs/nextflow.md](docs/nextflow.md)** for the samplesheet format, the
-profiles, and what the pipeline does and does not port from the CLI driver.
+The samplesheet is three columns:
+
+```csv
+sample,genome,proteins
+athaliana,genomes/Athal.fa.gz,proteins/Athal.pep.gz
+alyrata,genomes/Alyrata.fa.gz,proteins/Athal.pep.gz
+```
+
+Swap `-profile singularity` for `docker`, `conda`, or `awsbatch` to run the same
+pipeline on your laptop or on AWS. See **[docs/nextflow.md](docs/nextflow.md)**
+for the profiles, the samplesheet rules, and the one place the pipeline
+deliberately differs from the CLI.
 
 ## How it fits together
 
@@ -166,8 +265,9 @@ ltrquest (driver)
   └── ltrquest-plots                      structure PDFs, summary PDF, TEGV browser
 ```
 
-Every stage is a module with its own `--help` and can be re-run on its own
-(`python -m ltrquest.reconcile --help`).
+Every stage is also its own command, so any of them can be re-run alone without
+redoing the rest — `ltrquest-reconcile --help`, `ltrquest-gff3 --help`, and so
+on.
 
 ## Citing
 

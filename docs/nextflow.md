@@ -4,10 +4,20 @@ The CLI (`ltrquest`) handles one machine and a handful of genomes. The Nextflow
 pipeline exists for the case the CLI is bad at: many genomes, a scheduler, and a
 run long enough that you want `-resume` when a node dies.
 
+Nextflow fetches the container itself, so the only thing you install is
+Nextflow:
+
 ```bash
-nextflow run cwb14/LTRquest -profile test,docker --outdir results          # 30 s, no tools needed
-nextflow run cwb14/LTRquest -profile docker --input sheet.csv --outdir results
+# 30 seconds, no bioinformatics tools needed -- checks the wiring
+nextflow run cwb14/LTRquest -profile test,singularity --outdir results
+
+# the real thing
+nextflow run cwb14/LTRquest -profile singularity --input sheet.csv --outdir results
 ```
+
+On a cluster, `module load apptainer` (or `singularity`) first. `-profile
+singularity` drives Apptainer too -- Nextflow treats them as the same engine --
+and there is a separate `-profile apptainer` if you would rather be explicit.
 
 ## Samplesheet
 
@@ -41,7 +51,8 @@ directory, so a sheet and its data stay portable as a unit. Absolute paths and
 
 | Profile | |
 |---|---|
-| `docker` / `singularity` / `apptainer` | The published image. Everything is baked in; runs offline. |
+| `singularity` / `apptainer` | The published image, no root needed. The usual choice on a shared cluster. Everything is baked in; runs offline. |
+| `docker` | The same image, on a machine where you have root. |
 | `conda` | Builds the per-module environments. Kmer2LTR and TEsorter2 are not on Bioconda, so this path still fetches them on first use. |
 | `test` | Minimal wiring check. Pair with `-stub-run` and it needs no tools at all. |
 | `test_full` | The real *Arabidopsis* chr2 that ships with the repo, all rounds. |
@@ -62,6 +73,10 @@ process {
 ```bash
 nextflow run cwb14/LTRquest -c site.config -profile singularity --input sheet.csv --outdir results
 ```
+
+Nextflow caches the image once and reuses it for every task and every later run;
+set `NXF_SINGULARITY_CACHEDIR` to somewhere with room if your home directory is
+small.
 
 ## AWS Batch
 

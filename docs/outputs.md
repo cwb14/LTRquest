@@ -8,11 +8,22 @@ see [nextflow.md](nextflow.md).
 
 ## 1. Install
 
+The container needs no root and no dependencies:
+
+```bash
+apptainer pull ltrquest.sif docker://ghcr.io/cwb14/ltrquest:1.0.1
+```
+
+Then prefix any command below with `apptainer exec ltrquest.sif`. Or install the
+tools onto your `PATH` instead:
+
 ```bash
 mamba env create -f environment.yml
 mamba activate ltrquest
 pip install .
 ```
+
+See the [README](../README.md#install) for Docker and pip.
 
 ## 2. Quick start (test data)
 
