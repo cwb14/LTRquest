@@ -22,31 +22,37 @@ process LTRQUEST_DETECT {
 
     script:
     def args = task.ext.args ?: ''
-    prefix   = task.ext.prefix ?: "${meta.id}_r${round}"
+    // The round index is copied into a local before `prefix` is assigned.
+    // `prefix` must be an undeclared assignment so the output block can see it,
+    // and in Nextflow 24.x an undeclared assignment that interpolates an INPUT
+    // variable re-declares that input in the process scope -- after which every
+    // later reference to it fails to compile with "already defined".
+    def round_n = round as int
+    prefix   = task.ext.prefix ?: "${meta.id}_r${round_n}"
 
     // Detection widens its search window each round, because a nested element's
     // host spans more sequence than the element itself: masking round N-1's hits
     // leaves a run of IUPAC characters that the round-N candidate has to cover.
-    def scn_max_ret = 150000 + (round - 1) * 15000
-    def scn_max_int = 140000 * round
-    def maxdistltr  = 15000  + (round - 1) * 15000
-    def ltrf_d      = 15000  + (round - 1) * 15000
-    def overlap     = 25000  + (round - 1) * 15000
+    def scn_max_ret = 150000 + (round_n - 1) * 15000
+    def scn_max_int = 140000 * round_n
+    def maxdistltr  = 15000  + (round_n - 1) * 15000
+    def ltrf_d      = 15000  + (round_n - 1) * 15000
+    def overlap     = 25000  + (round_n - 1) * 15000
 
     // Round N paints its own same-round inners with IUPAC_SEQ[N-1]. From round 2
     // on, a candidate must contain at least one earlier round's character (it is
     // only interesting if something is nested in it) and must not contain 'V',
     // which marks sequence too far from any element to be worth revisiting.
     def iupac      = ['N', 'R', 'D', 'Y', 'S', 'W', 'K', 'M', 'B', 'H']
-    def round_char = iupac[round - 1]
-    def require    = round > 1 ? iupac[0..(round - 2)].join(',') : ''
+    def round_char = iupac[round_n - 1]
+    def require    = round_n > 1 ? iupac[0..(round_n - 2)].join(',') : ''
 
     def protein_opt = proteins ? "--proteins ${proteins}" : ''
-    def pass2_opt   = round > 1
+    def pass2_opt   = round_n > 1
         ? "--pass2-classified-fasta pass2_lib.fa --require-run-chars ${require} --exclude-run-char V"
         : ''
     """
-    ${round > 1 ? """
+    ${round_n > 1 ? """
     # Pass-2 reference library: every prior round's elements, reduced to A/C/G/T
     # so the IUPAC nest markers do not leak into the homology search.
     cat prior/* \\
@@ -86,17 +92,18 @@ process LTRQUEST_DETECT {
     """
 
     stub:
-    prefix = task.ext.prefix ?: "${meta.id}_r${round}"
+    def round_n = round as int
+    prefix = task.ext.prefix ?: "${meta.id}_r${round_n}"
     // Two elements in round 1, one in round 2, none from round 3 on -- enough to
     // exercise the terminate-count gate and the cross-round nesting path.
-    def n = round == 1 ? 2 : (round == 2 ? 1 : 0)
+    def n = round_n == 1 ? 2 : (round_n == 2 ? 1 : 0)
     """
     mkdir -p ${prefix}.work
     touch ${prefix}.work/${prefix}.ltrtools.stitched.scn
     printf '#name\\tLTR_len\\taln_len\\ttsd\\tdomains\\tnest_status\\n' > ${prefix}_ltr.tsv
     : > ${prefix}_ltr.fa
     for i in \$(seq 1 ${n}); do
-        s=\$(( ${round} * 1000 + i * 100 ))
+        s=\$(( ${round_n} * 1000 + i * 100 ))
         e=\$(( s + 5000 ))
         printf 'chr1:%s-%s#LTR/Gypsy/Tekay\\t500\\t480\\tTGCAA\\t.\\t.\\n' "\$s" "\$e" >> ${prefix}_ltr.tsv
         printf '>chr1:%s-%s#LTR/Gypsy/Tekay\\nACGTACGTAC\\n' "\$s" "\$e" >> ${prefix}_ltr.fa
