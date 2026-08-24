@@ -77,6 +77,18 @@ jobs:
           run ltrquest --help > /dev/null
           run ltrquest-detect --help > /dev/null
 
+          # The detector resolves its helper binaries before it does any work.
+          # `--help` never reaches that code, so a v1.0.0 image shipped unable to
+          # run a genome at all: ensure_tools tried to `git clone` minimap2, and
+          # the runtime image has no git on purpose. Assert resolution here --
+          # offline, in the published layout -- so that cannot recur.
+          run python -c "
+          from pathlib import Path
+          from ltrquest.detect import ensure_tools
+          mm2, mp = ensure_tools(Path('/opt/ltrquest/tools'))
+          print('minimap2:', mm2); print('miniprot:', mp)
+          "
+
           run ltrquest-mask \
             --features-fasta feats.fa --genome slice.fa \
             --feature-character N --far-character V --distance 15000 \

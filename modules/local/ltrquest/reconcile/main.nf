@@ -3,9 +3,10 @@ process LTRQUEST_RECONCILE {
     label 'process_medium'
 
     conda "${moduleDir}/environment.yml"
-    container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
-        'oras://ghcr.io/cwb14/ltrquest:1.0.0-singularity' :
-        'ghcr.io/cwb14/ltrquest:1.0.0' }"
+    // One image for every engine. Singularity and Apptainer convert an OCI
+    // image on the fly, so the nf-core habit of pointing them at a separate
+    // `oras://…-singularity` artifact only helps if you actually publish one.
+    container 'ghcr.io/cwb14/ltrquest:1.0.1'
 
     input:
     tuple val(meta), path(tsvs, stageAs: 'round_*/*'), path(fastas, stageAs: 'round_*/*'), path(scns, stageAs: 'round_*/*')
@@ -50,7 +51,7 @@ process LTRQUEST_RECONCILE {
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
-        ltrquest: 1.0.0
+        ltrquest: 1.0.1
     END_VERSIONS
     """
 }

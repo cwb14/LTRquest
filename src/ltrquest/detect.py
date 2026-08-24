@@ -1901,59 +1901,55 @@ def tool_usable_miniprot(bin_path: Path) -> bool:
 def tool_usable_minimap2(bin_path: Path) -> bool:
     return tool_usable_generic(bin_path, ["--help"])
 
+def _resolve_helper(name: str, tools_dir: Path, url: str, usable) -> Path:
+    """Find a working `name`, in the cheapest order that can succeed.
+
+    1. A previous build in --tools-dir. The container pre-populates this.
+    2. The copy on PATH. conda/mamba installs put minimap2 and miniprot there,
+       and an already-packaged binary beats compiling an unpinned copy of HEAD.
+    3. Only then: clone and build.
+
+    Checking PATH before cloning is what lets the container run offline and with
+    no compiler, and spares every conda user a source build of a tool they have
+    already installed.
+    """
+    local = tools_dir / name / name
+    if usable(local):
+        return local
+
+    on_path = shutil.which(name)
+    if on_path and usable(Path(on_path)):
+        return Path(on_path)
+
+    src = tools_dir / name
+    if not src.exists():
+        if shutil.which("git") is None:
+            raise RuntimeError(
+                f"{name} is not on PATH and cannot be built here: git is not installed.\n"
+                f"Install it with conda (conda install -c bioconda {name}), or point\n"
+                f"--tools-dir at a directory that already contains {name}/{name}."
+            )
+        mkdirp(tools_dir)
+        run(["git", "clone", url, str(src)], check=True)
+
+    for make_cmd in (["make"], ["make", "CC=gcc"]):
+        r = run(make_cmd, cwd=str(src))
+        if r.returncode == 0 and usable(local):
+            return local
+
+    raise RuntimeError(
+        f"{name} build failed and no usable {name} was found on PATH.\n"
+        f"Try: conda install -c bioconda {name}"
+    )
+
+
 def ensure_tools(tools_dir: Path) -> Tuple[str, str]:
     tools_dir = mkdirp(tools_dir)
-    mm2_dir = tools_dir / "minimap2"
-    mp_dir  = tools_dir / "miniprot"
-
-    mm2_bin = mm2_dir / "minimap2"
-    mp_bin  = mp_dir  / "miniprot"
-
-    # ---- minimap2 ----
-    if not tool_usable_minimap2(mm2_bin):
-        if not mm2_dir.exists():
-            run(["git", "clone", "https://github.com/lh3/minimap2", str(mm2_dir)], check=True)
-
-        built = False
-        for make_cmd in (["make"], ["make", "CC=gcc"]):
-            r = run(make_cmd, cwd=str(mm2_dir))
-            if r.returncode == 0 and tool_usable_minimap2(mm2_bin):
-                built = True
-                break
-
-        if not built:
-            sys_mm2 = shutil.which("minimap2")
-            if sys_mm2 and tool_usable_minimap2(Path(sys_mm2)):
-                mm2_bin = Path(sys_mm2)
-            else:
-                raise RuntimeError(
-                    "minimap2 build failed and no system minimap2 found on PATH.\n"
-                    "Try: conda install -c bioconda minimap2"
-                )
-
-    # ---- miniprot ----
-    if not tool_usable_miniprot(mp_bin):
-        if not mp_dir.exists():
-            run(["git", "clone", "https://github.com/lh3/miniprot", str(mp_dir)], check=True)
-
-        built = False
-        for make_cmd in (["make"], ["make", "CC=gcc"]):
-            r = run(make_cmd, cwd=str(mp_dir))
-            if r.returncode == 0 and tool_usable_miniprot(mp_bin):
-                built = True
-                break
-
-        if not built:
-            sys_mp = shutil.which("miniprot")
-            if sys_mp and tool_usable_miniprot(Path(sys_mp)):
-                mp_bin = Path(sys_mp)
-            else:
-                raise RuntimeError(
-                    "miniprot build failed and no system miniprot found on PATH.\n"
-                    "Try: conda install -c bioconda miniprot"
-                )
-
-    return str(mm2_bin), str(mp_bin)
+    mm2 = _resolve_helper("minimap2", tools_dir,
+                          "https://github.com/lh3/minimap2", tool_usable_minimap2)
+    mp = _resolve_helper("miniprot", tools_dir,
+                         "https://github.com/lh3/miniprot", tool_usable_miniprot)
+    return str(mm2), str(mp)
 
 # -----------------------------
 # Step 9: TEsorter

@@ -11,8 +11,8 @@ authors:
     given-names: Chris
 repository-code: "https://github.com/cwb14/LTRquest"
 license: GPL-3.0-or-later
-version: 1.0.0
-date-released: "2026-08-21"
+version: 1.0.1
+date-released: "2026-08-24"
 keywords:
   - bioinformatics
   - genomics

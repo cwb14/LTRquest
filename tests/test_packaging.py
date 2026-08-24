@@ -138,3 +138,46 @@ class TestVersion:
         declared = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
         assert declared, "no version in pyproject.toml"
         assert declared.group(1) == ltrquest.__version__
+
+    @pytest.mark.skipif(not (REPO_ROOT / "nextflow.config").is_file(),
+                        reason="not running from a source checkout")
+    def test_nextflow_manifest_version_matches(self):
+        text = (REPO_ROOT / "nextflow.config").read_text()
+        declared = re.search(r"^\s*version\s*=\s*'([^']+)'", text, re.MULTILINE)
+        assert declared, "no version in the nextflow manifest"
+        assert declared.group(1) == ltrquest.__version__
+
+    @pytest.mark.skipif(not (REPO_ROOT / "modules").is_dir(),
+                        reason="not running from a source checkout")
+    def test_every_module_pins_the_current_image(self):
+        # The version lives in a lot of files. A stale container tag is the
+        # expensive kind of drift: the pipeline runs, against the wrong build.
+        modules = sorted((REPO_ROOT / "modules").rglob("main.nf"))
+        assert modules, "no Nextflow modules found"
+        for module in modules:
+            tags = re.findall(r"ghcr\.io/cwb14/ltrquest:([^'\" ]+)", module.read_text())
+            assert tags, f"{module.name} declares no container"
+            for tag in tags:
+                assert tag == ltrquest.__version__, (
+                    f"{module.parent.name} pins ltrquest:{tag}, "
+                    f"but this is {ltrquest.__version__}"
+                )
+
+    @pytest.mark.skipif(not (REPO_ROOT / "modules").is_dir(),
+                        reason="not running from a source checkout")
+    def test_no_module_references_an_unpublished_oras_artifact(self):
+        # v1.0.0 shipped pointing -profile singularity at an
+        # `oras://…-singularity` image that the release workflow never built,
+        # so every singularity run failed to pull.
+        for module in sorted((REPO_ROOT / "modules").rglob("main.nf")):
+            # Directives only -- the comment above `container` explains why the
+            # ORAS form is not used, and is allowed to name it.
+            code = [
+                line for line in module.read_text().splitlines()
+                if not line.lstrip().startswith("//")
+            ]
+            offenders = [line.strip() for line in code if "oras://" in line]
+            assert not offenders, (
+                f"{module.parent.name} references an ORAS artifact "
+                f"({offenders[0]}); the release workflow does not publish one"
+            )

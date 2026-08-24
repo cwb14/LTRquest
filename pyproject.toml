@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ltrquest"
-version = "1.0.0"
+version = "1.0.1"
 description = "Iterative detection of nested LTR retrotransposons"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }

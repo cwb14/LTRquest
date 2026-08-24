@@ -7,7 +7,7 @@ which no amount of unit testing can replace.
 
 Run it against the container, where the whole toolchain is present::
 
-    docker run --rm -v "$PWD:/w" -w /w ghcr.io/cwb14/ltrquest:1.0.0 \\
+    docker run --rm -v "$PWD:/w" -w /w ghcr.io/cwb14/ltrquest:1.0.1 \\
         pytest -m slow tests/test_end_to_end.py
 
 or against a conda environment built from environment.yml::

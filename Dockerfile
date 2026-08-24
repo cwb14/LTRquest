@@ -8,8 +8,8 @@
 # they are cloned at pinned commits during the build, and LTRQUEST_TOOLS_DIR
 # points every run at the result, so a container never reaches the network.
 #
-#   docker build -t ltrquest:1.0.0 .
-#   docker run --rm -v "$PWD:/data" -w /data ltrquest:1.0.0 \
+#   docker build -t ltrquest:1.0.1 .
+#   docker run --rm -v "$PWD:/data" -w /data ltrquest:1.0.1 \
 #       ltrquest --genome genome.fa --proteins prot.fa --threads 8
 
 # ---------------------------------------------------------------- build stage
@@ -48,7 +48,7 @@ LABEL org.opencontainers.image.title="LTRquest" \
       org.opencontainers.image.description="Iterative detection of nested LTR retrotransposons" \
       org.opencontainers.image.source="https://github.com/cwb14/LTRquest" \
       org.opencontainers.image.licenses="GPL-3.0-or-later" \
-      org.opencontainers.image.version="1.0.0"
+      org.opencontainers.image.version="1.0.1"
 
 USER root
 # procps: Nextflow's task tracer needs `ps`. awscli: AWS Batch stages S3 inputs
