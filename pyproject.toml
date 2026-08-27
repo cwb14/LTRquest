@@ -60,6 +60,7 @@ packages = ["src/ltrquest"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
+    "/bin",
     "/tests",
     "/docs",
     "/main.nf",

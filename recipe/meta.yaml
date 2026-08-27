@@ -48,6 +48,11 @@ requirements:
     - blast
     - minimap2
     - miniprot
+    # Resolved from PATH before any source build is attempted. TRF-mod, which
+    # runs by default, has no conda package yet and is still compiled on first
+    # use -- so a conda install also wants git, make and a compiler present, or
+    # `--no-trf`.
+    - sdust
     # --- pulled in by the bundled Kmer2LTR / TEsorter2 helpers ---
     - biopython
     - networkx

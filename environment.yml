@@ -18,6 +18,18 @@ dependencies:
   - blast                           # blastn/makeblastdb (flag_fp_families; TEsorter2 blast pass-2)
   - minimap2                        # TEsorter2 minimap2 pass-2 (PATH lookup); fallback for tools build
   - miniprot                        # protein mapping; fallback if source build fails
+  - sdust                           # --run-sdust; found on PATH, so never built
+  # --- building the helpers that nobody packages ---
+  # Kmer2LTR and TEsorter2 are cloned on first use; TRF-mod is cloned *and*
+  # compiled, and it runs by default (--no-trf turns it off). Without these four
+  # the first real run dies on `git: not found` or `cc: not found` -- invisible
+  # on a workstation that already has build tools, fatal on a clean cluster.
+  # TRF-mod's makefile hardcodes CC=gcc, so LTRquest retries the build with
+  # CC=$CC, the compiler this environment installs.
+  - git
+  - make
+  - c-compiler                      # provides $CC; TRF-mod and sdust are C
+  - zlib                            # -lz, if sdust ever has to be built here
   # --- python libraries ---
   - biopython
   - numpy

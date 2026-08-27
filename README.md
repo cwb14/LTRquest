@@ -41,21 +41,21 @@ them all, and needs neither `sudo` nor a package manager.
 ### Apptainer / Singularity — recommended
 
 The right choice on a shared cluster, where you cannot install Docker and do not
-have root. The whole tool is one file you own:
+have root. The whole tool is one file you own, and you run that file:
 
 ```bash
 apptainer pull ltrquest.sif docker://ghcr.io/cwb14/ltrquest:1.0.1
+./ltrquest.sif --help
 ```
 
-That is the install. Put `apptainer exec ltrquest.sif` in front of any command:
+That is the install. `./ltrquest.sif` **is** the `ltrquest` command — the flags
+are the same, and it runs as you, in your own directory:
 
 ```bash
-apptainer exec ltrquest.sif ltrquest --help
+./ltrquest.sif --genome your_genome.fa --proteins related.pep.fa --threads 20
 ```
 
-Apptainer already mounts your working directory and already runs as you, so
-there are no paths to bind or permissions to set — commands look exactly as they
-would if the tool were installed natively.
+The individual stages work the same way: `./ltrquest.sif ltrquest-gff3 --help`.
 
 > **On a cluster** you may need `module load apptainer` (or `module load
 > singularity`) first. `singularity` works identically — just swap the command
@@ -65,15 +65,74 @@ would if the tool were installed natively.
 > export APPTAINER_CACHEDIR=/your/scratch/.apptainer
 > ```
 
-### conda / mamba
+#### When it says your genome is not found
 
-If you would rather have the tools on your `PATH` than in a container:
+A container sees only the directories that were *mounted* into it. Apptainer
+mounts your home directory and your working directory, which covers most runs
+and misses two common ones:
+
+* **your working directory is reached through a symbolic link.** `/home/you/data
+  -> /scratch/you` is the usual layout on a cluster. Apptainer sees a path inside
+  your home, mounts nothing extra, and then cannot follow the link from inside.
+  It gives up, leaves you in your home directory, and every relative path in the
+  command is suddenly wrong.
+* **an input lives somewhere else entirely**, as in `--genome
+  /scratch/genomes/hg38.fa` run from your home directory.
+
+Fix either one on the spot — resolve the link, or name the directory to mount:
 
 ```bash
-mamba env create -f environment.yml
+cd -P . && ./ltrquest.sif --genome hg38.fa --threads 20
+
+apptainer exec -B /scratch ltrquest.sif \
+    ltrquest --genome /scratch/genomes/hg38.fa --threads 20
+```
+
+Or fix it once, with the launcher that ships inside the image. It works the
+mounts out from your command and hands the rest to the container unchanged:
+
+```bash
+apptainer exec ltrquest.sif cat /opt/ltrquest/bin/ltrquest-container > ltrquest
+chmod +x ltrquest
+
+./ltrquest --genome /scratch/genomes/hg38.fa --threads 20   # mounts /scratch/genomes
+```
+
+It is a short shell script with no dependencies — read it before you run it if
+you like. Keep it beside `ltrquest.sif`, or put it on your `PATH` and tell it
+where the image lives with `export LTRQUEST_SIF=/shared/containers/ltrquest.sif`.
+
+### conda / mamba
+
+If you would rather have the tools on your `PATH` than in a container, clone the
+repository and build the environment from it:
+
+```bash
+git clone https://github.com/cwb14/LTRquest.git
+cd LTRquest
+
+mamba env create -n ltrquest -f environment.yml   # add --yes to overwrite an existing one
 mamba activate ltrquest
 pip install .
+
+ltrquest --help
 ```
+
+Run these one at a time rather than pasting the block. If an `ltrquest`
+environment already exists, `mamba env create` stops and asks whether to
+overwrite it — and a question that arrives in the middle of a pasted block is
+answered by whatever line you pasted after it, not by you. For a clean rebuild,
+remove the old environment first:
+
+```bash
+mamba env remove -n ltrquest
+```
+
+`environment.yml` carries `git`, `make` and a C compiler on purpose. Two of the
+helpers LTRquest uses — Kmer2LTR and TEsorter2 — are cloned on first use, and
+TRF-mod is cloned and compiled. TRF-mod runs by default, so without a compiler
+the first real run stops on `cc: not found`. Pass `--no-trf` if you would rather
+not have it at all.
 
 <details>
 <summary><b>Docker</b> — for your own machine, where you have root</summary>
@@ -82,13 +141,16 @@ pip install .
 docker pull ghcr.io/cwb14/ltrquest:1.0.1
 ```
 
-Docker has to be told which directory to work in and which user to be, so its
-commands are longer than the Apptainer equivalents:
+Docker has to be told which directory to mount, which directory to work in and
+which user to be, so its commands are longer than the Apptainer equivalents:
 
 ```bash
 docker run --rm -v "$PWD:/data" -w /data -u "$(id -u):$(id -g)" \
-  ghcr.io/cwb14/ltrquest:1.0.1 ltrquest --help
+  ghcr.io/cwb14/ltrquest:1.0.1 --help
 ```
+
+Naming the command explicitly — `... ghcr.io/cwb14/ltrquest:1.0.1 ltrquest
+--help` — works too, and is how you reach the other stages.
 </details>
 
 <details>
@@ -106,13 +168,16 @@ pre-builds all four and never reaches the network.
 
 ### One command, whichever route you took
 
-Every example below is written as plain `ltrquest …`. If you installed with
-conda or pip, that already works. If you are using a container, either put
-`apptainer exec ltrquest.sif` in front, or set this once and forget it:
+Every example below is written as plain `ltrquest …`. With conda or pip that is
+already the command. With a container, `./ltrquest.sif` takes exactly the same
+flags — read `ltrquest …` as `./ltrquest.sif …` throughout.
 
-```bash
-alias ltrquest='apptainer exec /full/path/to/ltrquest.sif ltrquest'
-```
+> **Upgrading from 1.0.1?** That README suggested an alias,
+> `alias ltrquest='apptainer exec …'`. It is no longer needed, and if you later
+> install with conda it will shadow the real command and fail with
+> `apptainer: command not found`. Check with `type -a ltrquest`, and drop it with
+> `unalias ltrquest` (plus removing it from your shell startup file, if it is
+> there).
 
 ## Try it on real data
 
@@ -132,8 +197,8 @@ curl -sLO https://github.com/cwb14/LTRquest/raw/main/tests/data/Athal_tair10_chr
 curl -sLO https://github.com/cwb14/LTRquest/raw/main/tests/data/Athal.pep.gz
 
 # go
-apptainer exec ltrquest.sif ltrquest \
-  --genome Athal_tair10_chr2.fa.gz --proteins Athal.pep.gz --threads 20 --max-rounds 1
+./ltrquest.sif --genome Athal_tair10_chr2.fa.gz --proteins Athal.pep.gz \
+  --threads 20 --max-rounds 1
 ```
 
 <details>
@@ -150,7 +215,7 @@ ltrquest --genome Athal_tair10_chr2.fa.gz --proteins Athal.pep.gz --threads 20 -
 ```bash
 docker run --rm -v "$PWD:/data" -w /data -u "$(id -u):$(id -g)" \
   ghcr.io/cwb14/ltrquest:1.0.1 \
-  ltrquest --genome Athal_tair10_chr2.fa.gz --proteins Athal.pep.gz --threads 20 --max-rounds 1
+  --genome Athal_tair10_chr2.fa.gz --proteins Athal.pep.gz --threads 20 --max-rounds 1
 ```
 
 Already cloned the repo? The same files are in `tests/data/`.

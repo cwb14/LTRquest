@@ -60,7 +60,10 @@ jobs:
       - name: shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck --severity=warning src/ltrquest/scripts/*.sh
+          shellcheck --severity=warning \
+            src/ltrquest/scripts/*.sh \
+            bin/entrypoint.sh \
+            bin/ltrquest-container
 
   package:
     name: pip install

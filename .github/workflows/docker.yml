@@ -77,6 +77,21 @@ jobs:
           run ltrquest --help > /dev/null
           run ltrquest-detect --help > /dev/null
 
+          # The entry point is what Apptainer turns into the SIF's runscript, so
+          # these are what decide whether `./ltrquest.sif --genome x.fa` works
+          # once the image is pulled. 1.0.1 had no ENTRYPOINT and answered the
+          # first of them with `"--help": executable file not found`. The driver
+          # writes its usage to stderr, hence the redirect.
+          run --help 2>&1 | grep -q 'Usage:'
+          run ltrquest-gff3 --help > /dev/null
+          run --genome /nonexistent.fa 2>&1 | grep -q 'Genome not found'
+
+          # ...and the launcher the README tells people to copy out of the image
+          # has to actually be in it, at that path, and be runnable.
+          run cat /opt/ltrquest/bin/ltrquest-container > launcher.sh
+          sh -n launcher.sh
+          grep -q 'apptainer pull' launcher.sh
+
           # The detector resolves its helper binaries before it does any work.
           # `--help` never reaches that code, so a v1.0.0 image shipped unable to
           # run a genome at all: ensure_tools tried to `git clone` minimap2, and

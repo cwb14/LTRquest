@@ -10,7 +10,11 @@
 #
 #   docker build -t ltrquest:1.0.1 .
 #   docker run --rm -v "$PWD:/data" -w /data ltrquest:1.0.1 \
-#       ltrquest --genome genome.fa --proteins prot.fa --threads 8
+#       --genome genome.fa --proteins prot.fa --threads 8
+#
+# The ENTRYPOINT at the bottom is what lets the arguments be written bare like
+# that, and it is also what Apptainer turns into the SIF's runscript, so a pulled
+# image can be run as `./ltrquest.sif --genome genome.fa`. See bin/entrypoint.sh.
 
 # ---------------------------------------------------------------- build stage
 FROM mambaorg/micromamba:1.5.10-jammy AS build
@@ -72,6 +76,10 @@ COPY --from=build /opt/ltrquest/tools /opt/ltrquest/tools
 
 COPY . /opt/ltrquest/src
 RUN pip install --no-cache-dir /opt/ltrquest/src \
+ && install -D -m 0755 /opt/ltrquest/src/bin/entrypoint.sh \
+        /opt/ltrquest/bin/entrypoint \
+ && install -D -m 0755 /opt/ltrquest/src/bin/ltrquest-container \
+        /opt/ltrquest/bin/ltrquest-container \
  && rm -rf /opt/ltrquest/src
 
 # Fail the build, not the first user, if the image is wired up wrong.
@@ -82,9 +90,26 @@ RUN ltrquest --help > /dev/null \
     done \
  && test -f "$LTRQUEST_TOOLS_DIR/Kmer2LTR/Kmer2LTR.py" \
  && test -f "$LTRQUEST_TOOLS_DIR/Kmer2LTR/flag_fp_families.py" \
- && test -x "$LTRQUEST_TOOLS_DIR/TRF-mod/trf-mod"
+ && test -x "$LTRQUEST_TOOLS_DIR/TRF-mod/trf-mod" \
+ && test -x /opt/ltrquest/bin/ltrquest-container
+
+# All three ways the entry point is reached, asserted here so a dispatch
+# regression fails the build rather than the first person to run the image:
+# bare flags, an explicit stage command, and an arbitrary command (which is how
+# Nextflow drives the image).
+RUN /opt/ltrquest/bin/entrypoint --help > /dev/null \
+ && /opt/ltrquest/bin/entrypoint ltrquest-gff3 --help > /dev/null \
+ && /opt/ltrquest/bin/entrypoint /bin/sh -c 'exit 0'
 
 USER $MAMBA_USER
 WORKDIR /data
-ENTRYPOINT []
-CMD ["ltrquest", "--help"]
+
+# An empty ENTRYPOINT is what broke `./ltrquest.sif --genome x.fa` in 1.0.1:
+# Apptainer builds the runscript from ENTRYPOINT and CMD, and with only a CMD it
+# *replaces* the command with the user's arguments, so the first flag was run as
+# a program. With an ENTRYPOINT, Apptainer prepends it to the arguments instead.
+# `docker run IMG ltrquest ...` and `apptainer exec IMG ltrquest ...` are
+# unaffected: the dispatcher runs a first argument that names a command, and
+# `exec` never reaches the entry point at all.
+ENTRYPOINT ["/opt/ltrquest/bin/entrypoint"]
+CMD ["--help"]

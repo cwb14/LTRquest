@@ -14,8 +14,9 @@ The container needs no root and no dependencies:
 apptainer pull ltrquest.sif docker://ghcr.io/cwb14/ltrquest:1.0.1
 ```
 
-Then prefix any command below with `apptainer exec ltrquest.sif`. Or install the
-tools onto your `PATH` instead:
+`./ltrquest.sif` then takes the same flags as `ltrquest`, so read every
+`ltrquest …` below as `./ltrquest.sif …`. Or install the tools onto your `PATH`
+instead, one line at a time:
 
 ```bash
 mamba env create -f environment.yml

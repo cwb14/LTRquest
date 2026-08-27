@@ -155,6 +155,55 @@ declare -a EXTRA_ARG_DIRECTIVES=()
 # ----------------------------
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# True inside Apptainer/Singularity or Docker. Only ever consulted to decide how
+# much to explain in an error message; nothing about a run depends on it.
+in_container() {
+  [[ -n "${APPTAINER_CONTAINER:-}${SINGULARITY_CONTAINER:-}" ]] && return 0
+  [[ -e /.singularity.d || -e /.dockerenv ]] && return 0
+  return 1
+}
+
+# A missing input inside a container usually is not a missing file. It is a
+# directory that was never mounted, and "Genome not found: hg38.fa" sends people
+# hunting for the wrong problem -- most often after Apptainer failed to follow a
+# symlinked working directory, gave up, and left the run in $HOME.
+die_missing_input() {
+  local path="$1" label="$2" dir=""
+  in_container || die "$label not found: $path"
+
+  [[ "$path" == /* ]] && dir="$(dirname -- "$path")"
+
+  {
+    echo "ERROR: $label not found: $path"
+    echo ""
+    echo "This is a container, and it only sees directories that were mounted into"
+    echo "it -- a file can exist on your machine and still be invisible in here."
+    echo "The working directory inside the container is: $PWD"
+    echo ""
+    if [[ -n "$dir" ]]; then
+      echo "Mount the directory that holds it and run again:"
+      echo ""
+      echo "    apptainer exec -B $dir ltrquest.sif ltrquest ..."
+    else
+      echo "If you reached this directory through a symbolic link -- usual when home"
+      echo "directories point at /scratch or /data -- resolve it and run again:"
+      echo ""
+      echo "    cd -P ."
+      echo ""
+      echo "Otherwise mount the directory that holds your files:"
+      echo ""
+      echo "    apptainer exec -B /path/to/your/data ltrquest.sif ltrquest ..."
+    fi
+    echo ""
+    echo "Or let the launcher work the mounts out for you, once:"
+    echo ""
+    echo "    apptainer exec ltrquest.sif cat /opt/ltrquest/bin/ltrquest-container > ltrquest"
+    echo "    chmod +x ltrquest"
+    echo "    ./ltrquest --genome your_genome.fa --threads 20"
+  } >&2
+  exit 1
+}
+
 usage() {
   cat >&2 <<'USAGE_EOF'
 Usage:
@@ -946,12 +995,12 @@ done
 
 (( ${#GENOMES[@]} > 0 )) || die "--genome is required"
 for _g in "${GENOMES[@]}"; do
-  [[ -f "$_g" ]] || die "Genome not found: $_g"
+  [[ -f "$_g" ]] || die_missing_input "$_g" "Genome"
 done
 N_GENOMES=${#GENOMES[@]}
 GENOME="${GENOMES[0]}"
 if [[ -n "$PROTEINS" ]]; then
-  [[ -f "$PROTEINS" ]] || die "Proteins not found: $PROTEINS"
+  [[ -f "$PROTEINS" ]] || die_missing_input "$PROTEINS" "Proteins"
 fi
 
 # Validate FP-correction knobs.

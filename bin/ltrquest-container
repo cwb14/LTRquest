@@ -1,0 +1,133 @@
+#!/bin/sh
+# ltrquest-container -- run the LTRquest container as if it were installed.
+#
+# Apptainer mounts your home directory and your working directory, and nothing
+# else. That covers most runs and quietly fails two common ones:
+#
+#   * the working directory is reached through a symlink that leaves home --
+#     `/home/you/data -> /scratch/you` is the usual shape on a cluster. Apptainer
+#     sees a path under $HOME, adds no mount, and then cannot follow the symlink
+#     from inside. It falls back to $HOME with a warning, and every relative path
+#     in the command is suddenly wrong.
+#   * an input lives on a filesystem that is neither home nor the working
+#     directory: --genome /scratch/genomes/hg38.fa run from your home directory.
+#
+# This script resolves the working directory to its real location, mounts that
+# and the directory of every argument that names an existing file, and hands the
+# rest to the container unchanged. Everything else about the run is identical.
+#
+#   ./ltrquest-container --genome hg38.fa --proteins hg38.pep --threads 20
+#   ./ltrquest-container ltrquest-gff3 --help
+#
+# The image is found in this order:
+#   $LTRQUEST_SIF, ltrquest.sif beside this script, ./ltrquest.sif
+#
+# Set LTRQUEST_CONTAINER_VERBOSE=1 to see the command that actually runs.
+
+set -eu
+
+engine=""
+for candidate in apptainer singularity; do
+    if command -v "$candidate" > /dev/null 2>&1; then
+        engine="$candidate"
+        break
+    fi
+done
+
+if [ -z "$engine" ]; then
+    cat >&2 <<'EOF'
+ltrquest-container: neither `apptainer` nor `singularity` is on your PATH.
+
+On a cluster they usually need to be loaded first:
+
+    module load apptainer      # or: module load singularity
+
+This launcher only drives Apptainer/Singularity. With Docker, run the image
+directly:
+
+    docker run --rm -v "$PWD:/data" -w /data -u "$(id -u):$(id -g)" \
+        ghcr.io/cwb14/ltrquest:1.0.1 --genome your_genome.fa
+EOF
+    exit 127
+fi
+
+# Where this script lives, so an image sitting next to it is found from anywhere.
+self_dir=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
+
+image=""
+for candidate in "${LTRQUEST_SIF-}" "$self_dir/ltrquest.sif" "./ltrquest.sif"; do
+    if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+        image=$candidate
+        break
+    fi
+done
+
+if [ -z "$image" ]; then
+    cat >&2 <<EOF
+ltrquest-container: no container image found.
+
+Looked for: \$LTRQUEST_SIF, $self_dir/ltrquest.sif, ./ltrquest.sif
+
+Get one with:
+
+    apptainer pull ltrquest.sif docker://ghcr.io/cwb14/ltrquest:1.0.1
+
+or point at an image you already have:
+
+    export LTRQUEST_SIF=/shared/containers/ltrquest.sif
+EOF
+    exit 1
+fi
+
+# --- what to mount ----------------------------------------------------------
+# APPTAINER_BIND takes a comma-separated list, so a path containing a comma
+# cannot be expressed and is left to the default mounts. Anything already in the
+# caller's APPTAINER_BIND is kept.
+binds=${APPTAINER_BIND-${SINGULARITY_BIND-}}
+
+add_bind() {
+    case $1 in
+        *,*) return 0 ;;                              # not expressible in the list
+    esac
+    case ,$binds, in
+        *",$1,"*) return 0 ;;                         # already mounted
+    esac
+    binds=${binds:+$binds,}$1
+}
+
+# The working directory, at its real location rather than the symlinked one.
+cwd=$(pwd -P)
+add_bind "$cwd"
+
+# The directory of every argument that names something that exists here. A flag
+# value like '-w 64 -t 15' is not a path and is simply skipped.
+for arg in "$@"; do
+    [ -e "$arg" ] || continue
+    if dir=$(cd -P -- "$(dirname -- "$arg")" 2> /dev/null && pwd -P); then
+        add_bind "$dir"
+    fi
+done
+
+# --- what to run ------------------------------------------------------------
+# `ltrquest` unless the first argument names one of the other stage commands,
+# which mirrors how the image's own entry point reads its arguments.
+command_name=ltrquest
+case ${1-} in
+    ""|-*) ;;
+    *) command_name=$1; shift ;;
+esac
+
+APPTAINER_BIND=$binds
+SINGULARITY_BIND=$binds
+export APPTAINER_BIND SINGULARITY_BIND
+
+if [ "${LTRQUEST_CONTAINER_VERBOSE-}" = 1 ]; then
+    printf '+ APPTAINER_BIND=%s\n' "$binds" >&2
+    printf '+ %s exec --pwd %s %s %s' "$engine" "$cwd" "$image" "$command_name" >&2
+    for arg in "$@"; do printf ' %s' "$arg" >&2; done
+    printf '\n' >&2
+fi
+
+# `exec` rather than `run`: it ignores the image's entry point, so this launcher
+# drives old and new images identically.
+exec "$engine" exec --pwd "$cwd" "$image" "$command_name" "$@"

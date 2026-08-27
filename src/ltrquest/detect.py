@@ -1901,6 +1901,33 @@ def tool_usable_miniprot(bin_path: Path) -> bool:
 def tool_usable_minimap2(bin_path: Path) -> bool:
     return tool_usable_generic(bin_path, ["--help"])
 
+def _make_commands(base: List[str]) -> List[List[str]]:
+    """`make`, then the same again naming the compiler explicitly.
+
+    A conda environment installs its compiler as x86_64-conda-linux-gnu-cc and
+    exports $CC; a Makefile that falls back to plain `cc` finds nothing. Retrying
+    with CC set to whatever compiler is actually present is what lets
+    `mamba env create -f environment.yml` be enough to build these helpers, with
+    no system toolchain.
+    """
+    cmds = [list(base)]
+    for cc in (os.environ.get("CC"), "gcc", "cc"):
+        if cc and [*base, f"CC={cc}"] not in cmds:
+            cmds.append([*base, f"CC={cc}"])
+    return cmds
+
+
+def _build_advice(name: str, conda_name: Optional[str] = None) -> str:
+    """What to install when a helper can be neither found nor built."""
+    lines = ["Install it and put it on PATH, then run again."]
+    if conda_name:
+        lines.append(f"    conda install -c bioconda {conda_name}")
+    lines.append("Or install a compiler so it can be built from source:")
+    lines.append("    conda install -c conda-forge git make c-compiler zlib")
+    lines.append(f"Or point --tools-dir at a directory that already holds {name}.")
+    return "\n".join(lines)
+
+
 def _resolve_helper(name: str, tools_dir: Path, url: str, usable) -> Path:
     """Find a working `name`, in the cheapest order that can succeed.
 
@@ -1932,14 +1959,14 @@ def _resolve_helper(name: str, tools_dir: Path, url: str, usable) -> Path:
         mkdirp(tools_dir)
         run(["git", "clone", url, str(src)], check=True)
 
-    for make_cmd in (["make"], ["make", "CC=gcc"]):
+    for make_cmd in _make_commands(["make"]):
         r = run(make_cmd, cwd=str(src))
         if r.returncode == 0 and usable(local):
             return local
 
     raise RuntimeError(
         f"{name} build failed and no usable {name} was found on PATH.\n"
-        f"Try: conda install -c bioconda {name}"
+        + _build_advice(name, conda_name=name)
     )
 
 
@@ -2079,19 +2106,42 @@ def tool_usable_trfmod(bin_path: Path) -> bool:
 
 
 def ensure_trfmod(tools_dir: Path) -> str:
+    """Return a usable trf-mod, in the same order as _resolve_helper.
+
+    TRF-mod runs by default, so this is the one helper every install has to
+    satisfy. It is not packaged for conda, which is why environment.yml carries
+    git, make and a compiler: on that route the source build below is the normal
+    path rather than the fallback.
+    """
     tools_dir = mkdirp(tools_dir)
     trf_dir = tools_dir / "TRF-mod"
     trf_bin = trf_dir / "trf-mod"
 
-    if not tool_usable_trfmod(trf_bin):
-        if not trf_dir.exists():
-            run(["git", "clone", "https://github.com/lh3/TRF-mod", str(trf_dir)], check=True)
-        run(["make", "-f", "compile.mak"], cwd=str(trf_dir), check=True)
+    if tool_usable_trfmod(trf_bin):
+        return str(trf_bin)
 
-        if not tool_usable_trfmod(trf_bin):
-            raise RuntimeError(f"TRF-mod build failed or binary unusable at: {trf_bin}")
+    on_path = shutil.which("trf-mod")
+    if on_path and tool_usable_trfmod(Path(on_path)):
+        return on_path
 
-    return str(trf_bin)
+    if not trf_dir.exists():
+        if shutil.which("git") is None:
+            raise RuntimeError(
+                "trf-mod is not on PATH and cannot be built here: git is not "
+                "installed.\n" + _build_advice("TRF-mod/trf-mod")
+            )
+        run(["git", "clone", "https://github.com/lh3/TRF-mod", str(trf_dir)], check=True)
+
+    for make_cmd in _make_commands(["make", "-f", "compile.mak"]):
+        run(make_cmd, cwd=str(trf_dir))
+        if tool_usable_trfmod(trf_bin):
+            return str(trf_bin)
+
+    raise RuntimeError(
+        f"TRF-mod build failed or binary unusable at: {trf_bin}\n"
+        + _build_advice("TRF-mod/trf-mod")
+        + "\nOr run without tandem-repeat masking: --no-trf"
+    )
 
 def tool_usable_sdust(bin_path: Path) -> bool:
     if not bin_path.exists() or not os.access(str(bin_path), os.X_OK):
@@ -2110,19 +2160,39 @@ def tool_usable_sdust(bin_path: Path) -> bool:
 
 
 def ensure_sdust(tools_dir: Path) -> str:
+    """Return a usable sdust, in the same order as _resolve_helper.
+
+    Unlike TRF-mod, sdust *is* packaged (bioconda::sdust) and environment.yml
+    installs it, so the PATH check below is what --run-sdust normally hits.
+    """
     tools_dir = mkdirp(tools_dir)
     sd_dir = tools_dir / "sdust"
     sd_bin = sd_dir / "sdust"
 
-    if not tool_usable_sdust(sd_bin):
-        if not sd_dir.exists():
-            run(["git", "clone", "https://github.com/lh3/sdust.git", str(sd_dir)], check=True)
-        run(["make"], cwd=str(sd_dir), check=True)
+    if tool_usable_sdust(sd_bin):
+        return str(sd_bin)
 
-        if not tool_usable_sdust(sd_bin):
-            raise RuntimeError(f"sdust build failed or binary unusable at: {sd_bin}")
+    on_path = shutil.which("sdust")
+    if on_path and tool_usable_sdust(Path(on_path)):
+        return on_path
 
-    return str(sd_bin)
+    if not sd_dir.exists():
+        if shutil.which("git") is None:
+            raise RuntimeError(
+                "sdust is not on PATH and cannot be built here: git is not "
+                "installed.\n" + _build_advice("sdust", conda_name="sdust")
+            )
+        run(["git", "clone", "https://github.com/lh3/sdust.git", str(sd_dir)], check=True)
+
+    for make_cmd in _make_commands(["make"]):
+        run(make_cmd, cwd=str(sd_dir))
+        if tool_usable_sdust(sd_bin):
+            return str(sd_bin)
+
+    raise RuntimeError(
+        f"sdust build failed or binary unusable at: {sd_bin}\n"
+        + _build_advice("sdust", conda_name="sdust")
+    )
 
 def run_tebinsorter(stitched_fa: str, pipeline_py_path: str, outdir: Path,
                     db: str, rule: str, threads: int,
