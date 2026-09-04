@@ -53,6 +53,7 @@ ltrquest-mask = "ltrquest.mask:main"
 ltrquest-reconcile = "ltrquest.reconcile:main"
 ltrquest-annotate = "ltrquest.annotate:main"
 ltrquest-gff3 = "ltrquest.gff3:main"
+ltrquest-flagfp = "ltrquest.flag_fp:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ltrquest"]
