@@ -3342,11 +3342,17 @@ def _parse_nest_outer_inners_from_tsv(tsv_path: str) -> Dict[str, List[Tuple[str
 
 
 def mask_same_round_inners_in_fa(fa_path: str, tsv_path: str,
-                                 mask_char: str, wrap: int = 60) -> Tuple[int, int]:
+                                 mask_char: str, wrap: int = 60,
+                                 revcomped: Optional[Set[str]] = None) -> Tuple[int, int]:
     """In-place rewrite of fa_path: for each record whose header matches a
     nest-outer row in tsv_path, overwrite every listed inner interval (1-based
     inclusive in genome coords) with mask_char. Returns (n_outers_masked,
     n_inner_intervals_applied).
+
+    `revcomped` names records in fa_path that are stored reverse-complemented
+    (see `bounded_fasta_oriented`), so their interval needs mirroring: the
+    library holds minus-strand elements reverse-complemented, but nest_status
+    intervals are always in forward genomic coordinates.
     """
     outer_to_inners = _parse_nest_outer_inners_from_tsv(tsv_path)
     if not outer_to_inners:
@@ -3382,6 +3388,7 @@ def mask_same_round_inners_in_fa(fa_path: str, tsv_path: str,
         o_chrom = m.group(1)
         o_s = int(m.group(2))
         chars = list(seqs[idx])
+        is_revcomped = revcomped is not None and hdr in revcomped
         n_here = 0
         for i_chrom, i_s, i_e in inners:
             if i_chrom != o_chrom:
@@ -3391,6 +3398,12 @@ def mask_same_round_inners_in_fa(fa_path: str, tsv_path: str,
             rel_e = min(len(chars), i_e - o_s + 1)
             if rel_e <= rel_s:
                 continue
+            if is_revcomped:
+                # This record's bases run in genome-reverse order (the library
+                # stores minus-strand elements reverse-complemented) while
+                # nest_status is always forward-genomic, so the interval has
+                # to be mirrored within the record before it is painted.
+                rel_s, rel_e = len(chars) - rel_e, len(chars) - rel_s
             for p in range(rel_s, rel_e):
                 chars[p] = mask_char
             n_here += 1
@@ -4446,7 +4459,8 @@ def main():
 
     if same_round_inner_char:
         n_outers, n_intervals = mask_same_round_inners_in_fa(
-            fa_to_mask_same_round, k2l_dedup_out, same_round_inner_char
+            fa_to_mask_same_round, k2l_dedup_out, same_round_inner_char,
+            revcomped=revcomped_names,
         )
         if n_outers:
             print(f"[Step9c] masked same-round inners with '{same_round_inner_char}' in "
