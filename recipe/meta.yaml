@@ -57,7 +57,8 @@ requirements:
     - pyfaidx
     - pyhmmer >=0.10
     - pyfastx
-    - parasail
+    # `parasail` is the C library; `import parasail` comes from this package.
+    - parasail-python
     - pywfa
 
 test:
@@ -108,8 +109,8 @@ extra:
     $LTRQUEST_TOOLS_DIR. Kmer2LTR (LTR divergence, boundary calls and family
     clustering) is an ordinary Python package: resolved from `PATH` if it is
     already installed, and cloned the same way as TEsorter2 only as a
-    fallback. Its own runtime dependencies (`parasail`, `pywfa`) are listed in
-    `run:` above regardless of which route provides Kmer2LTR itself, since
-    Bioconda cannot express "installed one of two ways." The published
+    fallback. Its own runtime dependencies (`parasail-python`, `pywfa`) are
+    listed in `run:` above regardless of which route provides Kmer2LTR itself,
+    since Bioconda cannot express "installed one of two ways." The published
     container has both helpers baked in, so a container run never touches the
     network.

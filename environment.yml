@@ -39,8 +39,7 @@ dependencies:
   - pyfaidx                         # ltrquest-flagfp
   - pyhmmer>=0.10                   # TEsorter2
   - pyfastx                         # TEsorter2
-  # --- Kmer2LTR's own runtime deps: not conda-forge-clean on this platform,
-  # so Kmer2LTR's own environment.yml installs them via pip too ---
-  - pip:
-      - parasail
-      - pywfa
+  # --- Kmer2LTR's own runtime deps. `parasail` on Bioconda is the C library;
+  # the module `import parasail` reaches for lives in `parasail-python` ---
+  - parasail-python
+  - pywfa

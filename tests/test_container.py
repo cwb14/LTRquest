@@ -260,6 +260,31 @@ class TestEnvironmentCarriesItsBuildDependencies:
         )
 
 
+class TestKmer2LTRRuntimeDependencies:
+    """`parasail` on Bioconda is the C library. A recipe naming it resolves,
+    installs, and still has no `import parasail` -- so Kmer2LTR dies the first
+    time it aligns, several hours into a run."""
+
+    RECIPES = ["environment.yml",
+               "recipe/meta.yaml",
+               "modules/local/ltrquest/detect/environment.yml",
+               "modules/local/ltrquest/cluster/environment.yml"]
+
+    @pytest.mark.parametrize("recipe", RECIPES)
+    def test_the_python_binding_is_what_is_named(self, recipe):
+        entries = [line.strip().lstrip("- ").split("#")[0].strip()
+                   for line in (REPO_ROOT / recipe).read_text().splitlines()
+                   if line.strip().startswith("- ")]
+        assert "parasail-python" in entries, f"{recipe} does not name parasail-python"
+        assert "parasail" not in entries, f"{recipe} names the C library instead"
+        assert "pywfa" in entries, f"{recipe} does not name pywfa"
+
+    @pytest.mark.parametrize("recipe", RECIPES)
+    def test_neither_arrives_through_pip(self, recipe):
+        text = (REPO_ROOT / recipe).read_text()
+        assert "- pip:" not in text, f"{recipe} still installs through pip"
+
+
 class TestMissingInputMessage:
     """`ERROR: Genome not found: hg38.fa` inside a container sends people
     looking for a missing file when the real problem is a missing mount."""
