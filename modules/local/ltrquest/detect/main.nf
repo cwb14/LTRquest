@@ -103,10 +103,16 @@ process LTRQUEST_DETECT {
     touch ${prefix}.work/${prefix}.ltrtools.stitched.scn
     printf '#seq_id\\tseq_len\\tstatus\\tltr5_start\\tltr5_end\\tltr3_start\\tltr3_end\\tltr5_len\\tltr3_len\\tflank5_len\\tflank3_len\\taln_len\\tn_sites\\tn_ts\\tn_tv\\tn_gapcols\\tidentity\\tp_dist\\tk2p\\tk2p_se\\tbitscore\\tflank_margin_bits\\tcigar\\tmotif\\tk2p_time\\torientation\\ttsd\\ttsd_offset\\ttsd_input\\tdomains\\tnest_status\\n' > ${prefix}_ltr.tsv
     : > ${prefix}_ltr.fa
+    # One field per header name: a stub row narrower than its own header is a
+    # schema mismatch that -stub-run, the only automated exercise this DAG
+    # gets, would otherwise read straight past.
     for i in \$(seq 1 ${n}); do
         s=\$(( ${round_n} * 1000 + i * 100 ))
         e=\$(( s + 5000 ))
-        printf 'chr1:%s-%s#LTR/Gypsy/Tekay\\t500\\t480\\tTGCAA\\t.\\t.\\n' "\$s" "\$e" >> ${prefix}_ltr.tsv
+        g1=\$(( s + 600 ));  g2=\$(( s + 1200 ))
+        r1=\$(( s + 1500 )); r2=\$(( s + 2400 ))
+        printf 'chr1:%s-%s#LTR/Gypsy/Tekay\\t5001\\tpass\\t1\\t500\\t4502\\t5001\\t500\\t500\\t0\\t0\\t500\\t500\\t8\\t4\\t0\\t0.9760\\t0.0240\\t0.0244\\t0.0070\\t900.0\\t12.5\\t500=\\ttg...ca\\t406667\\t+\\tTGCAA\\t0,0\\tTGCAA\\tGAG|Tekay@%s-%s;RT|Tekay@%s-%s\\t.\\n' \\
+            "\$s" "\$e" "\$g1" "\$g2" "\$r1" "\$r2" >> ${prefix}_ltr.tsv
         printf '>chr1:%s-%s#LTR/Gypsy/Tekay\\nACGTACGTAC\\n' "\$s" "\$e" >> ${prefix}_ltr.fa
     done
 

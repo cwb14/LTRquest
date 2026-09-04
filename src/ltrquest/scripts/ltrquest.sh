@@ -712,15 +712,21 @@ run_merged_stage() {
   # uses per round) rather than a hardcoded script path, since the console
   # script, an already-cloned checkout, and a fresh clone each land Kmer2LTR
   # somewhere different.
+  #
+  # The .tsv is load-bearing: Kmer2LTR names the cluster tables after
+  # `Path(-o).with_suffix("")`, which strips whatever follows the last dot.
+  # An assembly-derived prefix routinely carries one -- GCF_000001735.4_TAIR10.1
+  # -- so without an extension of its own to lose, the tables land under a
+  # truncated basename that the globs below never see.
   set -x
   "$PY" -c '
 import sys
 from ltrquest.kmer2ltr import resolve, run
-tools_dir, in_fa, out_prefix, threads, mutation_rate = sys.argv[1:6]
-run(resolve(tools_dir), in_fa, out_prefix,
+tools_dir, in_fa, out_tsv, threads, mutation_rate = sys.argv[1:6]
+run(resolve(tools_dir), in_fa, out_tsv,
     threads=int(threads), mutation_rate=float(mutation_rate),
     ltr_cluster=True, internal_cluster=True, min_seq_id=0.75, verbose=True)
-' "$TOOLS_DIR" "$all_ltr_fa" "${RUN_PREFIX}_all_ltr" "$THREADS" "$MUTATION_RATE"
+' "$TOOLS_DIR" "$all_ltr_fa" "${RUN_PREFIX}_all_ltr.tsv" "$THREADS" "$MUTATION_RATE"
   set +x
 
   # Resolve the produced cluster tables by glob (robust to id-tag formatting);

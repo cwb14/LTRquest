@@ -33,14 +33,20 @@ process LTRQUEST_CLUSTER {
     # Routed through ltrquest.kmer2ltr rather than a hardcoded script path:
     # Kmer2LTR ships as an installable package, and resolve() finds it whether
     # that means a console script, a prior clone, or a fresh one.
+    #
+    # The .tsv is load-bearing: Kmer2LTR names the cluster tables after
+    # `Path(-o).with_suffix("")`, which strips whatever follows the last dot.
+    # A sample id carrying one -- GCF_000001735.4_TAIR10.1 and every other
+    # assembly name -- would otherwise put them under a truncated basename that
+    # the output patterns above never match.
     python -c '
 import sys
 from ltrquest.kmer2ltr import resolve, run
-tools_dir, in_fa, out_prefix, threads, mutation_rate, min_seq_id = sys.argv[1:7]
-run(resolve(tools_dir), in_fa, out_prefix,
+tools_dir, in_fa, out_tsv, threads, mutation_rate, min_seq_id = sys.argv[1:7]
+run(resolve(tools_dir), in_fa, out_tsv,
     threads=int(threads), mutation_rate=float(mutation_rate),
     ltr_cluster=True, internal_cluster=True, min_seq_id=float(min_seq_id), verbose=True)
-' \${LTRQUEST_TOOLS_DIR:-/opt/ltrquest/tools} ${prefix}_all_ltr.fa ${prefix}_all_ltr ${task.cpus} \\
+' \${LTRQUEST_TOOLS_DIR:-/opt/ltrquest/tools} ${prefix}_all_ltr.fa ${prefix}_all_ltr.tsv ${task.cpus} \\
   ${params.mutation_rate} ${params.min_seq_id}
 
     cat <<-END_VERSIONS > versions.yml

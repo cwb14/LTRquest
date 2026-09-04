@@ -4,11 +4,10 @@ channels:
   - bioconda
 dependencies:
   - python=3.11
-  - pip
   - mmseqs2=16.747c6
   - mafft=7.526
   - pyfaidx
   - numpy
-  - pip:
-      - parasail
-      - pywfa
+  # `parasail` on Bioconda is the C library; `import parasail` needs this one.
+  - parasail-python
+  - pywfa
