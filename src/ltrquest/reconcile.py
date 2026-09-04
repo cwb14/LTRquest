@@ -405,6 +405,11 @@ def main() -> None:
             ltr_bounds.setdefault(k, v)
     print(f"[reconcile] LTR boundaries loaded: {len(ltr_bounds)} keys",
           file=sys.stderr)
+    if len(ltr_bounds) < len(pool):
+        print(f"[reconcile] WARNING: LTR boundary map covers {len(ltr_bounds)} "
+              f"of {len(pool)} pooled element(s); {len(pool) - len(ltr_bounds)} "
+              f"have no usable LTR coordinates and will be treated as sharing "
+              f"no LTRs with anything", file=sys.stderr)
 
     # 3. Cross-round dedup (shared-LTR collapse)
     survivors, n_merged = cross_round_dedup(pool, ltr_bounds)

@@ -4478,9 +4478,16 @@ def main():
     # k2l_tsv's own ltr5_start/ltr5_end/ltr3_start/ltr3_end are Kmer2LTR's
     # calls against the bounded record dedup is about to read, so the two
     # share both frame and key by construction.
+    ltr_bounds_for_dedup = ltr_bounds_from_table(k2l_tsv)
+    if len(ltr_bounds_for_dedup) < n_named:
+        print(f"[Step9b] WARNING: LTR boundary map covers "
+              f"{len(ltr_bounds_for_dedup)} of {n_named} element(s); "
+              f"{n_named - len(ltr_bounds_for_dedup)} have no usable LTR "
+              f"coordinates and will be treated as sharing no LTRs with "
+              f"anything")
     dedup_kmer2ltr_tsv(k2l_tsv, k2l_dedup_out, threshold=args.dedup_threshold,
                        tsd_names=tsd_after_trim or None, gff3_domains=gff3_dom_data,
-                       ltr_bounds=ltr_bounds_from_table(k2l_tsv),
+                       ltr_bounds=ltr_bounds_for_dedup,
                        rename_map=nest_rename_map)
 
     if nest_rename_map:
