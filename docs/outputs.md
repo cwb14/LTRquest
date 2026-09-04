@@ -83,32 +83,73 @@ Athal_tair10_chr2_LTRs_depth1_clean_ltr.fa
 
 ### 4.1 `depth<N>_clean_ltr.tsv` format
 
-Tab-separated, one row per element, 21 named columns
-(`#`-prefixed header line):
+Tab-separated, one row per element, 33 named columns (`#`-prefixed header
+line). Columns 1–29 are Kmer2LTR's own output, carried through unchanged:
+Kmer2LTR runs ahead of classification, so its boundary calls, divergence
+figures and TSDs are the round's single source of truth. LTRquest appends the
+last four — `strand`, `family`, `domains`, `nest_status` — once
+classification and clustering have run.
 
 | # | Column | Meaning |
 |---|---|---|
-| 1 | `name` | `chrom:start-end#Class/Superfamily/Clade` — 1-based inclusive genomic coordinates + TEsorter2 classification, e.g. `Chr2:102001-110500#LTR/Gypsy/Reina` |
-| 2 | `LTR_len` | Length (bp) of the element's LTR |
-| 3 | `aln_len` | Aligned length of the 5′-LTR vs 3′-LTR alignment |
-| 4 | `subs` | Substitutions between the two LTRs |
-| 5 | `ti` | Transitions |
-| 6 | `tv` | Transversions |
-| 7 | `raw_d` | Raw (p) distance between the two LTRs |
-| 8 | `raw_T` | Age (years) from `raw_d` |
-| 9 | `JC69_d` | Jukes–Cantor corrected distance |
-| 10 | `JC69_T` | Age (years) from JC69 |
-| 11 | `K2P_d` | Kimura 2-parameter distance — **the standard divergence estimate** |
-| 12 | `K2P_T` | **Insertion age (years)** = `K2P_d / (2μ)`, default μ = 3×10⁻⁸ subs/site/year |
-| 13 | `left_trim` | bp trimmed off the 5′ end by the WFA boundary detector (boundary over-extension) |
-| 14 | `right_trim` | bp trimmed off the 3′ end |
-| 15 | `ltr5_end` | Last bp of the 5′ LTR (1-based, relative to the element) |
-| 16 | `ltr3_start` | First bp of the 3′ LTR (1-based, relative to the element) |
-| 17 | `tsd` | Target-site duplication motif, or `.` if none found |
-| 18 | `strand` | `+`, `-`, or `.` if undetermined — see 4.1.1 |
-| 19 | `family` | `<prefix>_fam00001` … — see section 5 |
-| 20 | `domains` | Protein domains with genomic coords: `DOMAIN\|Clade@start-end;...` e.g. `RT\|Bianca@910695-911483;INT\|Bianca@912348-912953`, or `.` |
-| 21 | `nest_status` | Nesting relations: `nest-outer:chrom:s-e` (that element is inside me) and/or `nest-inner:chrom:s-e` (I am inside that element), `;`-joined; `.` if un-nested |
+| 1 | `seq_id` | Element id: `chrom:start-end#Order/Superfamily/Clade`, e.g. `Chr2:102001-110500#LTR/Gypsy/Reina` |
+| 2 | `seq_len` | Length of the record as supplied |
+| 3 | `status` | `pass`, `weak_pair`, `k2p_undefined`, `no_pair`, `too_short`, or `all_ambiguous`. Only `pass` rows reach LTRquest's output |
+| 4 | `ltr5_start` | 1-based inclusive, relative to the record. Always `1` here — see below |
+| 5 | `ltr5_end` | 1-based inclusive, relative to the record: last bp of the 5′ LTR |
+| 6 | `ltr3_start` | 1-based inclusive, relative to the record: first bp of the 3′ LTR |
+| 7 | `ltr3_end` | 1-based inclusive, relative to the record. Always equals `seq_len` here — see below |
+| 8 | `ltr5_len` | Length of the 5′ LTR |
+| 9 | `ltr3_len` | Length of the 3′ LTR |
+| 10 | `flank5_len` | bp of over-extension the detector added on the 5′ side. Always `0` here, by construction — see below |
+| 11 | `flank3_len` | bp of over-extension the detector added on the 3′ side. Always `0` here, by construction — see below |
+| 12 | `aln_len` | Length of the LTR-pair alignment, **including** gap columns |
+| 13 | `n_sites` | Ungapped, unambiguous columns — the denominator for `identity`, `p_dist` and `k2p` |
+| 14 | `n_ts` | Transitions |
+| 15 | `n_tv` | Transversions |
+| 16 | `n_gapcols` | Alignment columns with a gap on either side |
+| 17 | `identity` | `n_match / n_sites` |
+| 18 | `p_dist` | `(n_ts + n_tv) / n_sites` |
+| 19 | `k2p` | Kimura 2-parameter distance. `NA` when saturated, never clamped |
+| 20 | `k2p_se` | Standard error of `k2p` |
+| 21 | `bitscore` | Global alignment score of the two LTRs under a fixed generic model |
+| 22 | `flank_margin_bits` | How decisively the boundary was called. `NA` when the discovery core already reached both termini |
+| 23 | `cigar` | Extended CIGAR of the LTR-pair alignment; query = 5′ LTR |
+| 24 | `motif` | The two terminal dinucleotides, lowercased, e.g. `tg...ca`. Read off the called boundary, never used to find it |
+| 25 | `k2p_time` | `round(k2p / (2 × mutation_rate))`, years since insertion; set by `--mutation-rate` (default `3e-8`) |
+| 26 | `orientation` | Whether *this record* is stored reverse-complemented relative to its own header locus. Not biology — see `strand` below |
+| 27 | `tsd` | Target-site duplication at the called boundary. `.` = searched and absent; `NA` = could not be searched |
+| 28 | `tsd_offset` | `d5,d3` — how far each boundary had to move for `tsd` to appear, positive meaning *into* the element. `NA` when `tsd` is `.` |
+| 29 | `tsd_input` | The same measurement at the record's termini as originally supplied, before re-bounding |
+| 30 | `strand` | The element's biological orientation, resolved by LTRquest from classification, domain order and pass-2 homology: `+`, `-`, or `.` if none of those resolved it |
+| 31 | `family` | Family id from the pooled consensus-LTR clustering, `<prefix>_fam00001` … — see section 5 |
+| 32 | `domains` | Protein domains with genomic coordinates: `GENE\|clade@start-end;...`, or `.` |
+| 33 | `nest_status` | `nest-outer:chrom:s-e` (that element is inside me) and/or `nest-inner:chrom:s-e` (I am inside that element), `;`-joined, or `.` if un-nested |
+
+Three things this table will burn you on if you skim it:
+
+- **`.` and `NA` are not the same value.** `tsd` (and `tsd_input`, the same
+  measurement taken at the record's original termini) write `.` when the
+  search ran and found no duplication — a real negative result — and `NA`
+  when the search had no chance to run at all, for instance because the
+  element's contig could not be matched back to the reference genome. Treat
+  the two as one "missing" bucket and you will misjudge every TSD call:
+  presence-vs-absence and ran-vs-could-not-run are different findings, and
+  only one of them says anything about the boundary.
+- **`strand` and `orientation` answer different questions.** `orientation`
+  is a storage fact: whether this FASTA record happens to be the reverse
+  complement of the genome at its own header coordinates, decided purely by
+  Kmer2LTR comparing the record against `--genome`. `strand` is a biological
+  claim: which way the element is transcribed, decided later by LTRquest from
+  classification, domain order and pass-2 homology. The two are independent —
+  an element stored forward (`orientation=+`) can carry either strand, and
+  vice versa.
+- **Every row satisfies `ltr5_start == 1` and `ltr3_end == seq_len`.** That is
+  what "Kmer2LTR-bounded" means: the record has already been cut down to the
+  called LTR pair, so both flanks report `0` and there is nothing upstream or
+  downstream of the element left in the record. This is not merely intended —
+  `assert_bounded` checks it against every row at the end of each round and
+  raises before the round can finish if a single one fails.
 
 ### 4.2 `depth<N>_clean_ltr.fa` format — nested regions are masked
 
@@ -211,6 +252,11 @@ Notes:
 - Blocks are coordinate-sorted, and lines within a block are too, but
   **overlapping blocks are not interleaved** — so a nested element's block
   follows its host's in full.
+- GFF3 attribute names are their own vocabulary, independent of the element
+  table's column names: `K2P_d`/`K2P_T` above read from `k2p`/`k2p_time` in
+  section 4.1. Keeping the attribute names stable regardless of what the
+  table's own columns are called is what lets an existing GFF3 consumer keep
+  working unmodified.
 
 ## 7. Plots (`<prefix>_plots/`)
 

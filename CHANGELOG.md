@@ -53,6 +53,67 @@ the source tree.
 - Failures to find or build a helper name the conda package that provides it and
   the compiler toolchain that would build it, instead of only the tool.
 
+Upgrades the bundled Kmer2LTR from its original k-mer/MAFFT implementation to
+the rewritten package, and reorders the pipeline around what that rewrite
+makes possible. Kmer2LTR now runs *ahead of* classification instead of after
+it, so its boundary calls, K2P divergence figures and TSDs are the round's
+single source of truth rather than figures LTRquest re-derived and could
+disagree with. The new tool's CLI and output schema are not compatible with
+the old one's, which forces everything below.
+
+### Added
+
+- `--mutation-rate`, forwarded to Kmer2LTR's `-u` for both the per-round
+  table and the pooled family-clustering pass. Insertion age used to come
+  from a fixed μ = 3×10⁻⁸ baked into the old Kmer2LTR script with no flag to
+  change it; now `k2p_time` is `NA` unless you supply a rate that actually
+  matches your organism.
+
+### Changed
+
+- LTRquest's own `depth<N>_clean_ltr.tsv` is now Kmer2LTR's 33-column schema
+  (see [docs/outputs.md](docs/outputs.md)), replacing the old 21-column one
+  built around `LTR_len`, `raw_d`/`raw_T`, `JC69_d`/`JC69_T` and
+  `left_trim`/`right_trim` — none of which the new boundary model or K2P
+  estimator produces. `K2P_d`/`K2P_T` survive only as the GFF3 attribute
+  names they always were; the table columns underneath them are now
+  `k2p`/`k2p_time`.
+- `flag_fp_families.py` moves out of the Kmer2LTR clone and into LTRquest as
+  `ltrquest.flag_fp` / `ltrquest-flagfp`. Flagging false-positive families
+  reads Kmer2LTR's clustering output; it was never a Kmer2LTR concern, only
+  ever colocated with it because that happened to be where the script lived.
+
+### Removed
+
+- Six flags that had nothing left to forward to once Kmer2LTR's internals
+  changed underneath them: `--wfa-align` (the new tool always aligns with
+  WFA, so there is no MAFFT default left to opt out of), `--kmer2ltr-max-win-
+  overdisp` and `--kmer2ltr-min-retained-fraction` (tuning for the old k-mer
+  window search; the new discovery stage is exact Smith-Waterman with no
+  overdispersion or retained-fraction knobs), `--kmer2ltr-domains` (the old
+  script's own domain calls; domains have only ever come from TEsorter2 in
+  this pipeline), `--tsd-min-len` (the new Kmer2LTR accepts a TSD on an
+  exact-match, two-distinct-base rule with no length floor to set), and
+  `--tesorter-use-ret` (chose whether classification saw the ret span or the
+  internal span of a candidate; structurally inert now that Kmer2LTR needs
+  both LTRs to measure divergence, so classification must always receive the
+  full-length element and the internals-only path can no longer feed it).
+
+### Fixed
+
+- **GFF3 `long_terminal_repeat` sub-features landed on the wrong span for
+  minus-strand elements.** The coordinates feeding them did not always agree
+  with the GFF3 writer's own assumption — that the earlier-positioned LTR in
+  the record is the 5' one. Kmer2LTR's `ltr5`/`ltr3` are assigned purely by
+  position in the record it was handed, never by strand, so that assumption
+  now always holds.
+- **Same-round nest masking painted the wrong bases on reverse-complemented
+  elements.** `nest_status` intervals are always forward-genomic, but on the
+  ~45% of elements whose library record Kmer2LTR reverse-complemented for
+  family clustering, the interval was never mirrored before being painted
+  onto the flipped record. `mask_same_round_inners_in_fa` now mirrors it for
+  every record `bounded_fasta_oriented` flipped.
+
 ## [1.0.1] - 2026-08-24
 
 Fixes two bugs that made the published 1.0.0 container unusable for a real run.

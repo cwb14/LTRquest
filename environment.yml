@@ -15,17 +15,20 @@ dependencies:
   - mafft=7.526
   - trimal=1.5.1
   - hmmer=3.4                       # hmmsearch/nhmmer (TEsorter2)
-  - blast                           # blastn/makeblastdb (flag_fp_families; TEsorter2 blast pass-2)
+  - blast                           # blastn/makeblastdb (ltrquest-flagfp; TEsorter2 blast pass-2)
   - minimap2                        # TEsorter2 minimap2 pass-2 (PATH lookup); fallback for tools build
   - miniprot                        # protein mapping; fallback if source build fails
   - sdust                           # --run-sdust; found on PATH, so never built
   # --- building the helpers that nobody packages ---
-  # Kmer2LTR and TEsorter2 are cloned on first use; TRF-mod is cloned *and*
-  # compiled, and it runs by default (--no-trf turns it off). Without these four
-  # the first real run dies on `git: not found` or `cc: not found` -- invisible
-  # on a workstation that already has build tools, fatal on a clean cluster.
-  # TRF-mod's makefile hardcodes CC=gcc, so LTRquest retries the build with
-  # CC=$CC, the compiler this environment installs.
+  # TEsorter2 is cloned on first use; TRF-mod is cloned *and* compiled, and it
+  # runs by default (--no-trf turns it off). Kmer2LTR is a Python package now:
+  # resolved from PATH if it is already installed there, and otherwise cloned
+  # to --tools-dir and run via PYTHONPATH -- no compiler involved either way.
+  # Without git or a compiler the first real run still dies on
+  # `git: not found` or `cc: not found` -- invisible on a workstation that
+  # already has build tools, fatal on a clean cluster. TRF-mod's makefile
+  # hardcodes CC=gcc, so LTRquest retries the build with CC=$CC, the compiler
+  # this environment installs.
   - git
   - make
   - c-compiler                      # provides $CC; TRF-mod and sdust are C
@@ -35,6 +38,11 @@ dependencies:
   - numpy
   - matplotlib-base
   - networkx                        # Kmer2LTR ltr_family_network
-  - pyfaidx                         # Kmer2LTR flag_fp_families
+  - pyfaidx                         # ltrquest-flagfp
   - pyhmmer>=0.10                   # TEsorter2
   - pyfastx                         # TEsorter2
+  # --- Kmer2LTR's own runtime deps: not conda-forge-clean on this platform,
+  # so Kmer2LTR's own environment.yml installs them via pip too ---
+  - pip:
+      - parasail
+      - pywfa
