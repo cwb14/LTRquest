@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Add `strand` and `family` columns to the depth-bucketed LTR-RT tables written by
-ltrquest.reconcile (and FP-purged by flag_fp_families.py).
+ltrquest.reconcile (and FP-purged by ltrquest.flag_fp).
 
 Both {prefix}_depth{N}_ltr.tsv and {prefix}_depth{N}_clean_ltr.tsv are rewritten
 in place, gaining two columns immediately after `tsd`:
@@ -118,7 +118,7 @@ def select_annotation_set(prefix: str, indir: str = "."
     """The set a consumer should read: FP-purged if any exists, else raw.
 
     Mirrors plots.sh. A depth whose _clean_ table is absent while
-    other _clean_ tables exist was fully purged by flag_fp_families.py and is
+    other _clean_ tables exist was fully purged by ltrquest.flag_fp and is
     correctly omitted -- never back-filled from the raw table.
     """
     for variant in ("clean", "raw"):

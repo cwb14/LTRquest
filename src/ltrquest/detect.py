@@ -1255,96 +1255,6 @@ def filter_scn_by_sdust(
 # Step 7: build LTR FASTA from stitched SCN
 # -----------------------------
 
-def scn_to_internal_fasta(
-    stitched_scn: str,
-    genome_fa: str,
-    out_fa: str,
-    require_run_chars: Optional[List[str]] = None,
-    exclude_run_char: Optional[str] = None,
-    base_min: int = 800,
-    flank_min: int = 80,
-):
-    """
-    Uses e(lLTR) and s(rLTR) (1-based inclusive coords from ltrharvest tabout),
-    plus chrom (last column), to extract INTERNAL sequence only (LTRs excluded).
-    """
-    genome = load_fasta_as_dict(genome_fa)
-
-    req = []
-    if require_run_chars:
-        for c in require_run_chars:
-            c = (c or "").strip().upper()
-            if c:
-                req.append(c)
-
-    n_written = 0
-    with open(out_fa, "w") as out, open(stitched_scn, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = re.split(r"\s+", line)
-            if len(parts) < 12:
-                continue
-
-            sret, eret = parts[0], parts[1]
-            el = parts[4]
-            sr = parts[6]
-            chrom = parts[-1]
-
-            if not (sret.isdigit() and eret.isdigit() and el.isdigit() and sr.isdigit()):
-                continue
-
-            sret1 = int(sret)
-            eret1 = int(eret)
-            el1   = int(el)
-            sr1   = int(sr)
-
-            if eret1 < sret1:
-                sret1, eret1 = eret1, sret1
-
-            internal_start1 = el1 + 1
-            internal_end1   = sr1 - 1
-            if internal_end1 < internal_start1:
-                continue
-
-            seq = genome.get(chrom)
-            if seq is None:
-                continue
-
-            fl_start0 = sret1 - 1
-            fl_end0   = eret1
-            if fl_start0 < 0 or fl_end0 > len(seq):
-                continue
-
-            req = _is_valid_require_run_chars(require_run_chars)
-
-            if req:
-                full_len_seq = seq[fl_start0:fl_end0].upper()
-                if not has_nested_run_signature(full_len_seq, req, base_min=base_min, flank_min=flank_min):
-                    continue
-
-            # Exclude run char filter on FULL LENGTH
-            if exclude_run_char:
-                full_len_seq = seq[fl_start0:fl_end0].upper()
-                if has_exclude_run_char(full_len_seq, exclude_run_char):
-                    continue
-
-            start0 = internal_start1 - 1
-            end0   = internal_end1
-            if start0 < 0 or end0 > len(seq):
-                continue
-
-            header = f"{chrom}:{sret1}-{eret1}"
-            out.write(f">{header}\n")
-            frag = seq[start0:end0]
-            for i in range(0, len(frag), 60):
-                out.write(frag[i:i+60] + "\n")
-            n_written += 1
-
-    if n_written == 0:
-        Path(out_fa).touch()
-
 def hardmask_fasta_by_bed0(in_fasta: str, bed_path: str, out_fasta: str) -> int:
     """
     Hardmask regions in a FASTA using a BED file with:
@@ -1815,83 +1725,8 @@ def load_tebinsorter_domains_from_db(db_path: str, pipeline_py_path: str,
 
 
 # -----------------------------
-# Step 8: build kmer2ltr.domain from stitched SCN
-# -----------------------------
-
-def scn_to_kmer2ltr_domain(stitched_scn: str, out_domain: str, tesorter_cls_tsv: Optional[str] = None):
-    """
-    Writes:
-      {chrom}:{s(ret)}-{e(ret)}#{Order/Superfamily/Clade} <TAB> max(l(lLTR), l(rLTR))
-    """
-    te2ann: Dict[str, str] = {}
-    if tesorter_cls_tsv:
-        te2ann = load_tesorter_te_to_annotation(tesorter_cls_tsv)
-
-    n_written = 0
-    with open(stitched_scn, "r") as fin, open(out_domain, "w") as out:
-        for line in fin:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            c = line.split()
-            if len(c) < 12:
-                continue
-
-            sret, eret = c[0], c[1]
-            chrom = c[-1]
-
-            if not (sret.isdigit() and eret.isdigit()):
-                continue
-            try:
-                ll = int(c[5])
-                rl = int(c[8])
-            except ValueError:
-                continue
-
-            te_key = f"{chrom}:{sret}-{eret}"
-            ann = te2ann.get(te_key, "LTR/unknown/unknown")
-
-            out.write(f"{te_key}#{ann}\t{max(ll, rl)}\n")
-            n_written += 1
-
-    if n_written == 0:
-        Path(out_domain).touch()
-
-# -----------------------------
 # Tool setup (./tools/)
 # -----------------------------
-
-def tool_usable_kmer2ltr(k2l_dir: Path) -> bool:
-    script = (k2l_dir / "Kmer2LTR.py").resolve()
-    if not script.exists():
-        return False
-    try:
-        r = subprocess.run(
-            ["python3", str(script), "-h"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        txt = (r.stdout or "") + "\n" + (r.stderr or "")
-        return ("--max-win-overdisp" in txt) or ("Kmer2LTR" in txt) or (r.returncode == 0)
-    except Exception:
-        return False
-
-def ensure_kmer2ltr(tools_dir: Path) -> str:
-    tools_dir = mkdirp(tools_dir)
-    k2l_dir = tools_dir / "Kmer2LTR"
-
-    if not tool_usable_kmer2ltr(k2l_dir):
-        if not k2l_dir.exists():
-            run(["git", "clone", "https://github.com/cwb14/Kmer2LTR.git", str(k2l_dir)], check=True)
-        if not tool_usable_kmer2ltr(k2l_dir):
-            raise RuntimeError(
-                f"Kmer2LTR appears unusable in: {k2l_dir}\n"
-                f"Try: python3 {k2l_dir}/Kmer2LTR.py -h"
-            )
-
-    return str((k2l_dir / "Kmer2LTR.py").resolve())
-
 
 def tool_usable_generic(bin_path: Path, args: List[str]) -> bool:
     if not bin_path.exists() or not os.access(str(bin_path), os.X_OK):
@@ -2502,55 +2337,6 @@ def _rescue_weak_hmm_pass2_matches(
 
     return len(rescue)
 
-def run_kmer2ltr(kmer2ltr_py: str, in_fa: str, out_prefix: str, outdir: Path,
-                threads: int, max_win_overdisp: float, min_retained_fraction: float,
-                domain_file: Optional[str] = None,
-                wfa_align: bool = False,
-                verbose: bool = False) -> str:
-    """
-    Runs Kmer2LTR in outdir.
-    Returns the path to the main TSV output (the file named exactly out_prefix).
-    """
-    mkdirp(outdir)
-    which_or_die("mafft")
-    which_or_die("trimal")
-
-    kmer2ltr_py_abs = str(Path(kmer2ltr_py).resolve())
-
-    cmd = [
-        "python3", kmer2ltr_py_abs,
-        "-i", str(Path(in_fa).resolve()),
-        "--max-win-overdisp", str(max_win_overdisp),
-        "--min-retained-fraction", str(min_retained_fraction),
-        "-p", str(threads),
-        "--purge-subdirs",
-        "-o", out_prefix,
-    ]
-
-    if domain_file:
-        df = Path(domain_file).resolve()
-        if not df.exists() or df.stat().st_size == 0:
-            raise RuntimeError(f"Kmer2LTR domain file requested but missing/empty: {df}")
-        cmd += ["-D", str(df)]
-
-    if wfa_align:
-        cmd += ["--wfa-align"]
-
-    if verbose:
-        label = f"  $ {' '.join(cmd)}\n    (cwd: {outdir})"
-        print(label, file=sys.stderr)
-
-    # Let stderr pass through so Kmer2LTR's progress counter is visible
-    r = subprocess.run(cmd, cwd=str(outdir), stdout=subprocess.PIPE, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"Kmer2LTR failed (exit {r.returncode})")
-
-    main_out = outdir / out_prefix
-    if not main_out.exists():
-        raise RuntimeError(f"Kmer2LTR finished but did not create expected output: {main_out}")
-
-    return str(main_out)
-
 def _parse_interval_from_kmer2ltr_col1(col1: str) -> Optional[Tuple[str, int, int]]:
     left = col1.split("#", 1)[0]
     if ":" not in left:
@@ -2649,23 +2435,6 @@ def tsd_names_from_kmer2ltr(kmer2ltr_tsv: str) -> Dict[str, str]:
             continue
         out[row["seq_id"].split("#", 1)[0]] = motif
     return out
-
-
-def _tsd_names_from_fasta(fa_path: str) -> Set[str]:
-    """Return set of 'chrom:start-end' keys parsed from TSD-positive FASTA headers.
-
-    Expected header format: >chrom:start-end#classification ...
-    """
-    names: Set[str] = set()
-    p = Path(fa_path)
-    if not p.exists() or p.stat().st_size == 0:
-        return names
-    with open(fa_path) as f:
-        for line in f:
-            if line.startswith(">"):
-                key = line[1:].strip().split("#")[0].split()[0]
-                names.add(key)
-    return names
 
 
 def pre_purge_tsd_dominated(
@@ -3851,298 +3620,6 @@ def bounded_fasta_oriented(bounded_fa: str, cls_tsv_path: str, out_fa: str,
     return revcomped
 
 
-def _find_tsd_seq(left: str, right: str, min_len: int = 5) -> Optional[str]:
-    """
-    Return the longest exact shared substring (>= min_len) between left and
-    right flanks, or None.  Rejects low-complexity kmers (must contain >=2
-    distinct bases).  Iterates longest-first so the first hit is the best.
-    """
-    left = left.upper()
-    right = right.upper()
-
-    if len(left) < min_len or len(right) < min_len:
-        return None
-
-    maxk = min(len(left), len(right))
-
-    for k in range(maxk, min_len - 1, -1):
-        for i in range(0, len(left) - k + 1):
-            mer = left[i:i+k]
-
-            if len(set(mer)) < 2:
-                continue
-
-            if mer in right:
-                return mer
-
-    return None
-
-
-def _has_exact_tsd(left: str, right: str, min_len: int = 5) -> bool:
-    """Wrapper: True if a valid TSD exists between left and right flanks."""
-    return _find_tsd_seq(left, right, min_len=min_len) is not None
-
-def wfa_guided_tsd_names(
-    kmer2ltr_tsv: str,
-    genome_fa: str,
-    existing_tsd_names: Dict[str, str],
-    min_len: int = 5,
-) -> Dict[str, str]:
-    """
-    For kmer2ltr candidates WITHOUT an existing TSD, use WFA left/right trim
-    columns (cols 13-14, 1-indexed) to adjust element boundaries inward and
-    retry TSD search at the shifted positions.
-
-    The WFA -k trim tells us how many alignment columns at each end of the
-    LTR-pair alignment are unreliable (no k consecutive matches).  This
-    corresponds to boundary over-extension:
-      - left_trim  → 5' LTR outer boundary shifted left into flanking DNA
-      - right_trim → 3' LTR outer boundary shifted right into flanking DNA
-
-    Returns dict mapping newly recovered 'chrom:start-end' keys to TSD motifs.
-    """
-    tsv_path = Path(kmer2ltr_tsv)
-    if not tsv_path.exists() or tsv_path.stat().st_size == 0:
-        return {}
-
-    genome = load_fasta_as_dict(genome_fa)
-    recovered: Dict[str, str] = {}
-
-    with open(kmer2ltr_tsv) as f:
-        for line in f:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            parts = line.split("\t")
-            if len(parts) < 14:
-                continue
-
-            parsed = _parse_interval_from_kmer2ltr_col1(parts[0])
-            if parsed is None:
-                continue
-            chrom, s, e = parsed
-            key = f"{chrom}:{s}-{e}"
-
-            if key in existing_tsd_names:
-                continue
-
-            try:
-                left_trim = int(parts[12])
-                right_trim = int(parts[13])
-            except (ValueError, IndexError):
-                continue
-
-            if left_trim == 0 and right_trim == 0:
-                continue
-
-            seq = genome.get(chrom)
-            if seq is None:
-                continue
-
-            adj_s = s + left_trim   # shift 5' outer boundary inward (1-based)
-            adj_e = e - right_trim  # shift 3' outer boundary inward (1-based)
-
-            if adj_s >= adj_e or adj_s < 1 or adj_e > len(seq):
-                continue
-
-            # Extract flanks at adjusted boundaries (same window as tsd_positive_full_length_from_scn)
-            fl0 = adj_s - 1  # 0-based left boundary
-            fr0 = adj_e      # 0-based one-past-end
-
-            left_start0  = max(0, fl0 - 6)
-            left_end0    = min(len(seq), fl0 + 1)
-            right_start0 = max(0, fr0 - 1)
-            right_end0   = min(len(seq), (fr0 - 1) + 7)
-
-            left_flank  = seq[left_start0:left_end0]
-            right_flank = seq[right_start0:right_end0]
-
-            tsd_motif = _find_tsd_seq(left_flank, right_flank, min_len=min_len)
-            if tsd_motif is not None:
-                recovered[key] = tsd_motif
-
-    return recovered
-
-
-def rescue_nonautonomous_by_tsd_from_scn(
-    stitched_scn: str,
-    genome_fa: str,
-    tesorter_retained_te_keys: set,
-    out_fa: str,
-    min_len: int = 5,
-    require_run_chars: Optional[List[str]] = None,
-    exclude_run_char: Optional[str] = None,
-    base_min: int = 800,
-    flank_min: int = 80,
-) -> int:
-    """
-    For each SCN candidate NOT present in tesorter_retained_te_keys, scan for TSD.
-    Writes full-length rescued sequences.
-    Returns number rescued.
-    """
-    genome = load_fasta_as_dict(genome_fa)
-
-    rescued = 0
-    seen = set()
-
-    with open(out_fa, "w") as out, open(stitched_scn, "r") as fin:
-        for line in fin:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = re.split(r"\s+", line)
-            if len(parts) < 12:
-                continue
-
-            sret_s, eret_s = parts[0], parts[1]
-            chrom = parts[-1]
-            if not (sret_s.isdigit() and eret_s.isdigit()):
-                continue
-
-            sret1 = int(sret_s)
-            eret1 = int(eret_s)
-            if eret1 < sret1:
-                sret1, eret1 = eret1, sret1
-
-            te_key = f"{chrom}:{sret1}-{eret1}"
-            if te_key in tesorter_retained_te_keys:
-                continue
-            if te_key in seen:
-                continue
-            seen.add(te_key)
-
-            seq = genome.get(chrom)
-            if seq is None:
-                continue
-
-            fl0 = sret1 - 1
-            fr0 = eret1
-            if fl0 < 0 or fr0 > len(seq):
-                continue
-
-            left_start0 = max(0, fl0 - 6)
-            left_end0   = min(len(seq), fl0 + 1)
-            right_start0 = max(0, fr0 - 1)
-            right_end0   = min(len(seq), (fr0 - 1) + 7)
-
-            left = seq[left_start0:left_end0]
-            right = seq[right_start0:right_end0]
-
-            if not _has_exact_tsd(left, right, min_len=min_len):
-                continue
-
-            frag = seq[fl0:fr0]
-
-            req = _is_valid_require_run_chars(require_run_chars)
-            if req:
-                if not has_nested_run_signature(frag.upper(), req, base_min=base_min, flank_min=flank_min):
-                    continue
-
-            if exclude_run_char:
-                if has_exclude_run_char(frag.upper(), exclude_run_char):
-                    continue
-
-            hdr = f"{te_key}#LTR/unknown/unknown"
-            out.write(f">{hdr}\n")
-            for i in range(0, len(frag), 60):
-                out.write(frag[i:i+60] + "\n")
-            rescued += 1
-
-    if rescued == 0:
-        Path(out_fa).touch()
-    return rescued
-
-def tsd_positive_full_length_from_scn(
-    stitched_scn: str,
-    genome_fa: str,
-    out_fa: str,
-    min_len: int = 5,
-    require_run_chars: Optional[List[str]] = None,
-    exclude_run_char: Optional[str] = None,
-    base_min: int = 800,
-    flank_min: int = 80,
-) -> Tuple[int, Dict[str, str]]:
-    """
-    Scan ALL SCN candidates for a TSD near intact boundaries and write those candidates
-    as full-length FASTA suitable for TEsorter --pass2-classified-fasta.
-    Returns (number_written, dict mapping 'chrom:start-end' -> TSD_sequence).
-    """
-    genome = load_fasta_as_dict(genome_fa)
-
-    written = 0
-    seen = set()
-    tsd_seqs: Dict[str, str] = {}
-
-    req = _is_valid_require_run_chars(require_run_chars)
-
-    with open(out_fa, "w") as out, open(stitched_scn, "r") as fin:
-        for line in fin:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = re.split(r"\s+", line)
-            if len(parts) < 12:
-                continue
-
-            sret_s, eret_s = parts[0], parts[1]
-            chrom = parts[-1]
-            if not (sret_s.isdigit() and eret_s.isdigit()):
-                continue
-
-            sret1 = int(sret_s)
-            eret1 = int(eret_s)
-            if eret1 < sret1:
-                sret1, eret1 = eret1, sret1
-
-            te_key = f"{chrom}:{sret1}-{eret1}"
-            if te_key in seen:
-                continue
-            seen.add(te_key)
-
-            seq = genome.get(chrom)
-            if seq is None:
-                continue
-
-            fl0 = sret1 - 1
-            fr0 = eret1
-            if fl0 < 0 or fr0 > len(seq):
-                continue
-
-            left_start0  = max(0, fl0 - 6)
-            left_end0    = min(len(seq), fl0 + 1)
-            right_start0 = max(0, fr0 - 1)
-            right_end0   = min(len(seq), (fr0 - 1) + 7)
-
-            left = seq[left_start0:left_end0]
-            right = seq[right_start0:right_end0]
-
-            tsd_motif = _find_tsd_seq(left, right, min_len=min_len)
-            if tsd_motif is None:
-                continue
-
-            frag = seq[fl0:fr0]
-
-            if req:
-                if not has_nested_run_signature(frag.upper(), req, base_min=base_min, flank_min=flank_min):
-                    continue
-
-            if exclude_run_char:
-                if has_exclude_run_char(frag.upper(), exclude_run_char):
-                    continue
-
-            tsd_seqs[te_key] = tsd_motif
-
-            hdr = f"{te_key}#LTR/unknown/unknown"
-            out.write(f">{hdr}\n")
-            for i in range(0, len(frag), 60):
-                out.write(frag[i:i+60] + "\n")
-            written += 1
-
-    if written == 0:
-        Path(out_fa).touch()
-    return written, tsd_seqs
-
-
 # -----------------------------
 # main
 # -----------------------------
@@ -4204,30 +3681,10 @@ def main():
                     help="Max internal length filter on (l(ret)-l(lLTR)-l(rLTR)); 0 disables")
 
     # Kmer2LTR + dedup controls
-    ap.add_argument("--kmer2ltr-max-win-overdisp", type=float, default=1000.0,
-                    help="Kmer2LTR --max-win-overdisp")
-    ap.add_argument("--kmer2ltr-min-retained-fraction", type=float, default=0.01,
-                    help="Kmer2LTR --min-retained-fraction")
     ap.add_argument("--mutation-rate", type=float, default=3e-8,
                     help="neutral substitution rate per site per year; sets the k2p_time column (default: 3e-8)")
     ap.add_argument("--dedup-threshold", type=float, default=0.80,
                     help="Overlap threshold (fraction of shorter interval) for dedup (default: 0.80)")
-    ap.add_argument("--wfa-align", action="store_true", dest="wfa_align",
-                    help="Pass --wfa-align to Kmer2LTR: use WFA instead of mafft for pairwise LTR alignment (~30-50x faster)")
-
-    ap.add_argument(
-        "--kmer2ltr-domains",
-        dest="kmer2ltr_domains",
-        action="store_true",
-        default=True,
-        help="Pass {out_prefix}.kmer2ltr.domain to Kmer2LTR via -D"
-    )
-    ap.add_argument(
-        "--no-kmer2ltr-domains",
-        dest="kmer2ltr_domains",
-        action="store_false",
-        help="Do not pass a domain file to Kmer2LTR"
-    )
 
     # TEBinSorter (drop-in replacement for TEsorter; --tesorter-* flag names
     # retained for backward compatibility with callers/wrappers).
@@ -4243,12 +3700,6 @@ def main():
         dest="use_tesorter",
         action="store_false",
         help="Skip TEBinSorter entirely; build intact FASTA from SCN and feed directly to Kmer2LTR."
-    )
-
-    ap.add_argument(
-        "--tesorter-use-ret",
-        action="store_true",
-        help="For the FASTA fed into TEBinSorter, extract full-length LTR-RT using s(ret)/e(ret) instead of internal (default: internal)."
     )
 
     ap.add_argument("--tesorter-db", default="rexdb",
@@ -4358,12 +3809,6 @@ def main():
         "--tsd-pass2",
         action="store_true",
         help="Scan all SCN candidates for TSDs BEFORE TEBinSorter and feed TSD+ full-length sequences into TEBinSorter via --pass2-classified-fasta (default: off)."
-    )
-    ap.add_argument(
-        "--tsd-min-len",
-        type=int,
-        default=5,
-        help="Minimum exact shared k-mer length to call a TSD (default: 5)."
     )
 
     ap.add_argument("--ltr-tools", default="both", choices=["both", "ltrharvest", "ltr_finder"],

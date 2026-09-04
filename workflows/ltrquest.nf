@@ -63,7 +63,7 @@ workflow LTRQUEST {
     LTRQUEST_CLUSTER(ch_pooled_fasta.map { files -> [ pool, files ] })
     ch_versions = ch_versions.mix(LTRQUEST_CLUSTER.out.versions)
 
-    // flag_fp_families needs a genome to write its (here unused) masked FASTA.
+    // ltrquest.flag_fp needs a genome to write its (here unused) masked FASTA.
     // The CLI would re-run the whole pipeline on that mask when false positives
     // are pervasive; see docs/nextflow.md for why this pipeline reports instead.
     ch_first_genome = ch_samples.map { _meta, genome, _proteins -> genome }.first()

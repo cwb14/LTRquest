@@ -320,11 +320,11 @@ deliberately differs from the CLI.
 ```
 ltrquest (driver)
   │
-  ├── round 1..N ──┬─ ltrquest.detect     LTRharvest + LTR_finder → TEsorter2 → Kmer2LTR
+  ├── round 1..N ──┬─ ltrquest.detect     LTRharvest + LTR_finder → Kmer2LTR → TEsorter2
   │                └─ ltrquest.mask       mask this round's hits → next round's genome
   │
   ├── ltrquest.reconcile                  pool rounds, resolve containment → depth buckets
-  ├── Kmer2LTR + flag_fp_families         cluster into families, purge false-positive families
+  ├── Kmer2LTR + ltrquest.flag_fp         cluster into families, purge false-positive families
   ├── ltrquest.annotate                   add strand + family columns
   ├── ltrquest.gff3                       pooled GFF3
   └── ltrquest-plots                      structure PDFs, summary PDF, TEGV browser
