@@ -414,26 +414,58 @@ class DepthElement:
     insertions: list    # [(gStart, gEnd)] genomic nested children
 
 
+DEPTH_TSV_FIELDS = ("ltr5_len", "k2p", "domains", "nest_status")
+
+
+def _check_depth_columns(path: str, cols: Columns) -> None:
+    """Confirm a depth TSV's header covers enough of `DEPTH_TSV_FIELDS` to be
+    worth reading, once per file and before any row of it is used.
+
+    None of the four present means there is no header to key off of at all --
+    every row would come back as all-defaults, a family's worth of fabricated
+    zeros rather than a read that failed loudly. That file is refused outright.
+    Some but not all present is still a usable table; it is read, but named
+    column by column so the defaulted fields are on the record rather than
+    indistinguishable from a genuine all-zero element.
+    """
+    present = [name for name in DEPTH_TSV_FIELDS if name in cols]
+    if not present:
+        raise ValueError(
+            f"{path}: no header, or a header naming none of "
+            f"{', '.join(DEPTH_TSV_FIELDS)}; this is not a depth TSV"
+        )
+    missing = [name for name in DEPTH_TSV_FIELDS if name not in cols]
+    if missing:
+        print(f"[WARN] {path}: header has no {', '.join(missing)}; "
+              f"missing column(s) default to '.' for every row", file=sys.stderr)
+
+
 def load_depth_tsvs(paths: list[str]) -> dict[str, DepthElement]:
     """Parse LTRquest depth TSV(s) -> {element_id: DepthElement}. An element lives
     in exactly one depth bucket; first occurrence wins.
 
     Each file supplies its own header, so a depth TSV whose columns have grown or
     shifted since the last one still reads correctly: `ltr5_len`, `k2p`, `domains`,
-    and `nest_status` are found by name, and a column absent from a given file's
-    header degrades to the '.' default for every row in it rather than reading
-    whatever happens to sit at that position.
+    and `nest_status` are found by name rather than by position. A header naming
+    none of the four means the file isn't a depth TSV and is refused outright; one
+    naming only some of them is read anyway, with a warning naming what defaults.
     """
     out: dict[str, DepthElement] = {}
     for path in paths:
         with open(path) as fh:
             cols = Columns.of([])
+            checked = False
             for line in fh:
                 if not line:
                     continue
                 if line.startswith("#"):
                     cols = Columns.from_line(line)
+                    _check_depth_columns(path, cols)
+                    checked = True
                     continue
+                if not checked:
+                    _check_depth_columns(path, cols)
+                    checked = True
                 f = line.rstrip("\n").split("\t")
                 if len(f) < 3:
                     continue
@@ -456,6 +488,8 @@ def load_depth_tsvs(paths: list[str]) -> dict[str, DepthElement]:
                     raw_domains=parse_domains_field(cols.get(f, "domains")),
                     insertions=parse_insertions(cols.get(f, "nest_status")),
                 )
+            if not checked:
+                _check_depth_columns(path, cols)
     return out
 
 
