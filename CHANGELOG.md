@@ -119,6 +119,14 @@ the old one's, which forces the schema, flag and stage changes below.
   family clustering, the interval was never mirrored before being painted
   onto the flipped record. `mask_same_round_inners_in_fa` now mirrors it for
   every record `bounded_fasta_oriented` flipped.
+- **Depth-bucketed nest masking had the same reverse-complement bug as the
+  entry above.** `apply_depth_masking` is `mask_same_round_inners_in_fa`'s
+  depth-level twin -- it paints the same kind of forward-genomic interval onto
+  a library record -- but never carried the mirroring fix, so every
+  minus-strand nest-outer got its depth mark at the mirror-image position in
+  `{prefix}_depth<N>_ltr.fa`. It now reads the outer's own `orientation`
+  column -- restated to match the library's flips earlier in the same round
+  -- and mirrors for every row that reads `-`.
 - **A truncated or extended element could be recorded as a nested insertion.**
   `_ltrs_shared` tells a truncation/extension variant from a genuine nested
   insertion by checking whether the two elements' LTRs overlap, and returns

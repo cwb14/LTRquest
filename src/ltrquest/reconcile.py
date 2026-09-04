@@ -217,11 +217,42 @@ def build_updated_nest_status(key: str,
     return ";".join(f"{role}:{k}" for role, k in uniq)
 
 
+_ORIENTATION_UNREADABLE_WARNED = False
+
+
+def _outer_is_revcomped(outer_rec: dict, table_cols: Optional[Columns]) -> bool:
+    """True if `outer_rec` names a row whose `orientation` column reads `-`.
+
+    `restate_orientation_to_match_library` keeps this column in step with
+    `bounded_fasta_oriented`'s flips, so `-` is a direct readout of what the
+    library actually stored rather than something re-derived here that could
+    drift out of sync with it.
+
+    A row with no usable value (no header, no `orientation` column, or a row
+    too short to hold it) is reported once and treated as forward: guessing
+    `-` for a row that cannot say so risks mirroring content the library
+    never flipped, which is worse than leaving an already-rare case unmarked.
+    """
+    global _ORIENTATION_UNREADABLE_WARNED
+    row = outer_rec.get("cols")
+    if table_cols is not None and row is not None and "orientation" in table_cols:
+        orient = table_cols.get(row, "orientation")
+        if orient in ("+", "-"):
+            return orient == "-"
+    if not _ORIENTATION_UNREADABLE_WARNED:
+        print("[reconcile] WARNING: no usable 'orientation' column for a "
+              "nest-outer; its depth mask will not be mirrored even if the "
+              "library stores it reverse-complemented", file=sys.stderr)
+        _ORIENTATION_UNREADABLE_WARNED = True
+    return False
+
+
 def apply_depth_masking(outer_seq: str,
                         outer_rec: dict,
                         direct_children: Dict[str, List[str]],
                         rec_by_key: Dict[str, dict],
-                        depth_map: Dict[str, int]) -> str:
+                        depth_map: Dict[str, int],
+                        table_cols: Optional[Columns] = None) -> str:
     """Return outer_seq with every descendant region overwritten by the IUPAC
     char corresponding to that descendant's depth.
 
@@ -236,6 +267,7 @@ def apply_depth_masking(outer_seq: str,
     outer_chrom = outer_rec["chrom"]
     outer_len = len(outer_seq)
     chars = list(outer_seq)
+    is_revcomped = _outer_is_revcomped(outer_rec, table_cols)
 
     def paint(parent_key: str) -> None:
         for child_key in direct_children.get(parent_key, []):
@@ -254,6 +286,14 @@ def apply_depth_masking(outer_seq: str,
             rel_e = min(outer_len, child["e"] - outer_s + 1)
             if rel_e <= rel_s:
                 continue
+            if is_revcomped:
+                # outer_seq is the library's own record: minus-strand elements
+                # are stored reverse-complemented (bounded_fasta_oriented),
+                # while child coords above are always forward-genomic, so the
+                # interval has to be mirrored within the record before it is
+                # painted -- see mask_same_round_inners_in_fa, which mirrors
+                # for the same reason on the round-local twin of this mask.
+                rel_s, rel_e = outer_len - rel_e, outer_len - rel_s
             for p in range(rel_s, rel_e):
                 chars[p] = ch
             paint(child_key)
@@ -345,6 +385,7 @@ def main() -> None:
     # Step 6 below rewrites the last column in place, on the assumption that
     # it is nest_status; a schema that moved nest_status elsewhere would make
     # that a silent corruption instead of a failure here.
+    table_cols: Optional[Columns] = None
     if header is not None:
         names = parse_header(header)
         if not names or names[-1] != "nest_status":
@@ -352,6 +393,7 @@ def main() -> None:
                 f"expected the element table header to end in 'nest_status', "
                 f"got: {header!r}"
             )
+        table_cols = Columns.of(names)
 
     # 2. Load LTR boundaries (union across rounds). Read from each round's own
     # table rather than a separate file, so a boundary and the key it is
@@ -417,7 +459,8 @@ def main() -> None:
                 if seq is None:
                     continue
                 if d > 0:
-                    seq = apply_depth_masking(seq, r, children, rec_by_key, depth)
+                    seq = apply_depth_masking(seq, r, children, rec_by_key, depth,
+                                              table_cols)
                     n_repainted += 1
                 fout.write(f">{r['col1']}\n")
                 for i in range(0, len(seq), 60):
