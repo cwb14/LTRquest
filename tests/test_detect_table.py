@@ -222,3 +222,48 @@ def test_bounded_fasta_keeps_one_record_per_bounded_span(tmp_path):
     assert rename == {"chr1:100-2100": "chr1:120-2070"}
     assert list(dict(detect.iter_fasta(str(out)))) == ["chr1:120-2070"]
     assert len(set(rename.values())) == len(rename)
+
+
+# A good element and a short TSD+ neighbour that overlaps it almost exactly and
+# shares both LTRs, so the pre-purge has nothing to protect it as a nested TE.
+SCN = ("1000 3000 2001 1000 1200 201 2800 3000 201 95.0 0 chr1\n"
+       "1050 2950 1901 1050 1200 151 2800 2950 151 95.0 0 chr1\n")
+
+
+def _pair_table(tmp_path):
+    i = kmer2ltr.COLUMNS.index
+
+    def row(name, seq_len, ltr_len, tsd):
+        cols = ["NA"] * len(kmer2ltr.COLUMNS)
+        cols[i("seq_id")], cols[i("seq_len")], cols[i("status")] = name, str(seq_len), "pass"
+        cols[i("ltr5_len")] = cols[i("ltr3_len")] = cols[i("aln_len")] = str(ltr_len)
+        cols[i("tsd")] = tsd
+        return "\t".join(cols)
+
+    p = tmp_path / "k.tsv"
+    p.write_text("\n".join([K2L.splitlines()[0],
+                            row("chr1:1000-3000", 2001, 201, "."),      # keeps
+                            row("chr1:1050-2950", 1901, 80, "AAGCT")])  # too short
+                 + "\n")
+    return p
+
+
+def test_a_purger_the_length_filter_drops_cannot_take_a_neighbour_with_it(tmp_path):
+    scn = tmp_path / "s.scn"
+    scn.write_text(SCN)
+    bounds = detect.load_scn_ltr_boundaries(str(scn))
+    tsv = _pair_table(tmp_path)
+
+    # Unfiltered, the short TSD+ element dominates its good neighbour.
+    unfiltered = detect.tsd_names_from_kmer2ltr(str(tsv))
+    assert detect.pre_purge_tsd_dominated(
+        str(scn), set(unfiltered), threshold=0.80, ltr_bounds=bounds
+    ) == {"chr1:1000-3000"}
+
+    # Gating on the retained elements leaves nothing able to purge it.
+    detect.filter_kmer2ltr_in_place(str(tsv))
+    retained = detect.tsd_names_from_kmer2ltr(str(tsv))
+    assert retained == {}
+    assert detect.pre_purge_tsd_dominated(
+        str(scn), set(retained), threshold=0.80, ltr_bounds=bounds
+    ) == set()
