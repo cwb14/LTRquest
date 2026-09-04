@@ -267,3 +267,57 @@ def test_a_purger_the_length_filter_drops_cannot_take_a_neighbour_with_it(tmp_pa
     assert detect.pre_purge_tsd_dominated(
         str(scn), set(retained), threshold=0.80, ltr_bounds=bounds
     ) == set()
+
+
+BOUNDED_FA = (">chr1:120-2070\n" + "AC" * 1000 + "A\n"
+              ">chr1:9000-9400\n" + "TA" * 200 + "T\n")
+
+CLS_WITH_STRAND = ("#TE\tOrder\tSuperfamily\tClade\tComplete\tStrand\tDomains\n"
+                   "chr1:120-2070\tLTR\tCopia\tAle\tyes\t-\tGAG RT\n"
+                   "chr1:9000-9400\tLTR\tGypsy\tTat\tyes\t+\tGAG RT\n")
+
+LIB_RENAME = {"chr1:120-2070": "chr1:120-2070#LTR/Copia/Ale",
+             "chr1:9000-9400": "chr1:9000-9400#LTR/Gypsy/Tat"}
+
+
+def test_bounded_fasta_oriented_flips_only_the_minus_strand_record(tmp_path):
+    fa = tmp_path / "bounded.fa"
+    fa.write_text(BOUNDED_FA)
+    cls = tmp_path / "cls.tsv"
+    cls.write_text(CLS_WITH_STRAND)
+    out = tmp_path / "lib.fa"
+
+    flipped = detect.bounded_fasta_oriented(
+        str(fa), str(cls), str(out), set(LIB_RENAME.values()), LIB_RENAME)
+
+    assert flipped == {"chr1:120-2070#LTR/Copia/Ale"}
+    records = dict(detect.iter_fasta(str(out)))
+    assert records["chr1:120-2070#LTR/Copia/Ale"] == detect.revcomp("AC" * 1000 + "A")
+    assert records["chr1:9000-9400#LTR/Gypsy/Tat"] == "TA" * 200 + "T"
+
+
+def test_bounded_fasta_oriented_respects_keep_names(tmp_path):
+    fa = tmp_path / "bounded.fa"
+    fa.write_text(BOUNDED_FA)
+    cls = tmp_path / "cls.tsv"
+    cls.write_text(CLS_WITH_STRAND)
+    out = tmp_path / "lib.fa"
+
+    flipped = detect.bounded_fasta_oriented(
+        str(fa), str(cls), str(out), {"chr1:9000-9400#LTR/Gypsy/Tat"}, LIB_RENAME)
+
+    assert flipped == set()
+    assert list(dict(detect.iter_fasta(str(out)))) == ["chr1:9000-9400#LTR/Gypsy/Tat"]
+
+
+def test_bounded_fasta_oriented_defaults_to_forward_when_cls_tsv_has_no_row(tmp_path):
+    fa = tmp_path / "bounded.fa"
+    fa.write_text(">chr1:1-50\n" + "A" * 30 + "T" * 20 + "\n")
+    cls = tmp_path / "cls.tsv"
+    cls.write_text("#TE\tOrder\tSuperfamily\tClade\tComplete\tStrand\tDomains\n")
+    out = tmp_path / "lib.fa"
+
+    flipped = detect.bounded_fasta_oriented(str(fa), str(cls), str(out), {"chr1:1-50"}, {})
+
+    assert flipped == set()
+    assert dict(detect.iter_fasta(str(out)))["chr1:1-50"] == "A" * 30 + "T" * 20
