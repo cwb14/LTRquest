@@ -36,6 +36,14 @@ def test_read_rows_yields_dicts(tmp_path):
     assert rows[2]["tsd"] == "."
 
 
+def test_read_rows_accepts_a_header_that_already_has_a_hash(tmp_path):
+    p = tmp_path / "k.tsv"
+    p.write_text("#" + TSV)
+    rows = list(kmer2ltr.read_rows(p))
+    assert len(rows) == 3
+    assert rows[0]["seq_id"] == "chr1:100-200#LTR/Gypsy"
+
+
 def test_read_rows_rejects_a_headerless_file(tmp_path):
     p = tmp_path / "k.tsv"
     p.write_text("chr1:100-200\t101\tpass\n")

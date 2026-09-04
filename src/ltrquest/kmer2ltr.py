@@ -43,8 +43,16 @@ def _importable(src_dir: Path) -> bool:
     return (src_dir / "kmer2ltr" / "cli.py").is_file()
 
 
-def resolve(tools_dir) -> list[str]:
-    """An argv prefix that runs Kmer2LTR, cloning it if that is the only way."""
+def resolve(tools_dir: Path) -> list[str]:
+    """An argv prefix that runs Kmer2LTR, cloning it if that is the only way.
+
+    In the clone-fallback case the prefix leads with a `NAME=VALUE`
+    environment assignment (see `split_env`) rather than an executable --
+    the same shape `env VAR=val cmd...` takes in a shell. `run` unpacks this
+    for you; a caller that hands the result straight to `subprocess` instead
+    must call `split_env` on it first, or run it through a shell with `env`
+    in front.
+    """
     exe = shutil.which("Kmer2LTR")
     if exe:
         return [exe]
@@ -57,8 +65,18 @@ def resolve(tools_dir) -> list[str]:
     tools_dir.mkdir(parents=True, exist_ok=True)
     target = tools_dir / "Kmer2LTR"
     if not target.exists():
-        subprocess.run(["git", "clone", "--depth", "1", REPO_URL, str(target)],
-                       check=True)
+        try:
+            subprocess.run(["git", "clone", "--depth", "1", REPO_URL, str(target)],
+                           check=True)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"failed to clone {REPO_URL} into {target}: {e}. Compute nodes "
+                f"on this cluster often have no outbound network access -- "
+                f"clone it on a login node instead, or install Kmer2LTR "
+                f"(pip install kmer2ltr) so it is on PATH. If {target} exists "
+                f"from this failed attempt, delete it first: a leftover "
+                f"directory there stops the next run from retrying the clone."
+            ) from e
     if _importable(src_dir):
         return _module_argv(src_dir)
 
@@ -68,7 +86,7 @@ def resolve(tools_dir) -> list[str]:
     )
 
 
-def _split_env(prefix: Sequence[str]):
+def split_env(prefix: Sequence[str]) -> tuple[list[str], dict[str, str]]:
     """Separate leading NAME=VALUE assignments from the command itself."""
     env = dict(os.environ)
     argv = list(prefix)
@@ -106,7 +124,7 @@ def build_argv(prefix: Sequence[str], in_fa, out_tsv, *,
 
 def run(prefix: Sequence[str], in_fa, out_tsv, *, verbose: bool = False, **kwargs) -> Path:
     argv = build_argv(prefix, in_fa, out_tsv, **kwargs)
-    argv, env = _split_env(argv)
+    argv, env = split_env(argv)
     if verbose:
         argv = argv + ["-v"]
         print("+ " + " ".join(argv), flush=True)
