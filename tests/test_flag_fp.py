@@ -72,6 +72,29 @@ def test_load_depth_tsvs_warns_on_a_partial_header_but_still_reads_it(tmp_path, 
     assert "nest_status" in err
 
 
+def test_main_reports_a_headerless_depth_tsv_instead_of_crashing(tmp_path):
+    consensus = tmp_path / "consensus.tsv"
+    internal = tmp_path / "internal.tsv"
+    ltr_fasta = tmp_path / "ltrs.fa"
+    domains = tmp_path / "s_depth0_ltr.tsv"
+    consensus.write_text("rep1\tmem1#LTR/Gypsy/unknown\n")
+    internal.write_text("irep1\tmem1#LTR/Gypsy/unknown\n")
+    ltr_fasta.write_text(">rep1\nACGT\n")
+    domains.write_text("chr1:100-2100#LTR/Gypsy/Tekay\t2001\tpass\t300\t0.02\tAAGCT"
+                       "\tRT|Tekay@500-700\tnest-outer:chr1:900-1500\n")
+
+    with pytest.raises(SystemExit) as excinfo:
+        flag_fp.main([
+            "--consensus-cluster", str(consensus),
+            "--internal-cluster", str(internal),
+            "--ltr-fasta", str(ltr_fasta),
+            "--domains-tsv", str(domains),
+            "-o", str(tmp_path / "out"),
+        ])
+    assert excinfo.value.code
+    assert str(domains) in str(excinfo.value)
+
+
 def test_clean_depth_tsv_drops_fp_rows_and_scrubs_dangling_nest(tmp_path):
     p = tmp_path / "s_depth0_ltr.tsv"
     p.write_text(HEADER + ROWS)

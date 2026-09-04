@@ -1083,7 +1083,10 @@ def main(argv=None) -> int:
 
     if not args.no_plot:
         needed = {m for mem in families.values() for m in mem}
-        depth = load_depth_tsvs(args.domains_tsv)
+        try:
+            depth = load_depth_tsvs(args.domains_tsv)
+        except ValueError as e:
+            sys.exit(f"[ERROR] {e}")
         n_missing_dom = len(needed - set(depth))
         if n_missing_dom:
             print(f"[WARN] {n_missing_dom} family members absent from the depth TSV(s); "
