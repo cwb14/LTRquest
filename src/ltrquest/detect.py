@@ -35,6 +35,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+from . import kmer2ltr as k2l
+from .table import Columns, as_float, as_int, is_missing
+
+# Kmer2LTR's table is the element table: detection appends what it learns on
+# top of it rather than restating any of it, and `ltrquest.annotate` inserts
+# strand and family into the same table further down the pipeline. The two
+# schemas are stated together so the insertion point stays visible.
+DETECT_COLUMNS = k2l.COLUMNS + ["domains", "nest_status"]
+DETECT_HEADER = "#" + "\t".join(DETECT_COLUMNS) + "\n"
+ELEMENT_COLUMNS = k2l.COLUMNS + ["strand", "family", "domains", "nest_status"]
+ELEMENT_HEADER = "#" + "\t".join(ELEMENT_COLUMNS) + "\n"
+
 # -----------------------------
 # utilities
 # -----------------------------
@@ -2560,68 +2572,81 @@ def filter_kmer2ltr_in_place(kmer2ltr_tsv: str,
                              min_aln_len: int = 90,
                              min_len_ratio: float = 0.65,
                              min_ltrrt_len: int = 300) -> Tuple[int, int, int]:
-    """
-    Drop low-quality rows from a Kmer2LTR main output file in place.
+    """Drop rows Kmer2LTR could not bound, then the implausibly short ones.
 
-    Row layout (tab-separated): col1 'chrom:start-end#class', col2 LTR_len, col3 aln_len.
-    A row is kept iff:
-        LTR_len   >= min_ltr_len
-        aln_len   >= min_aln_len
-        len_ratio >= min_len_ratio    (len_ratio = min(LTR_len, aln_len) / max(LTR_len, aln_len))
-        LTRRT_len >= min_ltrrt_len    (LTRRT_len = end - start from col1)
+    `status` is the first gate: a row that is not `pass` has NA in every
+    coordinate, so no length test can be applied to it. The length ratio
+    catches pairs whose two LTRs disagree so badly that the alignment is
+    probably not between homologous ends.
 
-    Rows whose col1 interval or col2/col3 cannot be parsed are dropped (and
-    counted as malformed). Returns (n_kept, n_dropped, n_malformed).
+    Rows whose locus or lengths cannot be parsed are dropped and counted
+    separately. Returns (n_kept, n_dropped, n_malformed).
     """
     in_path = Path(kmer2ltr_tsv)
-    if not in_path.exists() or in_path.stat().st_size == 0:
-        return (0, 0, 0)
-
     tmp_path = in_path.parent / (in_path.name + ".filt.tmp")
-    n_kept = 0
-    n_dropped = 0
-    n_malformed = 0
+    n_kept = n_dropped = n_malformed = 0
 
     with open(in_path) as fin, open(tmp_path, "w") as fout:
+        header = fin.readline()
+        cols = Columns.from_line("#" + header if not header.startswith("#") else header)
+        if "status" not in cols:
+            raise ValueError(f"{kmer2ltr_tsv}: expected a Kmer2LTR header line")
+        fout.write(header)
+
         for raw in fin:
             if not raw.strip():
                 continue
             parts = raw.rstrip("\n").split("\t")
-            if len(parts) < 3:
-                n_malformed += 1
+            if cols.get(parts, "status", default="") != "pass":
+                n_dropped += 1
                 continue
 
-            parsed = _parse_interval_from_kmer2ltr_col1(parts[0])
+            parsed = _parse_interval_from_kmer2ltr_col1(cols.get(parts, "seq_id"))
             if parsed is None:
                 n_malformed += 1
                 continue
             _, s, e = parsed
             ltrrt_len = e - s
 
-            try:
-                ltr_len = int(float(parts[1]))
-                aln_len = int(float(parts[2]))
-            except ValueError:
+            ltr5 = as_int(cols.get(parts, "ltr5_len"))
+            ltr3 = as_int(cols.get(parts, "ltr3_len"))
+            aln = as_int(cols.get(parts, "aln_len"))
+            if ltr5 is None or ltr3 is None or aln is None:
                 n_malformed += 1
                 continue
 
-            hi = max(ltr_len, aln_len)
+            hi = max(ltr5, ltr3, aln)
             if hi <= 0:
                 n_dropped += 1
                 continue
-            len_ratio = min(ltr_len, aln_len) / hi
+            len_ratio = min(ltr5, ltr3, aln) / hi
 
-            if (ltr_len   >= min_ltr_len   and
-                aln_len   >= min_aln_len   and
-                len_ratio >= min_len_ratio and
-                ltrrt_len >= min_ltrrt_len):
+            if (min(ltr5, ltr3) >= min_ltr_len and
+                    aln >= min_aln_len and
+                    len_ratio >= min_len_ratio and
+                    ltrrt_len >= min_ltrrt_len):
                 fout.write(raw)
                 n_kept += 1
             else:
                 n_dropped += 1
 
-    os.replace(tmp_path, in_path)
+    tmp_path.replace(in_path)
     return (n_kept, n_dropped, n_malformed)
+
+
+def tsd_names_from_kmer2ltr(kmer2ltr_tsv: str) -> Dict[str, str]:
+    """{chrom:start-end: motif} for rows carrying a target-site duplication.
+
+    Keyed on the bare locus because the classification suffix is attached
+    later, and every other stage keys elements the same way.
+    """
+    out: Dict[str, str] = {}
+    for row in k2l.read_rows(kmer2ltr_tsv):
+        motif = row.get("tsd", "")
+        if is_missing(motif):
+            continue
+        out[row["seq_id"].split("#", 1)[0]] = motif
+    return out
 
 
 def _tsd_names_from_fasta(fa_path: str) -> Set[str]:
@@ -2913,8 +2938,8 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
                        rename_map: Optional[Dict[str, str]] = None,
                        ) -> None:
     """
-    Dedup a Kmer2LTR output TSV (main output file), keeping the lowest p-distance (col7).
-    Tie-breaker: if p-distance ties, keep the record with the largest aln_len (col3).
+    Dedup a Kmer2LTR output TSV, keeping the lowest p_dist.
+    Tie-breaker: if p_dist ties, keep the record with the largest aln_len.
 
     For "extension" pairs — records sharing a start or end coordinate — one is a
     truncation of the other.  The extension yields slightly higher p-distance but is
@@ -2925,13 +2950,26 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
     """
     in_path = Path(kmer2ltr_tsv)
     if not in_path.exists() or in_path.stat().st_size == 0:
-        Path(out_tsv).touch()
+        Path(out_tsv).write_text(DETECT_HEADER)
         return
 
+    tmp_body = in_path.parent / (in_path.name + ".body.tmp")
     tmp_sorted = in_path.parent / (in_path.name + ".sorted.tmp")
 
-    r = run(["sort", "-t:", "-k1,1V", "-k2,2n", str(in_path)], check=True, capture=True)
-    tmp_sorted.write_text(r.stdout or "")
+    # `sort` has no notion of a header line, so the body is separated out
+    # before it runs and the columns are resolved from the header here.
+    with open(in_path) as fin, open(tmp_body, "w") as fout:
+        header = fin.readline()
+        shutil.copyfileobj(fin, fout)
+    cols = Columns.from_line("#" + header if not header.startswith("#") else header)
+    i_id = cols.require("seq_id")
+    i_aln = cols.require("aln_len")
+    i_p = cols.require("p_dist")
+    n_fields = max(i_id, i_aln, i_p) + 1
+
+    with open(tmp_sorted, "w") as fh:
+        subprocess.run(["sort", "-t:", "-k1,1V", "-k2,2n", str(tmp_body)],
+                       stdout=fh, check=True)
 
     cluster: List[Dict[str, object]] = []
     cluster_chrom: Optional[str] = None
@@ -3012,11 +3050,12 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
         return f"{order}/{superfamily}/{clade}"
 
     def _write_enriched(rec, handle, nest_rels):
-        """Write a record with tsd, domains, nest_status columns appended."""
-        key = _rec_key(rec)
+        """Write a record with domains and nest_status appended.
 
-        # TSD: actual motif or "."
-        tsd_val = tsd_names.get(key, ".") if tsd_names else "."
+        The TSD is not appended: Kmer2LTR already reports it in the row, and
+        `tsd_names` serves the Layer-1 domination rule rather than the output.
+        """
+        key = _rec_key(rec)
 
         # Nest status
         rels = nest_rels.get(id(rec), [])
@@ -3051,7 +3090,7 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
                     if rename_map is not None:
                         rename_map[old_col1] = cols[0]
 
-        handle.write(f"{line}\t{tsd_val}\t{dom_val}\t{nest_val}\n")
+        handle.write(f"{line}\t{dom_val}\t{nest_val}\n")
 
     def flush_cluster(out_handle):
         if not cluster:
@@ -3263,34 +3302,27 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
         _write_enriched(best, out_handle, nest_rels)
 
     with open(tmp_sorted, "r") as fin, open(out_tsv, "w") as out:
-        # Header line
-        out.write("#name\tLTR_len\taln_len\tsubs\tti\ttv\traw_d\traw_T\t"
-                  "JC69_d\tJC69_T\tK2P_d\tK2P_T\tleft_trim\tright_trim\t"
-                  "ltr5_end\tltr3_start\ttsd\tdomains\tnest_status\n")
+        out.write(DETECT_HEADER)
         for raw in fin:
             if not raw.strip():
                 continue
             parts = raw.rstrip("\n").split("\t")
-            if len(parts) < 7:
-                out.write(raw.rstrip("\n") + "\t.\t.\t.\n")
+            if len(parts) < n_fields:
+                out.write(raw.rstrip("\n") + "\t.\t.\n")
                 continue
 
-            parsed = _parse_interval_from_kmer2ltr_col1(parts[0])
+            parsed = _parse_interval_from_kmer2ltr_col1(parts[i_id])
             if parsed is None:
-                out.write(raw.rstrip("\n") + "\t.\t.\t.\n")
+                out.write(raw.rstrip("\n") + "\t.\t.\n")
                 continue
             chrom, s, e = parsed
 
-            try:
-                p = float(parts[6])
-            except ValueError:
-                out.write(raw.rstrip("\n") + "\t.\t.\t.\n")
+            p = as_float(parts[i_p])
+            if p is None:
+                out.write(raw.rstrip("\n") + "\t.\t.\n")
                 continue
 
-            try:
-                aln = int(float(parts[2]))
-            except ValueError:
-                aln = 0
+            aln = as_int(parts[i_aln], 0)
 
             rec = {"chrom": chrom, "s": s, "e": e, "p": p, "aln": aln, "line": raw}
 
@@ -3321,10 +3353,57 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
 
         flush_cluster(out)
 
-    try:
-        tmp_sorted.unlink()
-    except Exception:
-        pass
+    for tmp in (tmp_body, tmp_sorted):
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def bounded_fasta(in_fa: str, k2l_tsv: str, out_fa: str,
+                  exclude: Optional[Set[str]] = None,
+                  wrap: int = 60) -> Dict[str, str]:
+    """Cut each element down to the bounds Kmer2LTR called for it.
+
+    Coordinates are 1-based inclusive against the record as supplied, so the
+    element is `seq[ltr5_start-1:ltr3_end]` and the header locus moves in by
+    the same amounts. Records Kmer2LTR could not bound are dropped; so are
+    records absent from the table.
+
+    Returns {old_name: new_name} so nesting and dedup can be re-keyed.
+    """
+    rows = {r["seq_id"]: r for r in k2l.read_rows(k2l_tsv)}
+    rename: Dict[str, str] = {}
+    with open(out_fa, "w") as out:
+        for name, seq in iter_fasta(in_fa):
+            row = rows.get(name)
+            if row is None or row["status"] != "pass":
+                continue
+            if exclude and name.split("#", 1)[0] in exclude:
+                continue
+            f5 = as_int(row["flank5_len"], 0)
+            f3 = as_int(row["flank3_len"], 0)
+            start = as_int(row["ltr5_start"])
+            end = as_int(row["ltr3_end"])
+            if start is None or end is None or end <= start:
+                continue
+            frag = seq[start - 1:end]
+
+            parsed = _parse_interval_from_kmer2ltr_col1(name)
+            if parsed is None:
+                new_name = name
+            else:
+                chrom, s, e = parsed
+                suffix = name.split("#", 1)[1] if "#" in name else None
+                new_name = f"{chrom}:{s + f5}-{e - f3}"
+                if suffix is not None:
+                    new_name += f"#{suffix}"
+
+            rename[name] = new_name
+            out.write(f">{new_name}\n")
+            for i in range(0, len(frag), wrap):
+                out.write(frag[i:i + wrap] + "\n")
+    return rename
 
 
 def subset_fasta_by_name_set(in_fa: str, out_fa: str, keep_names: set,
@@ -3464,6 +3543,72 @@ def names_from_kmer2ltr_dedup(dedup_tsv: str) -> set:
             if cols:
                 keep.add(cols[0])
     return keep
+
+
+def ltr_names_from_cls_tsv(cls_tsv_path: str) -> Dict[str, str]:
+    """{element: element#LTR/superfamily/clade} for TEsorter2's LTR calls.
+
+    An element TEsorter2 left unclassified, or called as something other than
+    an LTR retrotransposon, has no entry; that absence is what removes it from
+    the round.
+    """
+    names: Dict[str, str] = {}
+    with open(cls_tsv_path) as fin:
+        header_seen = False
+        for line in fin:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+
+            if not header_seen:
+                header_seen = True
+                low = line.lower()
+                if low.startswith("te\t") or low.startswith("#te\t"):
+                    continue
+
+            cols = line.split("\t")
+            if len(cols) < 7:
+                continue
+            te, order, superfam, clade = cols[:4]
+            if order != "LTR":
+                continue
+            names[te] = f"{te}#LTR/{superfam}/{clade}"
+    return names
+
+
+def relabel_kmer2ltr_tsv(kmer2ltr_tsv: str, names: Dict[str, str]) -> Tuple[int, int]:
+    """Restate the table under a new set of element names.
+
+    `names` maps each row's own `seq_id` onto the name the round carries the
+    element under from here. A row with no entry is dropped, so the table
+    holds exactly the elements the caller kept.
+
+    Returns (n_kept, n_dropped).
+    """
+    in_path = Path(kmer2ltr_tsv)
+    tmp_path = in_path.parent / (in_path.name + ".cls.tmp")
+    n_kept = n_dropped = 0
+
+    with open(in_path) as fin, open(tmp_path, "w") as fout:
+        header = fin.readline()
+        cols = Columns.from_line("#" + header if not header.startswith("#") else header)
+        i_id = cols.require("seq_id")
+        fout.write(header)
+
+        for raw in fin:
+            if not raw.strip():
+                continue
+            parts = raw.rstrip("\n").split("\t")
+            new_name = names.get(parts[i_id]) if len(parts) > i_id else None
+            if new_name is None:
+                n_dropped += 1
+                continue
+            parts[i_id] = new_name
+            fout.write("\t".join(parts) + "\n")
+            n_kept += 1
+
+    tmp_path.replace(in_path)
+    return n_kept, n_dropped
 
 
 def build_tesorter_full_length_ltr_fasta_from_cls_tsv(cls_tsv_path: str, genome_fa: str, out_fa: str):
@@ -3892,6 +4037,8 @@ def main():
                     help="Kmer2LTR --max-win-overdisp")
     ap.add_argument("--kmer2ltr-min-retained-fraction", type=float, default=0.01,
                     help="Kmer2LTR --min-retained-fraction")
+    ap.add_argument("--mutation-rate", type=float, default=3e-8,
+                    help="neutral substitution rate per site per year; sets the k2p_time column (default: 3e-8)")
     ap.add_argument("--dedup-threshold", type=float, default=0.80,
                     help="Overlap threshold (fraction of shorter interval) for dedup (default: 0.80)")
     ap.add_argument("--wfa-align", action="store_true", dest="wfa_align",
@@ -4132,7 +4279,7 @@ def main():
     if args.use_tesorter:
         tebinsorter_py_path = ensure_tebinsorter(tools_dir, local_path=args.tebinsorter_path)
 
-    kmer2ltr_py = ensure_kmer2ltr(tools_dir)
+    kmer2ltr_prefix = k2l.resolve(tools_dir)
     trfmod_path = None
 
     trf_args = None
@@ -4460,7 +4607,6 @@ def main():
     else:
         print("[Step6c] skipping sdust low-complexity filtering (--sdust not set).")
 
-    internals_fa = str(workdir / f"{out_prefix}.ltrtools.internals.fa")
     intact_for_tesorter_fa = str(workdir / f"{out_prefix}.ltrtools.intact_for_tesorter.fa")
     intact_fa = f"{out_prefix}.ltrtools.intact.fa"
 
@@ -4469,113 +4615,116 @@ def main():
     if args.require_run_chars:
         req_chars = [x.strip() for x in args.require_run_chars.split(",") if x.strip()]
 
-    tsd_pass2_fa: Optional[str] = None  # populated below if --tsd-pass2 is active
-    tsd_seqs_from_scn: Dict[str, str] = {}  # populated by tsd_positive_full_length_from_scn
-
-    if args.use_tesorter:
-        if args.tesorter_use_ret:
-            tesorter_in_fa = intact_for_tesorter_fa
-            print(f"[Step7] building FULL-LENGTH FASTA (sret/eret) for TEsorter -> {tesorter_in_fa}")
-            scn_to_intact_fasta(
-                merged_scn,
-                args.genome,
-                tesorter_in_fa,
-                require_run_chars=req_chars,
-                exclude_run_char=exclude_run_char,
-                base_min=args.nested_base_min,
-                flank_min=args.nested_flank_min,
-            )
-        else:
-            tesorter_in_fa = internals_fa
-            print(f"[Step7] building INTERNALS FASTA (elLTR/srLTR) for TEsorter -> {tesorter_in_fa}")
-            scn_to_internal_fasta(
-                merged_scn,
-                args.genome,
-                tesorter_in_fa,
-                require_run_chars=req_chars,
-                exclude_run_char=exclude_run_char,
-                base_min=args.nested_base_min,
-                flank_min=args.nested_flank_min,
-            )
-    else:
-        tesorter_in_fa = None
-        print(f"[Step7] building INTACT FASTA from SCN -> {intact_fa}")
-        scn_to_intact_fasta(
-            merged_scn,
-            args.genome,
-            intact_fa,
-            require_run_chars=req_chars,
-            exclude_run_char=exclude_run_char,
-        )
+    # Kmer2LTR reads both LTRs of each candidate, so the round starts from the
+    # full-length record and every later stage works on a cut of it.
+    k2l_in_fa = intact_for_tesorter_fa if args.use_tesorter else intact_fa
+    print(f"[Step7] building FULL-LENGTH FASTA (sret/eret) from SCN -> {k2l_in_fa}")
+    scn_to_intact_fasta(
+        merged_scn,
+        args.genome,
+        k2l_in_fa,
+        require_run_chars=req_chars,
+        exclude_run_char=exclude_run_char,
+        base_min=args.nested_base_min,
+        flank_min=args.nested_flank_min,
+    )
 
     # Load LTR boundaries from SCN for nesting validation
     ltr_bounds = load_scn_ltr_boundaries(merged_scn)
 
+    # Step 8: Kmer2LTR calls each element's termini and reports how far the
+    # candidate over-reaches them, so the boundaries every later stage uses are
+    # measured rather than inherited from the detectors.
+    k2l_tsv = str(workdir / f"{out_prefix}.kmer2ltr.tsv")
+    print(f"[Step8] running Kmer2LTR on {Path(k2l_in_fa).name} -> {Path(k2l_tsv).name}")
+    k2l.run(kmer2ltr_prefix, k2l_in_fa, k2l_tsv,
+            threads=args.threads, mutation_rate=args.mutation_rate,
+            genome=args.genome, trim_flanks=True, verbose=verbose)
+    counts = k2l.status_counts(k2l_tsv)
+    n_pass = counts.get("pass", 0)
+    other = ", ".join(f"{n} {s}" for s, n in sorted(counts.items()) if s != "pass")
+    print(f"[Step8] Kmer2LTR bounded {n_pass}/{sum(counts.values())} candidates"
+          + (f" ({other})" if other else ""))
+
+    # Step 8a: the target-site duplications Kmer2LTR found. These are keyed on
+    # the untrimmed locus, which is what merged_scn and the candidate FASTA use.
+    tsd_seqs = tsd_names_from_kmer2ltr(k2l_tsv)
+    print(f"[Step8a] Kmer2LTR reported a TSD for {len(tsd_seqs)} candidate(s)")
+
+    # Step 8b: a non-TSD candidate overlapping a TSD+ one at >= the dedup
+    # threshold would be eliminated by Layer-1 of dedup anyway, so dropping it
+    # here spares the classifier the work. Contained candidates with distinct
+    # LTRs are protected (putative nested TEs).
+    purge_set: Set[str] = set()
+    if args.use_tesorter and tsd_seqs:
+        purge_set = pre_purge_tsd_dominated(
+            merged_scn, set(tsd_seqs),
+            threshold=args.dedup_threshold,
+            ltr_bounds=ltr_bounds,
+        )
+        if purge_set:
+            print(f"[Step8b] pre-purge: {len(purge_set)} TSD-dominated "
+                  "candidate(s) identified for exclusion")
+
+    # Step 8c: filtering here, against the untrimmed span, keeps the length
+    # floor on the more permissive side of the trim and stops the bounded FASTA
+    # carrying records that are about to be dropped.
+    n_kept, n_dropped, n_malformed = filter_kmer2ltr_in_place(k2l_tsv)
+    msg = (f"[Step8c] length filter (LTR_len>=100, aln_len>=90, "
+           f"len_ratio>=0.65, LTRRT_len>=300): kept {n_kept}, dropped {n_dropped}")
+    if n_malformed:
+        msg += f", malformed {n_malformed}"
+    print(msg)
+
+    bounded_fa = str(workdir / f"{out_prefix}.bounded.fa")
+    rename = bounded_fasta(k2l_in_fa, k2l_tsv, bounded_fa, exclude=purge_set)
+    print(f"[Step8d] bounded FASTA: {len(rename)} elements -> {Path(bounded_fa).name}")
+
+    # Steps 8a and 8b answer questions about the candidates, so their keys are
+    # the untrimmed loci; everything from the bounded FASTA onwards is stated
+    # against the trimmed ones. This is the round's only conversion between the
+    # two, and a total loss of keys here would otherwise pass unnoticed.
+    locus_rename = {old.split("#", 1)[0]: new.split("#", 1)[0]
+                    for old, new in rename.items()}
+    tsd_after_trim = {locus_rename[k]: v
+                      for k, v in tsd_seqs.items() if k in locus_rename}
+    if tsd_seqs and not tsd_after_trim:
+        raise RuntimeError("TSD keys did not survive the trim rebase")
+    bounded_ltr_bounds = {locus_rename[k]: v
+                          for k, v in ltr_bounds.items() if k in locus_rename}
+
+    # Step 8f: seed pass-2 with the elements Kmer2LTR found a TSD for. A TSD is
+    # independent evidence of a real insertion, so these anchor the homology
+    # search for candidates the HMMs miss.
+    pass2_for_tebinsorter = args.pass2_classified_fasta
+    if args.use_tesorter and args.tsd_pass2 and tsd_after_trim:
+        tsd_pass2_fa = str(workdir / f"{out_prefix}.tsd_pass2.full_length.fa")
+        # TEsorter2 reads a pass-2 seed's classification from its header, and
+        # these seeds are unclassified until pass 1 has run.
+        tsd_pass2_names = {n: f"{n}#LTR/unknown/unknown" for n in tsd_after_trim}
+        subset_fasta_by_name_set(bounded_fa, tsd_pass2_fa,
+                                 set(tsd_pass2_names.values()),
+                                 rename_map=tsd_pass2_names)
+        print(f"[Step8f] TSD+ elements at Kmer2LTR boundaries: {len(tsd_pass2_names)}")
+
+        merged_pass2 = str(workdir / f"{out_prefix}.pass2_classified.merged.fa")
+        merged_path = merge_pass2_fastas(args.pass2_classified_fasta, tsd_pass2_fa, merged_pass2)
+        pass2_for_tebinsorter = merged_path if merged_path else None
+
+    _t_kmer2ltr = time.monotonic() - _t0
+
     # Step 9: TEBinSorter
+    _t0 = time.monotonic()
     cls_tsv_path = None
     tebinsorter_db_path = None
-    tesorter_lib_fa = None
+    cls_names: Dict[str, str] = {}
 
     if args.use_tesorter:
         tebinsorter_outdir = workdir
-
-        pass2_for_tebinsorter = args.pass2_classified_fasta
-
-        if args.use_tesorter and args.tsd_pass2:
-            tsd_pass2_fa = str(workdir / f"{out_prefix}.tsd_pass2.full_length.fa")
-            print(f"[Step8.9] scanning SCN candidates for TSDs -> {tsd_pass2_fa}")
-
-            n_tsd, tsd_seqs_from_scn = tsd_positive_full_length_from_scn(
-                stitched_scn=merged_scn,
-                genome_fa=args.genome,
-                out_fa=tsd_pass2_fa,
-                min_len=args.tsd_min_len,
-                require_run_chars=req_chars,
-                exclude_run_char=exclude_run_char,
-                base_min=args.nested_base_min,
-                flank_min=args.nested_flank_min,
-            )
-            print(f"[Step8.9] TSD pass2: found {n_tsd} TSD+ candidates")
-
-            merged_pass2 = str(workdir / f"{out_prefix}.pass2_classified.merged.fa")
-            merged_path = merge_pass2_fastas(args.pass2_classified_fasta, tsd_pass2_fa, merged_pass2)
-
-            pass2_for_tebinsorter = merged_path if merged_path else None
-
-            # --- Step 8.9b: pre-purge TSD-dominated candidates ---
-            # Non-TSD candidates that overlap a TSD+ candidate at >= dedup
-            # threshold would be eliminated by Layer-1 of dedup anyway.
-            # Removing them now shrinks the TEBinSorter + Kmer2LTR input.
-            # Contained candidates with distinct LTRs are protected
-            # (putative nested TEs).
-            tsd_names_early = _tsd_names_from_fasta(tsd_pass2_fa)
-            if tsd_names_early:
-                purge_set = pre_purge_tsd_dominated(
-                    merged_scn, tsd_names_early,
-                    threshold=args.dedup_threshold,
-                    ltr_bounds=ltr_bounds,
-                )
-                if purge_set:
-                    prepurge_fa = str(workdir / f"{out_prefix}.ltrtools.prepurge.fa")
-                    n_before = 0
-                    n_after = 0
-                    with open(prepurge_fa, "w") as out_fh:
-                        for name, seq in iter_fasta(tesorter_in_fa):
-                            n_before += 1
-                            if name in purge_set:
-                                continue
-                            n_after += 1
-                            out_fh.write(f">{name}\n")
-                            for i in range(0, len(seq), 60):
-                                out_fh.write(seq[i:i+60] + "\n")
-                    print(f"[Step8.9b] pre-purge: {n_before} -> {n_after} candidates "
-                          f"({n_before - n_after} TSD-dominated removed)")
-                    tesorter_in_fa = prepurge_fa
-
-        print(f"[Step9] running TEBinSorter on stitched FASTA (outputs -> {tebinsorter_outdir})")
+        print(f"[Step9] running TEBinSorter on bounded FASTA (outputs -> {tebinsorter_outdir})")
 
         cls_tsv_path, tebinsorter_db_path = run_tebinsorter(
-            stitched_fa=tesorter_in_fa,
+            stitched_fa=bounded_fa,
             pipeline_py_path=tebinsorter_py_path,
             outdir=tebinsorter_outdir,
             db=args.tesorter_db,
@@ -4588,61 +4737,30 @@ def main():
             verbose=verbose,
         )
 
-        tesorter_lib_fa = str(workdir / f"{out_prefix}.ltrharvest.full_length.fa.{args.tesorter_db}.cls.lib.fa")
-        print(f"[Step9] building full-length LTR FASTA from cls.tsv -> {tesorter_lib_fa}")
-        build_tesorter_full_length_ltr_fasta_from_cls_tsv(cls_tsv_path, args.genome, tesorter_lib_fa)
+        # TEBinSorter saw the bounded records, so each element is taken through
+        # `rename` before its classification is looked up.
+        cls_names = ltr_names_from_cls_tsv(cls_tsv_path)
+        element_names = {old: cls_names[new]
+                         for old, new in rename.items() if new in cls_names}
+    else:
+        element_names = dict(rename)
+
+    n_named, n_unnamed = relabel_kmer2ltr_tsv(k2l_tsv, element_names)
+    if element_names and not n_named:
+        raise RuntimeError("no element survived renaming; the table and the "
+                           "bounded FASTA disagree on element identity")
+    if args.use_tesorter:
+        print(f"[Step9] classified {n_named} element(s), dropped {n_unnamed} "
+              f"left unclassified or called non-LTR")
+    elif n_unnamed:
+        print(f"[Step9] dropped {n_unnamed} element(s) missing from the bounded FASTA")
 
     _t_tesorter = time.monotonic() - _t0
 
-    # Step 8: kmer2ltr.domain from stitched SCN
-    kmer2ltr_domain = str(workdir / f"{out_prefix}.kmer2ltr.domain")
-    print(f"[Step8] building kmer2ltr domain -> {kmer2ltr_domain}")
-    scn_to_kmer2ltr_domain(merged_scn, kmer2ltr_domain, tesorter_cls_tsv=cls_tsv_path)
-
-    # Step 9b: Kmer2LTR
+    # Step 9b: dedup
     _t0 = time.monotonic()
-    print("[Step9b] running Kmer2LTR (dedup driver)...")
-    k2l_prefix = f"{out_prefix}_kmer2ltr"
-
-    domain_arg = kmer2ltr_domain if args.kmer2ltr_domains else None
-
-    if args.use_tesorter:
-        k2l_in_fa = tesorter_lib_fa
-    else:
-        k2l_in_fa = intact_fa
-
-    k2l_main = run_kmer2ltr(
-        kmer2ltr_py=kmer2ltr_py,
-        in_fa=k2l_in_fa,
-        out_prefix=k2l_prefix,
-        outdir=workdir,
-        threads=args.threads,
-        max_win_overdisp=args.kmer2ltr_max_win_overdisp,
-        min_retained_fraction=args.kmer2ltr_min_retained_fraction,
-        domain_file=domain_arg,
-        wfa_align=args.wfa_align,
-        verbose=verbose,
-    )
-
-    # Drop low-quality rows before dedup. Hardcoded thresholds for now.
-    n_kept, n_dropped, n_malformed = filter_kmer2ltr_in_place(k2l_main)
-    msg = (f"[Step9b] kmer2ltr length filter (LTR_len>=100, aln_len>=90, "
-           f"len_ratio>=0.65, LTRRT_len>=300): kept {n_kept}, dropped {n_dropped}")
-    if n_malformed:
-        msg += f", malformed {n_malformed}"
-    print(msg)
-
     k2l_dedup_out = f"{out_prefix}_ltr.tsv"
     print(f"[Step9b] deduping Kmer2LTR output -> {k2l_dedup_out}")
-    # Build TSD dict: key -> TSD motif sequence
-    tsd_seq_dict: Dict[str, str] = dict(tsd_seqs_from_scn)
-
-    # WFA-guided TSD recovery: use alignment trim info to find TSDs at adjusted boundaries
-    wfa_recovered = wfa_guided_tsd_names(k2l_main, args.genome, tsd_seq_dict,
-                                         min_len=args.tsd_min_len)
-    if wfa_recovered:
-        print(f"[Step9b] WFA-guided TSD recovery: {len(wfa_recovered)} additional TSDs")
-    combined_tsd = {**tsd_seq_dict, **wfa_recovered} if (tsd_seq_dict or wfa_recovered) else None
 
     # Load per-domain hit positions for nesting diagnostics. TEBinSorter's
     # pipeline.py does not emit a TEsorter-style .dom.gff3, but the same
@@ -4659,9 +4777,9 @@ def main():
               f"{len(gff3_dom_data)} TEs with deconflicted domain annotations")
 
     nest_rename_map: Dict[str, str] = {}
-    dedup_kmer2ltr_tsv(k2l_main, k2l_dedup_out, threshold=args.dedup_threshold,
-                       tsd_names=combined_tsd, gff3_domains=gff3_dom_data,
-                       ltr_bounds=ltr_bounds,
+    dedup_kmer2ltr_tsv(k2l_tsv, k2l_dedup_out, threshold=args.dedup_threshold,
+                       tsd_names=tsd_after_trim or None, gff3_domains=gff3_dom_data,
+                       ltr_bounds=bounded_ltr_bounds,
                        rename_map=nest_rename_map)
 
     if nest_rename_map:
@@ -4669,20 +4787,22 @@ def main():
               f"domain hits (order-independent majority vote; nest-outers additionally "
               f"exclude domains inside detected inner-nested boundaries)")
 
-    _t_kmer2ltr = time.monotonic() - _t0
+    _t_kmer2ltr += time.monotonic() - _t0
 
     keep_names = names_from_kmer2ltr_dedup(k2l_dedup_out)
 
     if args.use_tesorter:
         tesorter_lib_fa_dedup = f"{out_prefix}_ltr.fa"
-        print(f"[Step9b] subsetting full-length FASTA by dedup list -> {tesorter_lib_fa_dedup}")
-        subset_fasta_by_name_set(k2l_in_fa, tesorter_lib_fa_dedup, keep_names,
-                                 rename_map=nest_rename_map)
+        print(f"[Step9c] subsetting bounded FASTA by dedup list -> {tesorter_lib_fa_dedup}")
+        lib_rename = {bare: nest_rename_map.get(name, name)
+                      for bare, name in cls_names.items()}
+        subset_fasta_by_name_set(bounded_fa, tesorter_lib_fa_dedup, keep_names,
+                                 rename_map=lib_rename)
         fa_to_mask_same_round = tesorter_lib_fa_dedup
     else:
         intact_dedup_fa = f"{out_prefix}.ltrtools.intact.dedup.fa"
-        print(f"[Step9b] subsetting intact FASTA by dedup list -> {intact_dedup_fa}")
-        subset_fasta_by_name_set(intact_fa, intact_dedup_fa, keep_names,
+        print(f"[Step9c] subsetting bounded FASTA by dedup list -> {intact_dedup_fa}")
+        subset_fasta_by_name_set(bounded_fa, intact_dedup_fa, keep_names,
                                  rename_map=nest_rename_map)
         fa_to_mask_same_round = intact_dedup_fa
 
@@ -4715,13 +4835,13 @@ def main():
         print(f"  LTR FASTA: {out_prefix}_ltr.fa")
         print("")
         print("Workdir outputs:")
-        print(f"  Full-length (pre-dedup) FASTA: {tesorter_lib_fa}")
+        print(f"  Bounded (pre-dedup) FASTA:   {bounded_fa}")
     else:
         print(f"  Intact dedup FASTA:          {out_prefix}.ltrtools.intact.dedup.fa")
         print(f"  Intact (pre-dedup) FASTA:    {out_prefix}.ltrtools.intact.fa")
 
     print(f"  SCN (merged):                {workdir}/{out_prefix}.ltrtools.stitched.scn")
-    print(f"  Kmer2LTR outputs prefix:     {workdir}/{out_prefix}_kmer2ltr*")
+    print(f"  Kmer2LTR table:              {k2l_tsv}")
 
     if args.clean:
         print(f"[CLEAN] removing workdir: {workdir}")
