@@ -323,6 +323,67 @@ def test_bounded_fasta_oriented_defaults_to_forward_when_cls_tsv_has_no_row(tmp_
     assert dict(detect.iter_fasta(str(out)))["chr1:1-50"] == "A" * 30 + "T" * 20
 
 
+def _dedup_row(name, orientation, domains=".", nest_status="."):
+    """A `{prefix}_ltr.tsv` (`k2l_dedup_out`) row: DETECT_COLUMNS-shaped, the
+    schema `restate_orientation_to_match_library` reads by name."""
+    v = dict.fromkeys(detect.DETECT_COLUMNS, "NA")
+    v.update(seq_id=name, seq_len="2001", status="pass",
+             ltr5_start="1", ltr3_end="2001", flank5_len="0", flank3_len="0",
+             orientation=orientation, domains=domains, nest_status=nest_status)
+    return "\t".join(v[c] for c in detect.DETECT_COLUMNS)
+
+
+def test_restate_orientation_flips_only_the_revcomped_record(tmp_path):
+    p = tmp_path / "dedup.tsv"
+    p.write_text(detect.DETECT_HEADER
+                 + _dedup_row("chr1:120-2070#LTR/Copia/Ale", "+") + "\n"
+                 + _dedup_row("chr1:9000-9400#LTR/Gypsy/Tat", "+") + "\n")
+
+    detect.restate_orientation_to_match_library(
+        str(p), {"chr1:120-2070#LTR/Copia/Ale"})
+
+    rows = {r["seq_id"]: r["orientation"] for r in kmer2ltr.read_rows(str(p))}
+    assert rows["chr1:120-2070#LTR/Copia/Ale"] == "-"
+    assert rows["chr1:9000-9400#LTR/Gypsy/Tat"] == "+"
+
+
+def test_restate_orientation_with_empty_revcomped_leaves_every_row_at_plus(tmp_path):
+    """--no-tesorter never flips anything, so bounded_fasta_oriented is not
+    even called and revcomped_names stays empty; this is that call shape."""
+    p = tmp_path / "dedup.tsv"
+    p.write_text(detect.DETECT_HEADER
+                 + _dedup_row("chr1:120-2070#LTR/Copia/Ale", "+") + "\n"
+                 + _dedup_row("chr1:9000-9400#LTR/Gypsy/Tat", "+") + "\n")
+
+    detect.restate_orientation_to_match_library(str(p), set())
+
+    assert [r["orientation"] for r in kmer2ltr.read_rows(str(p))] == ["+", "+"]
+
+
+def test_restate_orientation_preserves_every_other_column_and_the_header(tmp_path):
+    """Guards the shape of the edit, not just the one column: a rewrite that
+    drifted a field, mangled the header, or was skipped outright would all
+    show up here -- skipping it outright leaves row_a's `orientation` at `+`."""
+    row_a = _dedup_row("chr1:120-2070#LTR/Copia/Ale", "+",
+                       domains="GAG|Ale@10-50",
+                       nest_status="nest-outer:chr1:500-600")
+    row_b = _dedup_row("chr1:9000-9400#LTR/Gypsy/Tat", "+")
+    p = tmp_path / "dedup.tsv"
+    p.write_text(detect.DETECT_HEADER + row_a + "\n" + row_b + "\n")
+
+    detect.restate_orientation_to_match_library(
+        str(p), {"chr1:120-2070#LTR/Copia/Ale"})
+
+    lines = p.read_text().splitlines(keepends=True)
+    assert lines[0] == detect.DETECT_HEADER
+
+    i_orient = detect.DETECT_COLUMNS.index("orientation")
+    want_a = row_a.split("\t")
+    want_a[i_orient] = "-"
+    assert lines[1].rstrip("\n").split("\t") == want_a
+    assert lines[2].rstrip("\n").split("\t") == row_b.split("\t")
+
+
 def _wide_k2l(tmp_path, extra="ltr_score"):
     """A Kmer2LTR table carrying one column more than this LTRquest knows."""
     names = kmer2ltr.COLUMNS + [extra]

@@ -117,7 +117,7 @@ classification and clustering have run.
 | 23 | `cigar` | Extended CIGAR of the LTR-pair alignment; query = 5′ LTR |
 | 24 | `motif` | The two terminal dinucleotides, lowercased, e.g. `tg...ca`. Read off the called boundary, never used to find it |
 | 25 | `k2p_time` | `round(k2p / (2 × mutation_rate))`, years since insertion; set by `--mutation-rate` (default `3e-8`) |
-| 26 | `orientation` | Whether *this record* is stored reverse-complemented relative to its own header locus. Not biology — see `strand` below |
+| 26 | `orientation` | Whether the record is stored reverse-complemented relative to its own header interval, as written to `{prefix}_ltr.fa`: `-` means the library holds the reverse complement, `+` means it holds the interval as read off the genome. A storage fact, not biology, and always known — see `strand` below |
 | 27 | `tsd` | Target-site duplication at the called boundary. `.` = searched and absent; `NA` = could not be searched |
 | 28 | `tsd_offset` | `d5,d3` — how far each boundary had to move for `tsd` to appear, positive meaning *into* the element. `NA` whenever `tsd` carries no sequence, whether that is `.` or `NA` |
 | 29 | `tsd_input` | The same measurement at the record's termini as originally supplied, before re-bounding |
@@ -137,13 +137,16 @@ Three things this table will burn you on if you skim it:
   presence-vs-absence and ran-vs-could-not-run are different findings, and
   only one of them says anything about the boundary.
 - **`strand` and `orientation` answer different questions.** `orientation`
-  is a storage fact: whether this FASTA record happens to be the reverse
-  complement of the genome at its own header coordinates, decided purely by
-  Kmer2LTR comparing the record against `--genome`. `strand` is a biological
+  is a storage fact: whether the record in `{prefix}_ltr.fa` is the reverse
+  complement of its own header interval (`-`) or reads that interval forward
+  off the genome (`+`) — the call the library-writing step makes so that
+  family clustering sees one orientation per family. `strand` is a biological
   claim: which way the element is transcribed, decided later by LTRquest from
   classification, domain order and pass-2 homology. The two are independent —
   an element stored forward (`orientation=+`) can carry either strand, and
-  vice versa.
+  vice versa. `strand` can land on `.` when none of those sources resolve
+  it; `orientation` never does, because it records a decision the writer
+  always makes.
 - **Every row satisfies `ltr5_start == 1` and `ltr3_end == seq_len`.** That is
   what "Kmer2LTR-bounded" means: the record has already been cut down to the
   called LTR pair, so both flanks report `0` and there is nothing upstream or

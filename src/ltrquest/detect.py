@@ -3619,6 +3619,37 @@ def bounded_fasta_oriented(bounded_fa: str, cls_tsv_path: str, out_fa: str,
     return revcomped
 
 
+def restate_orientation_to_match_library(tsv: str, revcomped: Set[str]) -> None:
+    """Rewrite `orientation` to `-` for every row named in `revcomped`.
+
+    Kmer2LTR calls `orientation` at Step 8 against the forward-cut candidate
+    FASTA, before `bounded_fasta_oriented` reverse-complements minus-strand
+    records for the library -- so every row leaves Step 8 reading `+`. The
+    library is what a caller receives, so the column only describes it once
+    it is restated here against the set that function actually flipped.
+    """
+    in_path = Path(tsv)
+    tmp_path = in_path.parent / (in_path.name + ".orient.tmp")
+
+    with open(in_path) as fin, open(tmp_path, "w") as fout:
+        header = fin.readline()
+        fout.write(header)
+        cols = Columns.from_line("#" + header if not header.startswith("#") else header)
+        i_id = cols.require("seq_id")
+        i_orient = cols.require("orientation")
+        max_idx = max(i_id, i_orient)
+
+        for raw in fin:
+            if not raw.strip():
+                continue
+            parts = raw.rstrip("\n").split("\t")
+            if len(parts) > max_idx and parts[i_id] in revcomped:
+                parts[i_orient] = "-"
+            fout.write("\t".join(parts) + "\n")
+
+    tmp_path.replace(in_path)
+
+
 # -----------------------------
 # main
 # -----------------------------
@@ -4448,6 +4479,12 @@ def main():
         subset_fasta_by_name_set(bounded_fa, intact_dedup_fa, keep_names,
                                  rename_map=nest_rename_map)
         fa_to_mask_same_round = intact_dedup_fa
+
+    # bounded_fasta_oriented decides, per record, whether the library holds it
+    # reverse-complemented; Kmer2LTR's own `orientation` call happened at Step
+    # 8, against the forward-cut candidate, so it is blind to that decision
+    # and has to be restated against it to describe the shipped library.
+    restate_orientation_to_match_library(k2l_dedup_out, revcomped_names)
 
     if same_round_inner_char:
         n_outers, n_intervals = mask_same_round_inners_in_fa(
