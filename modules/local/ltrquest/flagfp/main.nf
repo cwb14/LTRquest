@@ -26,7 +26,7 @@ process LTRQUEST_FLAGFP {
     """
     # High-abundance non-LTR repeats can seed convincing but spurious LTR-RT
     # calls. Families whose members are mostly such repeats are purged here.
-    python \${LTRQUEST_TOOLS_DIR:-/opt/ltrquest/tools}/Kmer2LTR/flag_fp_families.py \\
+    python -m ltrquest.flag_fp \\
         --consensus-cluster ${consensus_cluster} \\
         --internal-cluster ${internal_cluster} \\
         --ltr-fasta ${consensus_fasta} \\

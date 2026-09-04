@@ -22,7 +22,6 @@ process LTRQUEST_CLUSTER {
     task.ext.when == null || task.ext.when
 
     script:
-    def args    = task.ext.args ?: '--min-seq-id 0.75'
     prefix      = task.ext.prefix ?: "${meta.id}"
     """
     # Pool every depth, stripping the IUPAC characters the reconciler used to
@@ -31,12 +30,17 @@ process LTRQUEST_CLUSTER {
       | awk '/^>/{printf "\\n%s\\n",\$0;next}{gsub(/[^ACGTacgt]/,"");printf "%s",\$0}END{print ""}' \\
       > ${prefix}_all_ltr.fa
 
-    python \${LTRQUEST_TOOLS_DIR:-/opt/ltrquest/tools}/Kmer2LTR/Kmer2LTR.py \\
-        -i ${prefix}_all_ltr.fa \\
-        -o ${prefix}_all_ltr \\
-        --ltr-cluster --internal-cluster \\
-        -p ${task.cpus} \\
-        ${args}
+    # Routed through ltrquest.kmer2ltr rather than a hardcoded script path:
+    # Kmer2LTR ships as an installable package, and resolve() finds it whether
+    # that means a console script, a prior clone, or a fresh one.
+    python -c '
+import sys
+from ltrquest.kmer2ltr import resolve, run
+tools_dir, in_fa, out_prefix, threads = sys.argv[1:5]
+run(resolve(tools_dir), in_fa, out_prefix,
+    threads=int(threads), mutation_rate=3e-8,
+    ltr_cluster=True, internal_cluster=True, min_seq_id=0.75, verbose=True)
+' \${LTRQUEST_TOOLS_DIR:-/opt/ltrquest/tools} ${prefix}_all_ltr.fa ${prefix}_all_ltr ${task.cpus}
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":

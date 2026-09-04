@@ -75,7 +75,6 @@ process LTRQUEST_DETECT {
         --ltrfinder-args "-w 2 -C -D ${ltrf_d} -d 100 -L 7000 -l 100 -p 20 -M 0.00 -S 0.0" \\
         --size 500000 \\
         --overlap ${overlap} \\
-        --tesorter-use-ret \\
         --tesorter-rule 70-75-80 \\
         --tsd-pass2 \\
         --nested-flank-min 10 \\
@@ -101,7 +100,7 @@ process LTRQUEST_DETECT {
     """
     mkdir -p ${prefix}.work
     touch ${prefix}.work/${prefix}.ltrtools.stitched.scn
-    printf '#name\\tLTR_len\\taln_len\\ttsd\\tdomains\\tnest_status\\n' > ${prefix}_ltr.tsv
+    printf '#seq_id\\tseq_len\\tstatus\\tltr5_start\\tltr5_end\\tltr3_start\\tltr3_end\\tltr5_len\\tltr3_len\\tflank5_len\\tflank3_len\\taln_len\\tn_sites\\tn_ts\\tn_tv\\tn_gapcols\\tidentity\\tp_dist\\tk2p\\tk2p_se\\tbitscore\\tflank_margin_bits\\tcigar\\tmotif\\tk2p_time\\torientation\\ttsd\\ttsd_offset\\ttsd_input\\tdomains\\tnest_status\\n' > ${prefix}_ltr.tsv
     : > ${prefix}_ltr.fa
     for i in \$(seq 1 ${n}); do
         s=\$(( ${round_n} * 1000 + i * 100 ))

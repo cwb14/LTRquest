@@ -7,7 +7,7 @@
 # Usage:
 #   ltrquest --genome genome.fa [genome2.fa ...] [--proteins prot.fa] [--terminate_count 100]
 #       [--max-rounds N] [--threads 20] [--out_prefix PREFIX]
-#       [--wfa-align] [--run-sdust] [--detect-args "KEY=VALUE ..."] [--detect-args-from-round N "KEY=VALUE ..."]
+#       [--run-sdust] [--detect-args "KEY=VALUE ..."] [--detect-args-from-round N "KEY=VALUE ..."]
 #
 # Notes:
 # - Runs Round 1 on the original genome, then masks the ORIGINAL genome each round to build genome_r{N}.fa for next round.
@@ -56,10 +56,10 @@
 #         (the reconciler's IUPAC-masked nested inners), leaving only the
 #         outermost putative LTR-RT of each element -> {OUT_PREFIX}_all_ltr.fa
 #     (2) clusters those with Kmer2LTR (consensus + internal clustering, id 0.75)
-#     (3) runs flag_fp_families.py to flag FP families and purge their rows from
+#     (3) runs ltrquest.flag_fp to flag FP families and purge their rows from
 #         each depth TSV -> {OUT_PREFIX}_depth{N}_clean_ltr.tsv, then writes the
 #         matching FP-purged FASTA -> {OUT_PREFIX}_depth{N}_clean_ltr.fa
-#   If the FP fraction exceeds --fp-mask-threshold, flag_fp_families.py hard-masks
+#   If the FP fraction exceeds --fp-mask-threshold, ltrquest.flag_fp hard-masks
 #   those repeats in the genome ({OUT_PREFIX}_FP_masked.fa) and the ENTIRE pipeline
 #   is automatically re-run on the masked genome. Each attempt runs fully isolated
 #   in its own staging directory, so first-run files can never be mistaken for the
@@ -88,7 +88,7 @@
 #         detect-only worker, re-exec'd once per genome.
 #     (2) pooled, once: every genome's depth FASTAs are concatenated into
 #         {RUN}_all_ltr.fa, clustered by a single Kmer2LTR pass, and
-#         FP-corrected by flag_fp_families.py -- so family membership and
+#         FP-corrected by ltrquest.flag_fp -- so family membership and
 #         false-positive calls are computed over the union, not per species.
 #     (3) split back out, per genome: ltrquest.annotate and ltrquest.gff3
 #         run once per genome against that one pooled cluster table, so
@@ -134,7 +134,7 @@ RUN_TRF=true
 RUN_SDUST=false
 SDUST_ARGS="-w 64 -t 15"
 MAX_DUST_FRAC="0.55"
-WFA_ALIGN=false
+MUTATION_RATE="3e-8"
 KEEP_WEAK_HMM_PASS2=false
 PASS2_ALIGNER="minimap2"
 RUN_PLOTS=true
@@ -210,7 +210,7 @@ Usage:
   ltrquest --genome genome.fa [genome2.fa ...] [--proteins prot.fa]
       [--terminate_count 100]
       [--max-rounds N] [--threads 20] [--out_prefix PREFIX]
-      [--wfa-align] [--run-sdust] [--fp-mask-threshold 0.10]
+      [--run-sdust] [--fp-mask-threshold 0.10] [--mutation-rate 3e-8]
       [--detect-args "KEY=VALUE ..."] [--detect-args-from-round N "KEY=VALUE ..."]
 
 Required:
@@ -245,7 +245,9 @@ Optional:
   --max-dust-frac       Drop a candidate when this fraction or more of its
                         ACGT bases are sdust-masked (default: 0.55).
                         Raise toward 0.80 for AT-rich/fungal genomes.
-  --wfa-align           Use WFA instead of mafft for Kmer2LTR pairwise alignment (~30-50x faster)
+  --mutation-rate       Neutral substitution rate per site per year, forwarded to
+                        ltrquest.detect and the pooled Kmer2LTR clustering pass;
+                        sets the k2p_time column (default: 3e-8).
   --keep-weak-hmm-pass2-matches
                         Include in cls.lib.fa the pass-2 matches whose target is a weak-HMM
                         candidate (had HMM hits but no clade -> LTR/unknown/unknown via augment).
@@ -414,7 +416,7 @@ check_unique_basenames() {
 }
 
 # A seqid shared by two genomes is a correctness hazard, not a cosmetic one:
-# flag_fp_families.py purges by bare 'chrom:start-end', so one species' false
+# ltrquest.flag_fp purges by bare 'chrom:start-end', so one species' false
 # positives would delete the other species' real elements, and ltrquest.annotate's
 # by_coord fallback would silently drop the ambiguous coordinates.
 check_unique_seqids() {
@@ -468,17 +470,12 @@ abspath() {
 # ----------------------------
 # Ensure the Kmer2LTR clone used by the FP stage is available. ltrquest.detect
 # normally clones it into TOOLS_DIR during the rounds; clone defensively if the
-# rounds produced nothing or the layout ever changes.
+# rounds produced nothing or the layout ever changes. The resolver is the same
+# one ltrquest.detect uses, so a console-script install, an already-cloned
+# checkout, and a fresh clone all resolve the same way here.
 ensure_kmer2ltr_dir() {
-  local k2l="${TOOLS_DIR}/Kmer2LTR"
-  if [[ ! -f "${k2l}/Kmer2LTR.py" || ! -f "${k2l}/flag_fp_families.py" ]]; then
-    echo "Kmer2LTR not present in ${k2l}; cloning..." >&2
-    mkdir -p "$TOOLS_DIR"
-    git clone --depth 1 https://github.com/cwb14/Kmer2LTR.git "$k2l" >&2 \
-      || die "Failed to clone Kmer2LTR into ${k2l}"
-  fi
-  [[ -f "${k2l}/Kmer2LTR.py" && -f "${k2l}/flag_fp_families.py" ]] \
-    || die "Kmer2LTR clone incomplete in ${k2l}"
+  "$PY" -c 'import sys; from ltrquest.kmer2ltr import resolve; resolve(sys.argv[1])' "$TOOLS_DIR" \
+    || die "Kmer2LTR is not available for ${TOOLS_DIR} (see the error above)."
 }
 
 # Move (default) or copy (--dev-keep-fp-rounds) the final attempt's outputs into
@@ -537,8 +534,7 @@ resolve_merged_tools_dir() {
     return
   fi
   for p in "${OUT_PREFIXES[@]}"; do
-    if [[ -f "./${p}_tools/Kmer2LTR/Kmer2LTR.py" \
-       && -f "./${p}_tools/Kmer2LTR/flag_fp_families.py" ]]; then
+    if [[ -f "./${p}_tools/Kmer2LTR/src/kmer2ltr/cli.py" ]]; then
       TOOLS_DIR="./${p}_tools"
       return
     fi
@@ -546,16 +542,16 @@ resolve_merged_tools_dir() {
   TOOLS_DIR="./${RUN_PREFIX}_tools"
 }
 
-# One pooled flag_fp_families.py call: --domains-tsv takes nargs="+", so a
+# One pooled ltrquest.flag_fp call: --domains-tsv takes nargs="+", so a
 # single call writes every genome's _clean_ltr.tsv. Stage C (masking) is per
 # genome, but its gate -- the FP fraction -- is computed from the cluster tables
-# alone (flag_fp_families.py: frac = fp_fraction(len(fp_members), len(member2rep)))
-# and is therefore identical for every genome. So parse the fraction from this
-# first call and only make the remaining per-genome masking calls when it
-# actually exceeded the threshold; below the threshold flag_fp_families.py
-# returns before the expensive mmseqs step anyway.
+# alone (frac = fp_fraction(len(fp_members), len(member2rep))) and is therefore
+# identical for every genome. So parse the fraction from this first call and
+# only make the remaining per-genome masking calls when it actually exceeded
+# the threshold; below the threshold ltrquest.flag_fp returns before the
+# expensive mmseqs step anyway.
 run_fp_stage() {
-  local cons="$1" int="$2" cons_fa="$3" flag_fp="$4"; shift 4
+  local cons="$1" int="$2" cons_fa="$3"; shift 3
   local -a dtsvs=( "$@" )
   local first="${OUT_PREFIXES[0]}"
   local log="${first}_fpcheck.log"
@@ -565,7 +561,7 @@ run_fp_stage() {
   # not wait for >(...) to finish, so the log would still be empty when the
   # fraction is parsed out of it a moment later. A pipeline is waited on.
   set -x
-  { "$PY" "$flag_fp" \
+  { "${FLAG_FP[@]}" \
       --consensus-cluster "$cons" \
       --internal-cluster "$int" \
       --ltr-fasta "$cons_fa" \
@@ -589,7 +585,7 @@ run_fp_stage() {
   for (( i=1; i<N_GENOMES; i++ )); do
     p="${OUT_PREFIXES[$i]}"
     set -x
-    { "$PY" "$flag_fp" \
+    { "${FLAG_FP[@]}" \
         --consensus-cluster "$cons" \
         --internal-cluster "$int" \
         --ltr-fasta "$cons_fa" \
@@ -710,17 +706,21 @@ run_merged_stage() {
 
   resolve_merged_tools_dir
   ensure_kmer2ltr_dir
-  local KMER2LTR_PY="${TOOLS_DIR}/Kmer2LTR/Kmer2LTR.py"
-  local FLAG_FP_PY="${TOOLS_DIR}/Kmer2LTR/flag_fp_families.py"
 
   # (2) One clustering pass over the pooled elements -> the shared family basis.
+  # Routed through ltrquest.kmer2ltr (the same resolve()+run() ltrquest.detect
+  # uses per round) rather than a hardcoded script path, since the console
+  # script, an already-cloned checkout, and a fresh clone each land Kmer2LTR
+  # somewhere different.
   set -x
-  "$PY" "$KMER2LTR_PY" \
-    -i "$all_ltr_fa" \
-    -o "${RUN_PREFIX}_all_ltr" \
-    --ltr-cluster --internal-cluster \
-    -p "$THREADS" \
-    --min-seq-id 0.75
+  "$PY" -c '
+import sys
+from ltrquest.kmer2ltr import resolve, run
+tools_dir, in_fa, out_prefix, threads, mutation_rate = sys.argv[1:6]
+run(resolve(tools_dir), in_fa, out_prefix,
+    threads=int(threads), mutation_rate=float(mutation_rate),
+    ltr_cluster=True, internal_cluster=True, min_seq_id=0.75, verbose=True)
+' "$TOOLS_DIR" "$all_ltr_fa" "${RUN_PREFIX}_all_ltr" "$THREADS" "$MUTATION_RATE"
   set +x
 
   # Resolve the produced cluster tables by glob (robust to id-tag formatting);
@@ -738,14 +738,14 @@ run_merged_stage() {
   #     the FP fraction exceeds --fp-mask-threshold -- write each genome's
   #     masked FASTA, which the orchestrator detects to trigger a re-run.
   run_fp_stage "${cons_cluster[0]}" "${int_cluster[0]}" "$cons_fa" \
-               "$FLAG_FP_PY" "${depth_tsvs[@]}"
+               "${depth_tsvs[@]}"
 
   # (4) Emit an FP-cleaned FASTA next to each cleaned TSV.
   write_clean_fastas "${depth_tsvs[@]}"
 }
 
 # True when this genome's mask actually changed bases.
-# flag_fp_families.py writes --masked-out unconditionally once Stage C starts,
+# ltrquest.flag_fp writes --masked-out unconditionally once Stage C starts,
 # even when it masks 0 bp. Gating on file existence alone therefore re-runs
 # forever on an unchanged genome, burning every FP round before warning "not
 # converged". Gate on the bp count it reports instead. An unparseable count
@@ -796,7 +796,7 @@ carry_forward_genome() {
 # Top-level driver. Runs one or more fully-isolated attempts, each in its own
 # staging directory. An attempt detects every genome (sequentially, skipping any
 # whose input is unchanged), then runs the pooled merged stage over all of them.
-# Genomes that flag_fp_families.py actually masked are re-detected on their
+# Genomes that ltrquest.flag_fp actually masked are re-detected on their
 # masked FASTA in the next attempt; when none were masked -- or attempts run out
 # -- the attempt is final, gets annotated, and is promoted to the user's
 # working directory.
@@ -972,7 +972,7 @@ while [[ $# -gt 0 ]]; do
     --run-sdust) RUN_SDUST=true; shift;;
     --sdust-args) SDUST_ARGS="${2:-}"; shift 2;;
     --max-dust-frac) MAX_DUST_FRAC="${2:-}"; shift 2;;
-    --wfa-align) WFA_ALIGN=true; shift;;
+    --mutation-rate) MUTATION_RATE="${2:-}"; shift 2;;
     --keep-weak-hmm-pass2-matches) KEEP_WEAK_HMM_PASS2=true; shift;;
     --pass2-aligner) PASS2_ALIGNER="${2:-}"; shift 2;;
     --fp-mask-threshold) FP_MASK_THRESHOLD="${2:-}"; shift 2;;
@@ -1086,6 +1086,7 @@ MASK=(      "$PY" -m ltrquest.mask      )
 RECONCILE=( "$PY" -m ltrquest.reconcile )
 ANNOTATE=(  "$PY" -m ltrquest.annotate  )
 GFF3=(      "$PY" -m ltrquest.gff3      )
+FLAG_FP=(   "$PY" -m ltrquest.flag_fp   )
 
 # ----------------------------
 # Orchestrator vs. worker
@@ -1153,11 +1154,6 @@ fi
 SDUST_OPTS=()
 if [[ "$RUN_SDUST" == true ]]; then
   SDUST_OPTS=(--sdust --sdust-args "$SDUST_ARGS" --max-dust-frac "$MAX_DUST_FRAC")
-fi
-
-WFA_OPTS=()
-if [[ "$WFA_ALIGN" == true ]]; then
-  WFA_OPTS=(--wfa-align)
 fi
 
 WEAK_HMM_OPTS=()
@@ -1285,14 +1281,13 @@ for (( round=1; round<=MAX_ROUNDS; round++ )); do
     "${SDUST_OPTS[@]}" \
     --size "$SIZE" \
     --overlap "$overlap" \
-    --tesorter-use-ret \
     --tesorter-rule "$TESORTER_RULE" \
     $TSD_PASS2 \
     --nested-flank-min "$NESTED_FLANK_MIN" \
     --nested-base-min "$NESTED_BASE_MIN" \
     --same-round-inner-char "$this_round_char" \
+    --mutation-rate "$MUTATION_RATE" \
     "${pass2_opts[@]}" \
-    "${WFA_OPTS[@]}" \
     "${WEAK_HMM_OPTS[@]}" \
     "${PASS2_ALIGNER_OPTS[@]}" \
     "${extra_round_args[@]}" \

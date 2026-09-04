@@ -88,8 +88,7 @@ RUN ltrquest --help > /dev/null \
  && for t in gt ltr_finder mmseqs hmmsearch blastn minimap2 miniprot mafft; do \
         command -v "$t" > /dev/null || { echo "missing: $t" >&2; exit 1; }; \
     done \
- && test -f "$LTRQUEST_TOOLS_DIR/Kmer2LTR/Kmer2LTR.py" \
- && test -f "$LTRQUEST_TOOLS_DIR/Kmer2LTR/flag_fp_families.py" \
+ && test -f "$LTRQUEST_TOOLS_DIR/Kmer2LTR/src/kmer2ltr/cli.py" \
  && test -x "$LTRQUEST_TOOLS_DIR/TRF-mod/trf-mod" \
  && test -x /opt/ltrquest/bin/ltrquest-container
 
