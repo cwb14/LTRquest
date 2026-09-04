@@ -7,6 +7,8 @@ import pytest
 from ltrquest.annotate import (
     UNCLASSIFIED_CLADE,
     UNKNOWN,
+    DepthTable,
+    Family,
     clade_composition,
     clade_of,
     element_key,
@@ -14,6 +16,7 @@ from ltrquest.annotate import (
     parse_domains_field,
     read_table,
     superfamily_of,
+    write_annotated_table,
     write_table,
 )
 
@@ -194,6 +197,30 @@ class TestTableRoundTrip:
         path.write_text("")
         _header, rows = read_table(str(path))
         assert rows == []
+
+
+class TestWriteAnnotatedTable:
+    def test_headerless_rows_get_strand_and_family_before_the_trailing_pair(self, tmp_path):
+        # No header means no schema to find `domains` in, but nest_status must
+        # still end up last -- the same invariant the with-header path keeps.
+        path = tmp_path / "depth0_ltr.tsv"
+        path.write_text("")
+        table = DepthTable(str(path), depth=0, variant="raw")
+        rows = [["chr1:1-100#LTR/Copia/Ale", "RT|Ale@10-20", "."]]
+        family = Family("fam00001", "chr1:1-100#LTR/Copia/Ale", 1)
+
+        write_annotated_table(
+            table, None, rows,
+            strand={"chr1:1-100": "+"},
+            family_by_name={"chr1:1-100#LTR/Copia/Ale": family},
+            family_by_coord={},
+        )
+
+        header, written_rows = read_table(str(path))
+        assert header is None
+        assert written_rows == [
+            ["chr1:1-100#LTR/Copia/Ale", "+", "fam00001", "RT|Ale@10-20", "."]
+        ]
 
 
 def test_strand_and_family_land_before_domains():

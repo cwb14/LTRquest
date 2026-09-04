@@ -80,6 +80,7 @@ process LTRQUEST_DETECT {
         --nested-flank-min 10 \\
         --nested-base-min 800 \\
         --same-round-inner-char ${round_char} \\
+        --mutation-rate ${params.mutation_rate} \\
         ${pass2_opt} \\
         ${args}
 

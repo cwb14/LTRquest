@@ -119,8 +119,8 @@ class Element:
     cls: str
     superfamily: str
     family: str
-    ltr_len_raw: int = 0   # `ltr5_len` column
-    aln_len_raw: int = 0   # `ltr3_len` column
+    ltr_len_raw: int = 0    # `ltr5_len` column
+    ltr3_len_raw: int = 0   # `ltr3_len` column
 
     strand: str = "?"
 
@@ -345,7 +345,7 @@ def detect_false_positives(
     min_family_size: int = 5,
     protein_recovery_frac: float = 0.50,
     iqr_mul: float = 0.5,
-    min_ltr_aln: int = 120,
+    min_ltr_len: int = 120,
     dubious_k2p: float = 0.15,
     recovery_k2p: float = 0.10,
     skip_unknown_iqr: bool = False,
@@ -365,8 +365,8 @@ def detect_false_positives(
        threshold) are recovered unconditionally.
 
     2. DUBIOUS-CLADE FLAGGING (mixture/unknown families only):
-       Any element with K2P > dubious_k2p, or LTR_LEN < min_ltr_aln,
-       or ALN_LEN < min_ltr_aln is flagged regardless of element length.
+       Any element with K2P > dubious_k2p, or either LTR shorter than
+       min_ltr_len, is flagged regardless of element length.
 
     Returns a set of element_ids flagged as potential false positives.
     """
@@ -381,10 +381,10 @@ def detect_false_positives(
             reasons = []
             if el.k2p is not None and el.k2p > dubious_k2p:
                 reasons.append(f"k2p>{dubious_k2p*100:.0f}%")
-            if el.ltr_len_raw < min_ltr_aln:
-                reasons.append(f"LTR_LEN<{min_ltr_aln}")
-            if el.aln_len_raw < min_ltr_aln:
-                reasons.append(f"ALN_LEN<{min_ltr_aln}")
+            if el.ltr_len_raw < min_ltr_len:
+                reasons.append(f"LTR5_LEN<{min_ltr_len}")
+            if el.ltr3_len_raw < min_ltr_len:
+                reasons.append(f"LTR3_LEN<{min_ltr_len}")
             if reasons:
                 flagged.add(el.element_id)
 
@@ -526,7 +526,7 @@ def parse_tsv(tsv_path: str) -> Dict[str, Element]:
                 family=fam,
                 k2p=k2p,
                 ltr_len_raw=ltr1,
-                aln_len_raw=ltr2,
+                ltr3_len_raw=ltr2,
                 raw_domains=raw_domains,
                 nest_raw=nest_raw,
             )
@@ -2096,10 +2096,10 @@ def main():
                     help="IQR multiplier for outlier fence: Q3 + iqr_mul*IQR (default 0.5). "
                          "Lower values tighten the fence and flag more elements; "
                          "higher values loosen it. Also scales the MAD multiplier for small families.")
-    ap.add_argument("--min_ltr_aln", type=int, default=100,
-                    help="Minimum LTR_LEN and ALN_LEN (bp) for dubious-clade quality filter "
-                         "(default 100). Elements in mixture/unknown clades with LTR_LEN or "
-                         "ALN_LEN below this value are flagged.")
+    ap.add_argument("--min_ltr_len", type=int, default=100,
+                    help="Minimum length (bp) for each LTR, for the dubious-clade quality "
+                         "filter (default 100). Elements in mixture/unknown clades with "
+                         "either LTR shorter than this are flagged.")
     ap.add_argument("--dubious_k2p", type=float, default=0.15,
                     help="K2P divergence cutoff for dubious clades (mixture/unknown). "
                          "Elements above this threshold are flagged (default 0.15 = 15%%).")
@@ -2110,7 +2110,7 @@ def main():
     ap.add_argument("--skip_unknown_iqr", action="store_true",
                     help="Skip IQR-based length outlier detection for 'unknown' clades. "
                          "If provided, unknown-clade elements are flagged solely based on "
-                         "K2P and LTR_LEN/ALN_LEN quality filters.")
+                         "K2P and per-LTR length quality filters.")
 
     args = ap.parse_args()
 
@@ -2198,7 +2198,7 @@ def main():
                 min_family_size=args.min_family_size,
                 protein_recovery_frac=args.fp_recovery_frac,
                 iqr_mul=args.iqr_mul,
-                min_ltr_aln=args.min_ltr_aln,
+                min_ltr_len=args.min_ltr_len,
                 dubious_k2p=args.dubious_k2p,
                 recovery_k2p=args.recovery_k2p,
                 skip_unknown_iqr=args.skip_unknown_iqr,
@@ -2412,7 +2412,7 @@ def main():
 
         flagged_tsv_path = os.path.join(args.out_dir, "flagged_false_positives.tsv")
         with open(flagged_tsv_path, "w", encoding="utf-8") as fout:
-            fout.write("#element_id\tfamily\tlength\tltr_len_raw\taln_len_raw\tk2p\t"
+            fout.write("#element_id\tfamily\tlength\tltr_len_raw\tltr3_len_raw\tk2p\t"
                        "num_proteins\texpected_proteins\treason\n")
             for fk in sorted(family_flagged.keys()):
                 flagged_ids = family_flagged[fk]
@@ -2445,10 +2445,10 @@ def main():
                     if dubious:
                         if el.k2p is not None and el.k2p > args.dubious_k2p:
                             reasons.append(f"dubious_clade;k2p>{args.dubious_k2p*100:.0f}%")
-                        if el.ltr_len_raw < args.min_ltr_aln:
-                            reasons.append(f"dubious_clade;LTR_LEN<{args.min_ltr_aln}")
-                        if el.aln_len_raw < args.min_ltr_aln:
-                            reasons.append(f"dubious_clade;ALN_LEN<{args.min_ltr_aln}")
+                        if el.ltr_len_raw < args.min_ltr_len:
+                            reasons.append(f"dubious_clade;LTR5_LEN<{args.min_ltr_len}")
+                        if el.ltr3_len_raw < args.min_ltr_len:
+                            reasons.append(f"dubious_clade;LTR3_LEN<{args.min_ltr_len}")
 
                     # Check length-outlier reason (collapsed length; see detector)
                     if el.collapsed_length > upper_fence:
@@ -2460,7 +2460,7 @@ def main():
 
                     reason_str = "|".join(reasons) if reasons else "flagged"
                     fout.write(f"{el.element_id}\t{fk}\t{el.length}\t"
-                               f"{el.ltr_len_raw}\t{el.aln_len_raw}\t{k2p_str}\t"
+                               f"{el.ltr_len_raw}\t{el.ltr3_len_raw}\t{k2p_str}\t"
                                f"{len(el_prots)}\t{','.join(expected_proteins) or 'none'}\t"
                                f"{reason_str}\n")
         print(f"[INFO] Flagged false positives written: {flagged_tsv_path} ({total_flagged} elements)")
@@ -2516,7 +2516,7 @@ def main():
               f"iqr_mul={args.iqr_mul:.2f}, min_family_size={args.min_family_size}, "
               f"protein_recovery_frac={args.fp_recovery_frac:.2f}, "
               f"recovery_k2p={args.recovery_k2p:.0%}, "
-              f"dubious_k2p={args.dubious_k2p:.0%}, min_ltr_aln={args.min_ltr_aln}")
+              f"dubious_k2p={args.dubious_k2p:.0%}, min_ltr_len={args.min_ltr_len}")
         if args.skip_unknown_iqr:
             print("[INFO] IQR skipped for 'unknown' clades (--skip_unknown_iqr)")
         print(f"[INFO] Total potential false positives flagged: {total_flagged}")

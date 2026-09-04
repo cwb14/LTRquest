@@ -36,11 +36,12 @@ process LTRQUEST_CLUSTER {
     python -c '
 import sys
 from ltrquest.kmer2ltr import resolve, run
-tools_dir, in_fa, out_prefix, threads = sys.argv[1:5]
+tools_dir, in_fa, out_prefix, threads, mutation_rate, min_seq_id = sys.argv[1:7]
 run(resolve(tools_dir), in_fa, out_prefix,
-    threads=int(threads), mutation_rate=3e-8,
-    ltr_cluster=True, internal_cluster=True, min_seq_id=0.75, verbose=True)
-' \${LTRQUEST_TOOLS_DIR:-/opt/ltrquest/tools} ${prefix}_all_ltr.fa ${prefix}_all_ltr ${task.cpus}
+    threads=int(threads), mutation_rate=float(mutation_rate),
+    ltr_cluster=True, internal_cluster=True, min_seq_id=float(min_seq_id), verbose=True)
+' \${LTRQUEST_TOOLS_DIR:-/opt/ltrquest/tools} ${prefix}_all_ltr.fa ${prefix}_all_ltr ${task.cpus} \\
+  ${params.mutation_rate} ${params.min_seq_id}
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
