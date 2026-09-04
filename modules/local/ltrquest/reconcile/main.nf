@@ -9,7 +9,7 @@ process LTRQUEST_RECONCILE {
     container 'ghcr.io/cwb14/ltrquest:1.0.1'
 
     input:
-    tuple val(meta), path(tsvs, stageAs: 'round_*/*'), path(fastas, stageAs: 'round_*/*'), path(scns, stageAs: 'round_*/*')
+    tuple val(meta), path(tsvs, stageAs: 'round_*/*'), path(fastas, stageAs: 'round_*/*')
 
     output:
     tuple val(meta), path("${prefix}_depth*_ltr.tsv", arity: '1..*'), emit: tsv
