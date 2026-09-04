@@ -59,6 +59,8 @@ requirements:
     - pyfaidx
     - pyhmmer >=0.10
     - pyfastx
+    - parasail
+    - pywfa
 
 test:
   imports:
@@ -103,8 +105,13 @@ extra:
   recipe-maintainers:
     - cwb14
   notes: |
-    Two helper repositories -- Kmer2LTR (LTR divergence and family clustering)
-    and TEsorter2 (classification) -- are not on Bioconda. LTRquest fetches and
-    builds them into `--tools-dir` on first use, or reads a pre-built copy from
-    $LTRQUEST_TOOLS_DIR. The published container has both baked in, so a
-    container run never touches the network.
+    TEsorter2 (classification) is not on Bioconda. LTRquest clones it into
+    `--tools-dir` on first use, or reads a pre-built copy from
+    $LTRQUEST_TOOLS_DIR. Kmer2LTR (LTR divergence, boundary calls and family
+    clustering) is an ordinary Python package: resolved from `PATH` if it is
+    already installed, and cloned the same way as TEsorter2 only as a
+    fallback. Its own runtime dependencies (`parasail`, `pywfa`) are listed in
+    `run:` above regardless of which route provides Kmer2LTR itself, since
+    Bioconda cannot express "installed one of two ways." The published
+    container has both helpers baked in, so a container run never touches the
+    network.
