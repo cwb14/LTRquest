@@ -278,9 +278,9 @@ its nesting relations. Two rows from a real run, abridged to the columns that
 matter here:
 
 ```
-#name                              LTR_len  …  K2P_d     K2P_T    …  domains                                          nest_status
-chr1:907045-918753#LTR/Copia/…     340      …  0.104197  1736609  …  INT|Reina@907840-908727;RH|Reina@909001-909432   nest-outer:chr1:909422-915750
-chr1:909422-915750#LTR/Copia/…     334      …  0.068221  1137014  …  RH|Bianca@910002-910364;RT|Bianca@910695-911483  nest-inner:chr1:907045-918753
+#name                           ltr5_len  …  k2p       k2p_time  …  domains                                          nest_status
+chr1:907045-918753#LTR/Copia/…  340       …  0.104197  1736609   …  INT|Reina@907840-908727;RH|Reina@909001-909432   nest-outer:chr1:909422-915750
+chr1:909422-915750#LTR/Copia/…  334       …  0.068221  1137014   …  RH|Bianca@910002-910364;RT|Bianca@910695-911483  nest-inner:chr1:907045-918753
 ```
 
 Read: an element inserted ~1.74 Mya, with a younger one at ~1.14 Mya sitting

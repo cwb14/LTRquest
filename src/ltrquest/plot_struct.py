@@ -59,6 +59,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 
+from .table import Columns, as_float, as_int
+
 # -----------------------------
 # Feature colors (edit freely)
 # -----------------------------
@@ -117,8 +119,8 @@ class Element:
     cls: str
     superfamily: str
     family: str
-    ltr_len_raw: int = 0   # column 2 of TSV (LTR_LEN)
-    aln_len_raw: int = 0   # column 3 of TSV (ALN_LEN)
+    ltr_len_raw: int = 0   # `ltr5_len` column
+    aln_len_raw: int = 0   # `ltr3_len` column
 
     strand: str = "?"
 
@@ -463,28 +465,25 @@ def parse_tsv(tsv_path: str) -> Dict[str, Element]:
     elements: Dict[str, Element] = {}
     print(f"[INFO] Reading TSV: {tsv_path}")
 
+    cols = Columns.of([])
     with open(tsv_path, "r", encoding="utf-8") as f:
         for ln, line in enumerate(f, start=1):
             line = line.strip()
-            if not line or line.startswith("#"):
+            if not line:
+                continue
+            if line.startswith("#"):
+                if not cols.names:
+                    cols = Columns.from_line(line)
                 continue
             parts = line.split("\t")
-            if len(parts) < 3:
-                continue
 
             raw_id = parts[0]
-            try:
-                ltr1 = int(float(parts[1]))
-                ltr2 = int(float(parts[2]))
-            except ValueError:
+            ltr1 = as_int(cols.get(parts, "ltr5_len"))
+            ltr2 = as_int(cols.get(parts, "ltr3_len"))
+            if ltr1 is None or ltr2 is None:
                 continue
 
-            k2p = None
-            if len(parts) >= 11:
-                try:
-                    k2p = float(parts[10])
-                except ValueError:
-                    k2p = None
+            k2p = as_float(cols.get(parts, "k2p"))
 
             if "#" in raw_id:
                 elem_part, class_part = raw_id.split("#", 1)
@@ -505,12 +504,11 @@ def parse_tsv(tsv_path: str) -> Dict[str, Element]:
             sup = class_bits[1] if len(class_bits) > 1 else "NA"
             fam = class_bits[2] if len(class_bits) > 2 else "NA"
 
-            # Domains embedded in the reconciler TSV live in the second-to-last
-            # column ('gene|clade@gStart-gEnd;...', genomic coords). Read from the
-            # end to survive the benign header/data column-count mismatch; the
-            # regex in parse_domains_field rejects any non-domain field safely.
-            raw_domains = parse_domains_field(parts[-2]) if len(parts) >= 3 else []
-            nest_raw = parts[-1].strip() if len(parts) >= 3 and parts[-1].strip() else "."
+            # 'gene|clade@gStart-gEnd;...', genomic coords; the regex in
+            # parse_domains_field rejects any non-domain field safely.
+            raw_domains = parse_domains_field(cols.get(parts, "domains"))
+            nest_field = cols.get(parts, "nest_status").strip()
+            nest_raw = nest_field if nest_field else "."
 
             element_id = elem_part
             if element_id in elements:

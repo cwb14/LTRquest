@@ -21,6 +21,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .table import Columns, as_float, as_int
+
 # ─────────────────────────────────────────────
 #  Data classes
 # ─────────────────────────────────────────────
@@ -117,19 +119,23 @@ def parse_fasta_headers(fasta_path, level):
 
 
 def parse_ltr_divergence(div_path, te_map):
+    cols_spec = Columns.of([])
     with open(div_path, buffering=1 << 20) as f:
         for line in f:
-            if not line or line[0] == '#':
+            if not line:
+                continue
+            if line[0] == '#':
+                if not cols_spec.names:
+                    cols_spec = Columns.from_line(line)
                 continue
             cols = line.split()
-            if not cols or len(cols) < 12:
+            if not cols:
                 continue
             key = cols[0]
-            try:
-                ltr_len = int(cols[1])
-                k2p_dist = float(cols[10])
-                k2p_time = float(cols[11])
-            except (ValueError, IndexError):
+            ltr_len = as_int(cols_spec.get(cols, "ltr5_len"))
+            k2p_dist = as_float(cols_spec.get(cols, "k2p"))
+            k2p_time = as_float(cols_spec.get(cols, "k2p_time"))
+            if ltr_len is None or k2p_dist is None or k2p_time is None:
                 continue
             if key in te_map:
                 te_map[key].ltr_len = ltr_len

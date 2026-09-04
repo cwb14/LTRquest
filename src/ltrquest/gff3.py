@@ -19,9 +19,9 @@ Per element:
 Nested elements stay flat top-level features carrying depth= and nest_status=;
 GFF3 Parent means part-of, and a nested LTR-RT is not a component of its host.
 
-Coordinates for the two LTRs come from ltr5_end/ltr3_start, never LTR_len: those
-two are mutually consistent on every row, while LTR_len disagrees with both on a
-minority of elements.
+Coordinates for the two LTRs come from ltr5_end/ltr3_start, never ltr5_len/
+ltr3_len: the former are mutually consistent on every row, while the latter
+disagree with both on a minority of elements.
 
 Usage:
   python -m ltrquest.gff3 --prefix Athal_tair10_chr2_LTRs [--indir .]
@@ -216,6 +216,15 @@ def _as_int(text: str) -> Optional[int]:
         return None
 
 
+def _substitutions(row: Sequence[str], names: Sequence[str]) -> str:
+    """Total substitutions (`subs`): n_ts + n_tv, or `UNKNOWN` if either is unreadable."""
+    ts = _as_int(_field(row, names, "n_ts"))
+    tv = _as_int(_field(row, names, "n_tv"))
+    if ts is None or tv is None:
+        return UNKNOWN
+    return str(ts + tv)
+
+
 def _line_sort_key(line: str) -> Tuple[int, int]:
     """(start, -end) of a rendered GFF3 line, for ordering within a block."""
     cols = line.split("\t")
@@ -311,20 +320,24 @@ def build_element_blocks(prefix: str, tables, ranker: SeqidRanker,
                  Raw(format_clade_composition(family.clades, family.size))
                  if family else ""),
                 ("depth", table.depth),
-                ("ltr_len", _field(row, names, "LTR_len")),
+                ("ltr5_len", _field(row, names, "ltr5_len")),
+                ("ltr3_len", _field(row, names, "ltr3_len")),
                 ("aln_len", _field(row, names, "aln_len")),
-                ("subs", _field(row, names, "subs")),
-                ("ti", _field(row, names, "ti")),
-                ("tv", _field(row, names, "tv")),
-                ("K2P_d", _field(row, names, "K2P_d")),
-                ("K2P_T", _field(row, names, "K2P_T")),
+                ("identity", _field(row, names, "identity")),
+                ("subs", _substitutions(row, names)),
+                ("ti", _field(row, names, "n_ts")),
+                ("tv", _field(row, names, "n_tv")),
+                ("K2P_d", _field(row, names, "k2p")),
+                ("K2P_T", _field(row, names, "k2p_time")),
+                ("motif", _field(row, names, "motif")),
                 ("tsd", _field(row, names, "tsd")),
+                ("tsd_offset", _field(row, names, "tsd_offset")),
                 ("strand_source", source_label),
                 ("nest_status", _field(row, names, "nest_status")),
             ])
             lines = [gff_line(seqid, LTR_TYPE, start, end, strand, attributes)]
 
-            # Two LTRs, from ltr5_end / ltr3_start (element-relative, 1-based).
+            # Two LTRs, from ltr5_end / ltr3_start.
             ltr5_end = _as_int(_field(row, names, "ltr5_end"))
             ltr3_start = _as_int(_field(row, names, "ltr3_start"))
             if ltr5_end and ltr5_end > 0:

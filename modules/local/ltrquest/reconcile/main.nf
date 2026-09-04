@@ -45,7 +45,7 @@ process LTRQUEST_RECONCILE {
     stub:
     prefix = task.ext.prefix ?: "${meta.id}"
     """
-    printf '#name\\tLTR_len\\ttsd\\tdomains\\tnest_status\\n' > ${prefix}_depth0_ltr.tsv
+    printf '#seq_id\\tseq_len\\tstatus\\tltr5_start\\tltr5_end\\tltr3_start\\tltr3_end\\tltr5_len\\tltr3_len\\tflank5_len\\tflank3_len\\taln_len\\tn_sites\\tn_ts\\tn_tv\\tn_gapcols\\tidentity\\tp_dist\\tk2p\\tk2p_se\\tbitscore\\tflank_margin_bits\\tcigar\\tmotif\\tk2p_time\\torientation\\ttsd\\ttsd_offset\\ttsd_input\\tdomains\\tnest_status\\n' > ${prefix}_depth0_ltr.tsv
     printf 'chr1:1000-6000#LTR/Gypsy/Tekay\\t500\\tTGCAA\\t.\\t.\\n' >> ${prefix}_depth0_ltr.tsv
     printf '>chr1:1000-6000#LTR/Gypsy/Tekay\\nACGT\\n' > ${prefix}_depth0_ltr.fa
 

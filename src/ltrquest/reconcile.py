@@ -36,6 +36,7 @@ from .detect import (
     iter_fasta,
     load_scn_ltr_boundaries,
 )
+from .table import Columns, as_float, as_int, parse_header
 
 COORD_RE = re.compile(r"^([^:]+):(\d+)-(\d+)")
 
@@ -47,8 +48,14 @@ IUPAC_DEPTH_SEQ = ("N", "R", "D", "Y", "S", "W", "K", "M", "B", "H")
 
 
 def parse_tsv(path: str, round_idx: int) -> Tuple[Optional[str], List[dict]]:
-    """Return (header_line_or_None, list_of_record_dicts)."""
+    """Return (header_line_or_None, list_of_record_dicts).
+
+    `p` (p_dist) and `aln` (aln_len) feed _sub_dedup_shared_ltr_group's
+    matching-bases score, so they are read by name rather than position: a
+    round file always carries the header that names them.
+    """
     header: Optional[str] = None
+    cols_spec = Columns.of([])
     recs: List[dict] = []
     with open(path) as f:
         for line in f:
@@ -58,6 +65,7 @@ def parse_tsv(path: str, round_idx: int) -> Tuple[Optional[str], List[dict]]:
             if line.startswith("#"):
                 if header is None:
                     header = line
+                    cols_spec = Columns.from_line(line)
                 continue
             cols = line.split("\t")
             if not cols:
@@ -67,14 +75,8 @@ def parse_tsv(path: str, round_idx: int) -> Tuple[Optional[str], List[dict]]:
                 continue
             chrom, s, e = m.group(1), int(m.group(2)), int(m.group(3))
             key = f"{chrom}:{s}-{e}"
-            try:
-                p = float(cols[6])
-            except (ValueError, IndexError):
-                p = 0.0
-            try:
-                aln = int(float(cols[2]))
-            except (ValueError, IndexError):
-                aln = 0
+            p = as_float(cols_spec.get(cols, "p_dist"), default=0.0)
+            aln = as_int(cols_spec.get(cols, "aln_len"), default=0)
             recs.append({
                 "key": key,
                 "chrom": chrom,
@@ -313,6 +315,17 @@ def main() -> None:
         pool.extend(recs)
     print(f"[reconcile] loaded {len(pool)} records from {len(args.tsv)} rounds",
           file=sys.stderr)
+
+    # Step 6 below rewrites the last column in place, on the assumption that
+    # it is nest_status; a schema that moved nest_status elsewhere would make
+    # that a silent corruption instead of a failure here.
+    if header is not None:
+        names = parse_header(header)
+        if not names or names[-1] != "nest_status":
+            raise ValueError(
+                f"expected the element table header to end in 'nest_status', "
+                f"got: {header!r}"
+            )
 
     # 2. Load LTR boundaries (union across rounds)
     ltr_bounds: Dict[str, Tuple[int, int, int, int]] = {}
