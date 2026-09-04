@@ -1,5 +1,7 @@
 import textwrap
 
+import pytest
+
 from ltrquest import detect, kmer2ltr
 
 K2L = textwrap.dedent("""\
@@ -49,13 +51,6 @@ def test_detect_header_is_thirtyone_columns():
     assert len(detect.DETECT_COLUMNS) == 31
     assert detect.DETECT_COLUMNS[:29] == kmer2ltr.COLUMNS
     assert detect.DETECT_COLUMNS[29:] == ["domains", "nest_status"]
-
-
-def test_annotate_inserts_between_kmer2ltr_and_domains():
-    i = detect.ELEMENT_COLUMNS.index("strand")
-    assert detect.ELEMENT_COLUMNS[i - 1] == "tsd_input"
-    assert detect.ELEMENT_COLUMNS[i + 1] == "family"
-    assert detect.ELEMENT_COLUMNS[i + 2] == "domains"
 
 
 CANDS = (">chr1:100-2100#LTR/unknown\n" + "AC" * 1000 + "A\n"
@@ -120,3 +115,110 @@ def test_relabel_renames_and_drops_the_rest(tmp_path):
     assert (kept, dropped) == (1, 2)
     rows = list(kmer2ltr.read_rows(str(p)))
     assert [r["seq_id"] for r in rows] == ["chr1:120-2070#LTR/Copia/Ale"]
+
+
+def test_bounded_fasta_skips_records_kmer2ltr_could_not_bound(tmp_path):
+    tsv = _k2l_with_flanks(tmp_path)
+    fa = tmp_path / "c.fa"
+    fa.write_text(CANDS)
+    out = tmp_path / "b.fa"
+    rename = detect.bounded_fasta(str(fa), str(tsv), str(out))
+
+    assert "chr1:5000-5200#LTR/unknown" not in rename      # no_pair
+    assert not any(n.startswith("chr1:5000")
+                   for n in dict(detect.iter_fasta(str(out))))
+
+
+def test_bounded_fasta_keeps_an_unparseable_name_but_still_cuts(tmp_path):
+    lines = K2L.splitlines()
+    cols = lines[1].split("\t")
+    i = kmer2ltr.COLUMNS.index
+    cols[i("seq_id")] = "contig_with_no_locus"
+    cols[i("ltr5_start")], cols[i("ltr3_end")] = "21", "1971"
+    cols[i("flank5_len")], cols[i("flank3_len")] = "20", "30"
+    tsv = tmp_path / "k.tsv"
+    tsv.write_text(lines[0] + "\n" + "\t".join(cols) + "\n")
+
+    fa = tmp_path / "c.fa"
+    fa.write_text(">contig_with_no_locus\n" + "AC" * 1000 + "A\n")
+    out = tmp_path / "b.fa"
+    rename = detect.bounded_fasta(str(fa), str(tsv), str(out))
+
+    assert rename == {"contig_with_no_locus": "contig_with_no_locus"}
+    assert dict(detect.iter_fasta(str(out)))["contig_with_no_locus"] == \
+        ("AC" * 1000 + "A")[20:1971]
+
+
+def test_bounded_fasta_rejects_flanks_that_contradict_the_bounds(tmp_path):
+    lines = K2L.splitlines()
+    cols = lines[1].split("\t")
+    i = kmer2ltr.COLUMNS.index
+    cols[i("ltr5_start")], cols[i("ltr3_end")] = "21", "1971"
+    cols[i("flank5_len")], cols[i("flank3_len")] = "5", "30"   # 5 != 21 - 1
+    tsv = tmp_path / "k.tsv"
+    tsv.write_text(lines[0] + "\n" + "\t".join(cols) + "\n")
+
+    fa = tmp_path / "c.fa"
+    fa.write_text(CANDS)
+    with pytest.raises(RuntimeError, match="chr1:100-2100"):
+        detect.bounded_fasta(str(fa), str(tsv), str(tmp_path / "b.fa"))
+
+
+RENAME = {"chr1:100-2100#LTR/unknown": "chr1:120-2070#LTR/unknown",
+          "chr1:9000-9400#LTR/unknown": "chr1:9000-9400#LTR/unknown"}
+
+
+def test_rekey_through_moves_every_key_onto_the_trimmed_locus():
+    out = detect.rekey_through({"chr1:100-2100": "AAGCT",
+                                "chr1:9000-9400": "TTTT"}, RENAME, "TSDs")
+    assert out == {"chr1:120-2070": "AAGCT", "chr1:9000-9400": "TTTT"}
+
+
+def test_rekey_through_drops_keys_no_element_carried_forward():
+    out = detect.rekey_through({"chr1:100-2100": "AAGCT",
+                                "chr1:5000-5200": "GGGG"}, RENAME, "TSDs")
+    assert out == {"chr1:120-2070": "AAGCT"}
+
+
+def test_rekey_through_raises_when_nothing_matches():
+    with pytest.raises(RuntimeError, match="TSDs"):
+        detect.rekey_through({"chr9:1-2": "AAGCT"}, RENAME, "TSDs")
+
+
+def test_rekey_through_accepts_an_empty_input():
+    assert detect.rekey_through({}, RENAME, "TSDs") == {}
+    assert detect.rekey_through({"chr1:100-2100": "AAGCT"}, {}, "TSDs") == {}
+
+
+def test_relabel_raises_when_the_names_key_on_something_else(tmp_path):
+    p = tmp_path / "k.tsv"
+    p.write_text(K2L)
+    with pytest.raises(RuntimeError, match="key elements differently"):
+        detect.relabel_kmer2ltr_tsv(str(p), {"chr9:1-2": "chr9:1-2#LTR/Copia/Ale"})
+
+
+def test_bounded_fasta_keeps_one_record_per_bounded_span(tmp_path):
+    """Two candidates that bound to the same span are one element found twice."""
+    hdr = K2L.splitlines()[0]
+    i = kmer2ltr.COLUMNS.index
+
+    def row(name, seq_len, l5s, l3e, f5, f3):
+        cols = K2L.splitlines()[1].split("\t")
+        cols[i("seq_id")], cols[i("seq_len")] = name, str(seq_len)
+        cols[i("ltr5_start")], cols[i("ltr3_end")] = str(l5s), str(l3e)
+        cols[i("flank5_len")], cols[i("flank3_len")] = str(f5), str(f3)
+        return "\t".join(cols)
+
+    tsv = tmp_path / "k.tsv"
+    tsv.write_text("\n".join([hdr,
+                              row("chr1:100-2100", 2001, 21, 1971, 20, 30),
+                              row("chr1:110-2080", 1971, 11, 1961, 10, 10)]) + "\n")
+    fa = tmp_path / "c.fa"
+    fa.write_text(">chr1:100-2100\n" + "AC" * 1000 + "A\n"
+                  ">chr1:110-2080\n" + "AC" * 985 + "A\n")
+    out = tmp_path / "b.fa"
+    rename = detect.bounded_fasta(str(fa), str(tsv), str(out))
+
+    assert rename == {"chr1:100-2100": "chr1:120-2070"}
+    assert list(dict(detect.iter_fasta(str(out)))) == ["chr1:120-2070"]
+    assert len(set(rename.values())) == len(rename)

@@ -33,7 +33,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple, TypeVar
 
 from . import kmer2ltr as k2l
 from .table import Columns, as_float, as_int, is_missing
@@ -46,6 +46,8 @@ DETECT_COLUMNS = k2l.COLUMNS + ["domains", "nest_status"]
 DETECT_HEADER = "#" + "\t".join(DETECT_COLUMNS) + "\n"
 ELEMENT_COLUMNS = k2l.COLUMNS + ["strand", "family", "domains", "nest_status"]
 ELEMENT_HEADER = "#" + "\t".join(ELEMENT_COLUMNS) + "\n"
+
+T = TypeVar("T")
 
 # -----------------------------
 # utilities
@@ -3080,15 +3082,15 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
         # in the nested inner's domains.
         new_class = _reclassify_from_domains(key, inner_ranges)
         if new_class is not None:
-            cols = line.split("\t")
-            if cols and "#" in cols[0]:
-                te_only, old_class = cols[0].split("#", 1)
+            parts = line.split("\t")
+            if len(parts) > i_id and "#" in parts[i_id]:
+                te_only, old_class = parts[i_id].split("#", 1)
                 if old_class != new_class:
-                    old_col1 = cols[0]
-                    cols[0] = f"{te_only}#{new_class}"
-                    line = "\t".join(cols)
+                    old_name = parts[i_id]
+                    parts[i_id] = f"{te_only}#{new_class}"
+                    line = "\t".join(parts)
                     if rename_map is not None:
-                        rename_map[old_col1] = cols[0]
+                        rename_map[old_name] = parts[i_id]
 
         handle.write(f"{line}\t{dom_val}\t{nest_val}\n")
 
@@ -3370,10 +3372,19 @@ def bounded_fasta(in_fa: str, k2l_tsv: str, out_fa: str,
     the same amounts. Records Kmer2LTR could not bound are dropped; so are
     records absent from the table.
 
+    The cut is taken from the bounds and the name from the flanks, which are
+    two statements of the same quantity; a record where they disagree would be
+    given a name describing a span it does not hold, so it raises instead.
+
+    Two candidates that bound to the same span are the same element found
+    twice, and only the first is kept: a repeated header would otherwise be
+    ambiguous to everything that keys an element by name.
+
     Returns {old_name: new_name} so nesting and dedup can be re-keyed.
     """
     rows = {r["seq_id"]: r for r in k2l.read_rows(k2l_tsv)}
     rename: Dict[str, str] = {}
+    written: Set[str] = set()
     with open(out_fa, "w") as out:
         for name, seq in iter_fasta(in_fa):
             row = rows.get(name)
@@ -3387,6 +3398,10 @@ def bounded_fasta(in_fa: str, k2l_tsv: str, out_fa: str,
             end = as_int(row["ltr3_end"])
             if start is None or end is None or end <= start:
                 continue
+            if start - 1 != f5 or len(seq) - end != f3:
+                raise RuntimeError(
+                    f"{name}: Kmer2LTR's flanks ({f5}, {f3}) disagree with its "
+                    f"bounds ({start}, {end}) on a {len(seq)} bp record")
             frag = seq[start - 1:end]
 
             parsed = _parse_interval_from_kmer2ltr_col1(name)
@@ -3399,11 +3414,38 @@ def bounded_fasta(in_fa: str, k2l_tsv: str, out_fa: str,
                 if suffix is not None:
                     new_name += f"#{suffix}"
 
+            if new_name in written:
+                continue
+            written.add(new_name)
+
             rename[name] = new_name
             out.write(f">{new_name}\n")
             for i in range(0, len(frag), wrap):
                 out.write(frag[i:i + wrap] + "\n")
     return rename
+
+
+def rekey_through(by_locus: Dict[str, T], rename: Dict[str, str],
+                  what: str) -> Dict[str, T]:
+    """Restate a map of elements against the names `rename` carries them to.
+
+    Both sides are reduced to the bare `chrom:start-end`, which is how every
+    stage of the round identifies an element; the classification suffix rides
+    along on the name and never on the key.
+
+    Two non-empty maps that share no key describe different sets of elements.
+    That mismatch is otherwise silent -- it yields an empty map, an empty
+    library and no error -- so it raises here instead. An empty input is not a
+    mismatch: nothing was asked for, and nothing came back.
+    """
+    locus_rename = {old.split("#", 1)[0]: new.split("#", 1)[0]
+                    for old, new in rename.items()}
+    out = {locus_rename[k]: v for k, v in by_locus.items() if k in locus_rename}
+    if by_locus and locus_rename and not out:
+        raise RuntimeError(
+            f"{what}: none of the {len(by_locus)} key(s) match the "
+            f"{len(locus_rename)} element(s) they are being restated against")
+    return out
 
 
 def subset_fasta_by_name_set(in_fa: str, out_fa: str, keep_names: set,
@@ -3583,6 +3625,9 @@ def relabel_kmer2ltr_tsv(kmer2ltr_tsv: str, names: Dict[str, str]) -> Tuple[int,
     element under from here. A row with no entry is dropped, so the table
     holds exactly the elements the caller kept.
 
+    A non-empty map that matches no row is keyed on something other than this
+    table's `seq_id`, which would empty the table silently, so it raises.
+
     Returns (n_kept, n_dropped).
     """
     in_path = Path(kmer2ltr_tsv)
@@ -3606,6 +3651,11 @@ def relabel_kmer2ltr_tsv(kmer2ltr_tsv: str, names: Dict[str, str]) -> Tuple[int,
             parts[i_id] = new_name
             fout.write("\t".join(parts) + "\n")
             n_kept += 1
+
+    if names and not n_kept:
+        raise RuntimeError(
+            f"{kmer2ltr_tsv}: none of the {len(names)} supplied name(s) match "
+            f"a row; the map and the table key elements differently")
 
     tmp_path.replace(in_path)
     return n_kept, n_dropped
@@ -4657,8 +4707,14 @@ def main():
     # LTRs are protected (putative nested TEs).
     purge_set: Set[str] = set()
     if args.use_tesorter and tsd_seqs:
+        # 8c has not run yet, so a candidate Kmer2LTR could not bound is still
+        # in the table. It is about to be dropped, and must not take a
+        # neighbouring element with it on the way out.
+        anchors = {row["seq_id"].split("#", 1)[0]
+                   for row in k2l.read_rows(k2l_tsv)
+                   if row["status"] == "pass"} & set(tsd_seqs)
         purge_set = pre_purge_tsd_dominated(
-            merged_scn, set(tsd_seqs),
+            merged_scn, anchors,
             threshold=args.dedup_threshold,
             ltr_bounds=ltr_bounds,
         )
@@ -4682,16 +4738,10 @@ def main():
 
     # Steps 8a and 8b answer questions about the candidates, so their keys are
     # the untrimmed loci; everything from the bounded FASTA onwards is stated
-    # against the trimmed ones. This is the round's only conversion between the
-    # two, and a total loss of keys here would otherwise pass unnoticed.
-    locus_rename = {old.split("#", 1)[0]: new.split("#", 1)[0]
-                    for old, new in rename.items()}
-    tsd_after_trim = {locus_rename[k]: v
-                      for k, v in tsd_seqs.items() if k in locus_rename}
-    if tsd_seqs and not tsd_after_trim:
-        raise RuntimeError("TSD keys did not survive the trim rebase")
-    bounded_ltr_bounds = {locus_rename[k]: v
-                          for k, v in ltr_bounds.items() if k in locus_rename}
+    # against the trimmed ones. `rekey_through` is the round's only crossing
+    # between the two frames, and its own tripwire.
+    tsd_after_trim = rekey_through(tsd_seqs, rename, "Kmer2LTR TSDs")
+    bounded_ltr_bounds = rekey_through(ltr_bounds, rename, "SCN LTR boundaries")
 
     # Step 8f: seed pass-2 with the elements Kmer2LTR found a TSD for. A TSD is
     # independent evidence of a real insertion, so these anchor the homology
@@ -4737,18 +4787,19 @@ def main():
             verbose=verbose,
         )
 
-        # TEBinSorter saw the bounded records, so each element is taken through
-        # `rename` before its classification is looked up.
+        # TEBinSorter saw the bounded records while the table still names the
+        # candidates, so the classifications cross the trim the other way.
         cls_names = ltr_names_from_cls_tsv(cls_tsv_path)
-        element_names = {old: cls_names[new]
-                         for old, new in rename.items() if new in cls_names}
+        if not cls_names:
+            print(f"[Step9] WARNING: {Path(cls_tsv_path).name} classified no "
+                  f"element as an LTR retrotransposon")
+        element_names = rekey_through(
+            cls_names, {new: old for old, new in rename.items()},
+            "TEBinSorter classifications")
     else:
         element_names = dict(rename)
 
     n_named, n_unnamed = relabel_kmer2ltr_tsv(k2l_tsv, element_names)
-    if element_names and not n_named:
-        raise RuntimeError("no element survived renaming; the table and the "
-                           "bounded FASTA disagree on element identity")
     if args.use_tesorter:
         print(f"[Step9] classified {n_named} element(s), dropped {n_unnamed} "
               f"left unclassified or called non-LTR")
