@@ -3448,6 +3448,70 @@ def rekey_through(by_locus: Dict[str, T], rename: Dict[str, str],
     return out
 
 
+def assert_bounded(tsv: str) -> None:
+    """Every element in a finished table sits exactly on its own LTR termini."""
+    for row in k2l.read_rows(tsv):
+        if (row["ltr5_start"], row["flank5_len"], row["flank3_len"]) != ("1", "0", "0") \
+                or row["ltr3_end"] != row["seq_len"]:
+            raise AssertionError(
+                f"{row['seq_id']} is not Kmer2LTR-bounded: "
+                f"ltr5_start={row['ltr5_start']} ltr3_end={row['ltr3_end']} "
+                f"seq_len={row['seq_len']} flanks={row['flank5_len']},{row['flank3_len']}"
+            )
+
+
+def rebase_to_trimmed(tsv: str, rename: Dict[str, str]) -> None:
+    """Restate each row's coordinates against the trimmed record.
+
+    Trimming takes flank5_len bases off the front, so every element-relative
+    coordinate shifts down by that much and both flanks become zero. Doing it
+    here, once, is what lets dedup, nesting, masking and GFF3 agree afterwards:
+    from this point there is one set of coordinates and one set of names.
+
+    Rows Kmer2LTR could not bound are dropped, matching `bounded_fasta`, so the
+    table and the FASTA hold the same elements.
+    """
+    in_path = Path(tsv)
+    tmp_path = in_path.parent / (in_path.name + ".rebase.tmp")
+
+    with open(in_path) as fin, open(tmp_path, "w") as fout:
+        header = fin.readline()
+        fout.write(header)
+        cols = Columns.from_line("#" + header if not header.startswith("#") else header)
+        i_id = cols.require("seq_id")
+        i_len = cols.require("seq_len")
+        shifted = [cols.require(c) for c in ("ltr5_end", "ltr3_start", "ltr3_end")]
+        i_start = cols.require("ltr5_start")
+        flanks = [cols.require("flank5_len"), cols.require("flank3_len")]
+
+        for raw in fin:
+            if not raw.strip():
+                continue
+            parts = raw.rstrip("\n").split("\t")
+            name = parts[i_id]
+            if name not in rename:
+                continue
+
+            f5 = as_int(parts[flanks[0]], 0)
+            start = as_int(parts[i_start])
+            end = as_int(parts[shifted[2]])
+            if start is None or end is None:
+                continue
+
+            parts[i_id] = rename[name]
+            parts[i_len] = str(end - start + 1)
+            for i in shifted:
+                v = as_int(parts[i])
+                if v is not None:
+                    parts[i] = str(v - f5)
+            parts[i_start] = "1"
+            for i in flanks:
+                parts[i] = "0"
+            fout.write("\t".join(parts) + "\n")
+
+    tmp_path.replace(in_path)
+
+
 def subset_fasta_by_name_set(in_fa: str, out_fa: str, keep_names: set,
                              rename_map: Optional[Dict[str, str]] = None) -> None:
     """
@@ -3728,6 +3792,60 @@ def build_tesorter_full_length_ltr_fasta_from_cls_tsv(cls_tsv_path: str, genome_
 
     if n_written == 0:
         Path(out_fa).touch()
+
+
+def bounded_fasta_oriented(bounded_fa: str, cls_tsv_path: str, out_fa: str,
+                           keep_names: Set[str], rename_map: Dict[str, str],
+                           wrap: int = 60) -> Set[str]:
+    """Write the round's library from the bounded FASTA, subset and renamed
+    exactly as `subset_fasta_by_name_set` would, with minus-strand records
+    flipped so family clustering sees one orientation per family.
+
+    Genome extraction stays in `build_tesorter_full_length_ltr_fasta_from_cls_tsv`;
+    this instead reverse-complements the same bounded, trimmed sequence
+    everything else in the round already keys on, using TEsorter2's strand
+    call (`cls_tsv_path` column 6) the way that function does.
+
+    Returns the written (post-rename) names that were flipped: their bases
+    read in genome-reverse order, so a consumer that marks an interval on this
+    FASTA from genome coordinates -- same-round nest masking -- has to mirror
+    the interval for names in this set.
+    """
+    strand: Dict[str, str] = {}
+    with open(cls_tsv_path) as fin:
+        header_seen = False
+        for line in fin:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            if not header_seen:
+                header_seen = True
+                low = line.lower()
+                if low.startswith("te\t") or low.startswith("#te\t"):
+                    continue
+            cols = line.split("\t")
+            if len(cols) < 7:
+                continue
+            strand[cols[0]] = cols[5]
+
+    revcomped: Set[str] = set()
+    n_written = 0
+    with open(out_fa, "w") as out:
+        for name, seq in iter_fasta(bounded_fa):
+            out_name = rename_map.get(name, name)
+            if out_name not in keep_names:
+                continue
+            if strand.get(name) == "-":
+                seq = revcomp(seq)
+                revcomped.add(out_name)
+            out.write(f">{out_name}\n")
+            for i in range(0, len(seq), wrap):
+                out.write(seq[i:i + wrap] + "\n")
+            n_written += 1
+
+    if n_written == 0:
+        Path(out_fa).touch()
+    return revcomped
 
 
 def _find_tsd_seq(left: str, right: str, min_len: int = 5) -> Optional[str]:
@@ -4735,10 +4853,13 @@ def main():
     rename = bounded_fasta(k2l_in_fa, k2l_tsv, bounded_fa, exclude=purge_set)
     print(f"[Step8d] bounded FASTA: {len(rename)} elements -> {Path(bounded_fa).name}")
 
-    # The TSDs and the SCN boundaries are keyed on the candidates' untrimmed
-    # loci; everything from the bounded FASTA onwards is stated against the
-    # trimmed ones. `rekey_through` is the round's only crossing between the
-    # two frames, and its own tripwire.
+    # tsd_seqs (Step8b) and ltr_bounds (loaded ahead of Kmer2LTR) were both
+    # captured against the untrimmed loci, ahead of this line, on purpose:
+    # rebase_to_trimmed is where the element table itself crosses into the
+    # bounded frame, and rekey_through carries these two dicts across the same
+    # rename, so every stage past this point shares the one frame and the one
+    # set of names.
+    rebase_to_trimmed(k2l_tsv, rename)
     tsd_after_trim = rekey_through(tsd_seqs, rename, "Kmer2LTR TSDs")
     bounded_ltr_bounds = rekey_through(ltr_bounds, rename, "SCN LTR boundaries")
 
@@ -4786,17 +4907,24 @@ def main():
             verbose=verbose,
         )
 
-        # TEBinSorter saw the bounded records while the table still names the
-        # candidates, so the classifications cross the trim the other way.
+        # TEBinSorter classified the bounded records directly, so cls_names is
+        # keyed the same way rebase_to_trimmed left the table: bare bounded
+        # locus in, classified name out. Routing it through rekey_through
+        # anyway keeps the tripwire live against a cls.tsv keyed on anything
+        # else.
         cls_names = ltr_names_from_cls_tsv(cls_tsv_path)
         if not cls_names:
             print(f"[Step9] WARNING: {Path(cls_tsv_path).name} classified no "
                   f"element as an LTR retrotransposon")
         element_names = rekey_through(
-            cls_names, {new: old for old, new in rename.items()},
+            cls_names, {v: v for v in rename.values()},
             "TEBinSorter classifications")
     else:
-        element_names = dict(rename)
+        # No classifier ran to rename anything, so every element keeps the
+        # bare bounded name rebase_to_trimmed already gave the table; the
+        # relabel call below still runs, both to drop rows bounded_fasta
+        # excluded and to keep its own tripwire live on this path too.
+        element_names = {v: v for v in rename.values()}
 
     n_named, n_unnamed = relabel_kmer2ltr_tsv(k2l_tsv, element_names)
     if args.use_tesorter:
@@ -4840,14 +4968,21 @@ def main():
     _t_kmer2ltr += time.monotonic() - _t0
 
     keep_names = names_from_kmer2ltr_dedup(k2l_dedup_out)
+    revcomped_names: Set[str] = set()
 
     if args.use_tesorter:
         tesorter_lib_fa_dedup = f"{out_prefix}_ltr.fa"
         print(f"[Step9c] subsetting bounded FASTA by dedup list -> {tesorter_lib_fa_dedup}")
         lib_rename = {bare: nest_rename_map.get(name, name)
                       for bare, name in cls_names.items()}
-        subset_fasta_by_name_set(bounded_fa, tesorter_lib_fa_dedup, keep_names,
-                                 rename_map=lib_rename)
+        # Family clustering downstream wants one orientation per family, so
+        # the library -- unlike the bounded FASTA everything else in the round
+        # reads -- is written with minus-strand elements flipped.
+        revcomped_names = bounded_fasta_oriented(
+            bounded_fa, cls_tsv_path, tesorter_lib_fa_dedup, keep_names, lib_rename)
+        if revcomped_names:
+            print(f"[Step9c] reverse-complemented {len(revcomped_names)} minus-strand "
+                  f"element(s) so the library carries one orientation per family")
         fa_to_mask_same_round = tesorter_lib_fa_dedup
     else:
         intact_dedup_fa = f"{out_prefix}.ltrtools.intact.dedup.fa"
