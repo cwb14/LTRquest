@@ -102,11 +102,14 @@ the old one's, which forces everything below.
 ### Fixed
 
 - **GFF3 `long_terminal_repeat` sub-features landed on the wrong span for
-  minus-strand elements.** The coordinates feeding them did not always agree
-  with the GFF3 writer's own assumption — that the earlier-positioned LTR in
-  the record is the 5' one. Kmer2LTR's `ltr5`/`ltr3` are assigned purely by
-  position in the record it was handed, never by strand, so that assumption
-  now always holds.
+  minus-strand elements.** This predates the rewrite: `gff3.py` applies
+  `start + ltr5_end - 1` as a forward-genomic offset, but the pipeline used to
+  measure those coordinates against a library where minus-strand records had
+  already been reverse-complemented for classification, so the two
+  sub-features were mis-sized whenever the LTRs differed in length or the
+  flanks were asymmetric. It is fixed as a consequence of Kmer2LTR now
+  running on the original forward-genomic sequence, ahead of classification,
+  rather than of anything `gff3.py` itself had to change.
 - **Same-round nest masking painted the wrong bases on reverse-complemented
   elements.** `nest_status` intervals are always forward-genomic, but on the
   ~45% of elements whose library record Kmer2LTR reverse-complemented for

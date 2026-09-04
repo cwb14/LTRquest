@@ -54,8 +54,6 @@ requirements:
     # `--no-trf`.
     - sdust
     # --- pulled in by the bundled Kmer2LTR / TEsorter2 helpers ---
-    - biopython
-    - networkx
     - pyfaidx
     - pyhmmer >=0.10
     - pyfastx

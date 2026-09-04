@@ -128,11 +128,13 @@ remove the old environment first:
 mamba env remove -n ltrquest
 ```
 
-`environment.yml` carries `git`, `make` and a C compiler on purpose. Two of the
-helpers LTRquest uses — Kmer2LTR and TEsorter2 — are cloned on first use, and
-TRF-mod is cloned and compiled. TRF-mod runs by default, so without a compiler
-the first real run stops on `cc: not found`. Pass `--no-trf` if you would rather
-not have it at all.
+`environment.yml` carries `git`, `make` and a C compiler on purpose — mainly
+for TRF-mod, which is cloned *and* compiled and runs by default, so without a
+compiler the first real run stops on `cc: not found`. Pass `--no-trf` if you
+would rather not have it at all. TEsorter2 is cloned the same way but never
+compiled. Kmer2LTR needs neither step, normally: it is an ordinary Python
+package, resolved from `PATH` if it is already installed there, and only
+cloned — never built — as a fallback when it is not.
 
 <details>
 <summary><b>Docker</b> — for your own machine, where you have root</summary>
@@ -161,9 +163,12 @@ pip install ltrquest
 ```
 
 You then have to supply the external binaries yourself; see
-[`environment.yml`](environment.yml) for the list. Kmer2LTR, TEsorter2, TRF-mod
-and sdust are fetched and built into `--tools-dir` on first use. The container
-pre-builds all four and never reaches the network.
+[`environment.yml`](environment.yml) for the list. TEsorter2, TRF-mod and
+sdust are fetched into `--tools-dir` on first use — TRF-mod and sdust are then
+compiled, TEsorter2 is not. Kmer2LTR is an ordinary Python package: `pip
+install` it yourself, or let LTRquest fetch the same clone into `--tools-dir`,
+unbuilt either way. The container prepares all four during its own build and
+never reaches the network.
 </details>
 
 ### One command, whichever route you took
@@ -240,8 +245,15 @@ ltrquest --genome your_genome.fa --proteins any_related_species.pep.fa --threads
 | `--threads` | How many cores to use. Default 20 — set it to what your machine actually has. |
 
 Dropping `--max-rounds 1` is what turns on the nested search: LTRquest keeps
-going until a round stops finding anything new. Everything else has a sensible
-default — `ltrquest --help` lists them.
+going until a round stops finding anything new. Everything else has a
+sensible default — `ltrquest --help` lists them — with one exception worth
+knowing about: `--mutation-rate`, the neutral substitution rate per site per
+year for your organism. It only feeds `k2p_time` (insertion age, in years);
+nothing else depends on it. LTRquest defaults it to `3e-8`, a plant-generic
+rate, so a run against, say, a mammalian genome still finishes and still
+reports ages — just ages computed from the wrong clock, with nothing in the
+output to flag that they are. Set it to a rate that describes your organism;
+`7e-9` is the usual choice for *Arabidopsis thaliana*.
 
 ## A worked example
 

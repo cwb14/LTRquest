@@ -34,10 +34,8 @@ dependencies:
   - c-compiler                      # provides $CC; TRF-mod and sdust are C
   - zlib                            # -lz, if sdust ever has to be built here
   # --- python libraries ---
-  - biopython
   - numpy
   - matplotlib-base
-  - networkx                        # Kmer2LTR ltr_family_network
   - pyfaidx                         # ltrquest-flagfp
   - pyhmmer>=0.10                   # TEsorter2
   - pyfastx                         # TEsorter2
