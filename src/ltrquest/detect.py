@@ -2721,6 +2721,8 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
     """
     in_path = Path(kmer2ltr_tsv)
     if not in_path.exists() or in_path.stat().st_size == 0:
+        # No input means no columns to restate, and no rows a wrong header
+        # could shift; the canonical empty table is what consumers expect.
         Path(out_tsv).write_text(DETECT_HEADER)
         return
 
@@ -3072,8 +3074,15 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
 
         _write_enriched(best, out_handle, nest_rels)
 
+    # Every row is copied through verbatim with two fields appended, so the
+    # header has to be the input's own column names plus those two. Restating
+    # DETECT_COLUMNS instead would describe this LTRquest's idea of Kmer2LTR's
+    # schema over another Kmer2LTR's rows, and a one-column difference shifts
+    # every by-name read downstream without shortening the header.
+    out_header = "#" + "\t".join(cols.names + ["domains", "nest_status"]) + "\n"
+
     with open(tmp_sorted, "r") as fin, open(out_tsv, "w") as out:
-        out.write(DETECT_HEADER)
+        out.write(out_header)
         for raw in fin:
             if not raw.strip():
                 continue
@@ -3217,9 +3226,25 @@ def rekey_through(by_locus: Dict[str, T], rename: Dict[str, str],
     return out
 
 
+_BOUNDED_FIELDS = ("seq_len", "ltr5_start", "ltr3_end", "flank5_len", "flank3_len")
+
+
 def assert_bounded(tsv: str) -> None:
-    """Every element in a finished table sits exactly on its own LTR termini."""
+    """Every element in a finished table sits exactly on its own LTR termini.
+
+    A row too short to carry those five fields cannot be checked at all, and
+    `rebase_to_trimmed` -- which writes this table -- drops such a row rather
+    than emitting one. Finding one here means the table was truncated after
+    that, so it is named rather than left to surface as a KeyError.
+    """
     for row in k2l.read_rows(tsv):
+        absent = [c for c in _BOUNDED_FIELDS if c not in row]
+        if absent:
+            raise AssertionError(
+                f"{tsv}: {row.get('seq_id', '<row with no seq_id>')} has no "
+                f"{', '.join(absent)}; the table is truncated, or its header "
+                f"does not describe its rows"
+            )
         if (row["ltr5_start"], row["flank5_len"], row["flank3_len"]) != ("1", "0", "0") \
                 or row["ltr3_end"] != row["seq_len"]:
             raise AssertionError(
@@ -4269,6 +4294,9 @@ def main():
     k2l.run(kmer2ltr_prefix, k2l_in_fa, k2l_tsv,
             threads=args.threads, mutation_rate=args.mutation_rate,
             genome=args.genome, trim_flanks=True, verbose=verbose)
+    # This table is the element table every later stage extends and re-emits,
+    # so the round can only append to a schema it recognises.
+    k2l.assert_schema(k2l_tsv)
     counts = k2l.status_counts(k2l_tsv)
     n_pass = counts.get("pass", 0)
     other = ", ".join(f"{n} {s}" for s, n in sorted(counts.items()) if s != "pass")

@@ -112,3 +112,36 @@ def test_resolve_falls_back_to_a_clone_layout(tmp_path, monkeypatch):
 def test_run_raises_on_failure(tmp_path):
     with pytest.raises(subprocess.CalledProcessError):
         kmer2ltr.run(["false"], "in.fa", str(tmp_path / "out.tsv"))
+
+
+def test_assert_schema_accepts_the_documented_columns(tmp_path):
+    p = tmp_path / "k.tsv"
+    p.write_text("#" + "\t".join(kmer2ltr.COLUMNS) + "\n")
+    kmer2ltr.assert_schema(p)
+
+
+def test_assert_schema_accepts_a_header_without_the_hash(tmp_path):
+    p = tmp_path / "k.tsv"
+    p.write_text("\t".join(kmer2ltr.COLUMNS) + "\n")
+    kmer2ltr.assert_schema(p)
+
+
+def test_assert_schema_rejects_an_extra_column(tmp_path):
+    """A wider table still reads correctly by name here, so nothing downstream
+    would notice until the appended header described its rows one field short."""
+    p = tmp_path / "k.tsv"
+    p.write_text("#" + "\t".join(kmer2ltr.COLUMNS + ["ltr_score"]) + "\n")
+    with pytest.raises(RuntimeError) as e:
+        kmer2ltr.assert_schema(p)
+    msg = str(e.value)
+    assert "out of step" in msg
+    assert "ltr_score" in msg                 # what Kmer2LTR wrote
+    assert "tsd_input" in msg                 # what LTRquest expects
+    assert f"{len(kmer2ltr.COLUMNS) + 1} column(s)" in msg
+
+
+def test_assert_schema_rejects_a_headerless_table(tmp_path):
+    p = tmp_path / "k.tsv"
+    p.write_text("chr1:100-200#LTR/Gypsy\t101\tpass\n")
+    with pytest.raises(RuntimeError, match="out of step"):
+        kmer2ltr.assert_schema(p)

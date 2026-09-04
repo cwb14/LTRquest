@@ -46,16 +46,46 @@ COORD_RE = re.compile(r"^([^:]+):(\d+)-(\d+)")
 # V is reserved for the wrapper's far-character and is NOT in this list.
 IUPAC_DEPTH_SEQ = ("N", "R", "D", "Y", "S", "W", "K", "M", "B", "H")
 
+# The columns cross_round_dedup scores survivors on. Neither is fatal to
+# reading a table, but both defaulting is.
+ROUND_TSV_FIELDS = ("p_dist", "aln_len")
+
+
+def _check_round_columns(path: str, cols: Columns) -> None:
+    """Confirm a round table's header names the columns dedup scores on, once
+    per file and before any row of it is used.
+
+    Neither present means there is no header to key off of at all -- every
+    record would come back with p_dist 0 and aln_len 0, which is not a failure
+    the caller can see: the score `aln * (1 - p)` is then uniformly zero and
+    the survivor of each duplicate group is whichever record sorted first.
+    That file is refused outright. One of the two present is still a usable
+    table; it is read, but the defaulted field is named so it is on the record.
+    """
+    present = [name for name in ROUND_TSV_FIELDS if name in cols]
+    if not present:
+        raise ValueError(
+            f"{path}: no header, or a header naming none of "
+            f"{', '.join(ROUND_TSV_FIELDS)}; this is not an LTRquest "
+            f"element table"
+        )
+    missing = [name for name in ROUND_TSV_FIELDS if name not in cols]
+    if missing:
+        print(f"[reconcile] WARNING: {path}: header has no "
+              f"{', '.join(missing)}; missing column(s) default to zero for "
+              f"every row", file=sys.stderr)
+
 
 def parse_tsv(path: str, round_idx: int) -> Tuple[Optional[str], List[dict]]:
     """Return (header_line_or_None, list_of_record_dicts).
 
     `p` (p_dist) and `aln` (aln_len) feed _sub_dedup_shared_ltr_group's
-    matching-bases score, so they are read by name rather than position: a
-    round file always carries the header that names them.
+    matching-bases score, so they are read by name rather than position, and a
+    file that names neither is refused rather than scored on defaults.
     """
     header: Optional[str] = None
     cols_spec = Columns.of([])
+    checked = False
     recs: List[dict] = []
     with open(path) as f:
         for line in f:
@@ -66,7 +96,12 @@ def parse_tsv(path: str, round_idx: int) -> Tuple[Optional[str], List[dict]]:
                 if header is None:
                     header = line
                     cols_spec = Columns.from_line(line)
+                    _check_round_columns(path, cols_spec)
+                    checked = True
                 continue
+            if not checked:
+                _check_round_columns(path, cols_spec)
+                checked = True
             cols = line.split("\t")
             if not cols:
                 continue

@@ -142,29 +142,29 @@ def parse_ltr_divergence(div_path, te_map):
                 te_map[key].k2p_dist = k2p_dist
                 te_map[key].k2p_time = k2p_time
                 te_map[key].has_divergence = True
-                _attach_domains_from_divergence_row(cols, te_map[key])
+                _attach_domains_from_divergence_row(cols_spec, cols, te_map[key])
 
 
 _TSV_DOMAIN_TOKEN_RE = re.compile(r'^([^|@;]+)\|[^@;]*@(\d+)-(\d+)$')
 
 
-def _attach_domains_from_divergence_row(cols, te):
-    """Attach domains from a wrapper divergence-TSV row's 'domains' field
-    (2nd-from-last column, e.g. 'INT|Tekay@14803-15729;RH|Tekay@16024-16362',
-    genomic coordinates). Plain Kmer2LTR tables (16 numeric-tailed columns)
-    fail the token grammar and are skipped. Never overwrites domains that
-    are already present (e.g. from a legacy --domains GFF parsed later —
-    order in main() is divergence first, so this only guards re-parses)."""
-    if len(cols) < 14 or te.domains:
+def _attach_domains_from_divergence_row(cols_spec, cols, te):
+    """Attach domains from an element table row's 'domains' field, e.g.
+    'INT|Tekay@14803-15729;RH|Tekay@16024-16362', in genomic coordinates.
+    A table without that column contributes nothing, as does a field that
+    fails the token grammar. Never overwrites domains that are already
+    present (e.g. from a legacy --domains GFF parsed later — order in main()
+    is divergence first, so this only guards re-parses)."""
+    if te.domains:
         return
-    field = cols[-2]
+    field = cols_spec.get(cols, "domains")
     if field in ('.', ''):
         return
     domains = []
     for token in field.split(';'):
         m = _TSV_DOMAIN_TOKEN_RE.match(token.strip())
         if not m:
-            return  # not a domains field at all (e.g. numeric ltr5_end column)
+            return  # malformed field: take none of it rather than part of it
         domains.append(ProteinDomain(
             start=int(m.group(2)), end=int(m.group(3)),
             name=m.group(1), gene=m.group(1),

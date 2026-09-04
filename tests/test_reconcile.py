@@ -227,11 +227,32 @@ class TestParseTsv:
         assert recs[0]["aln"] == 220
         assert recs[0]["p"] == pytest.approx(0.05)
 
-    def test_falls_back_to_zero_without_a_header(self, tmp_path):
+    def test_refuses_a_table_that_names_neither_column(self, tmp_path):
+        """Without a header both fields default, the score `aln * (1 - p)` is
+        uniformly zero, and the survivor of every duplicate group is whichever
+        record happened to sort first -- a silent wrong answer, so it raises."""
         path = tmp_path / "r1_ltr.tsv"
         path.write_text("chr1:100-500#LTR/Copia/Ale\t.\t.\n")
 
+        with pytest.raises(ValueError, match="p_dist, aln_len"):
+            parse_tsv(str(path), round_idx=1)
+
+    def test_warns_but_reads_a_table_naming_only_one(self, tmp_path, capsys):
+        path = tmp_path / "r1_ltr.tsv"
+        path.write_text("#seq_id\tp_dist\n"
+                        "chr1:100-500#LTR/Copia/Ale\t0.05\n")
+
         _header, recs = parse_tsv(str(path), round_idx=1)
         assert len(recs) == 1
+        assert recs[0]["p"] == pytest.approx(0.05)
         assert recs[0]["aln"] == 0
-        assert recs[0]["p"] == 0.0
+        assert "aln_len" in capsys.readouterr().err
+
+    def test_accepts_an_empty_table(self, tmp_path):
+        """A round that found nothing writes no rows; there is nothing to
+        misread, so it contributes nothing rather than failing the run."""
+        path = tmp_path / "r1_ltr.tsv"
+        path.write_text("")
+
+        header, recs = parse_tsv(str(path), round_idx=1)
+        assert (header, recs) == (None, [])

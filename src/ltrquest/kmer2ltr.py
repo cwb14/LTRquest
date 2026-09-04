@@ -136,6 +136,33 @@ def trimmed_path(out_tsv) -> Path:
     return Path(str(Path(out_tsv).with_suffix("")) + ".trimmed.fa")
 
 
+def assert_schema(tsv) -> None:
+    """Refuse a Kmer2LTR table whose columns are not the ones in `COLUMNS`.
+
+    `COLUMNS` restates the field order of a dataclass that lives in another
+    repository, and `resolve` runs whichever Kmer2LTR the environment offers.
+    Reading by name survives a schema that has grown; writing does not. The
+    stages that append to this table restate `COLUMNS` as their own header, so
+    against a wider table every by-name consumer downstream reads its
+    neighbour's column instead. The skew is caught where it enters, rather
+    than as a shifted table several stages later.
+    """
+    with open(tsv) as fh:
+        first = fh.readline()
+    names = parse_header("#" + first if not first.startswith("#") else first)
+    if names == COLUMNS:
+        return
+    raise RuntimeError(
+        f"{tsv}: the Kmer2LTR that ran writes a table this LTRquest does not "
+        f"know how to extend -- the two versions are out of step. Install a "
+        f"matching pair (pip install -U kmer2ltr ltrquest), or point "
+        f"--tools-dir at a Kmer2LTR checkout that matches this LTRquest.\n"
+        f"  Kmer2LTR wrote ({len(names)} column(s)): "
+        f"{', '.join(names) if names else '<no header line>'}\n"
+        f"  LTRquest expects ({len(COLUMNS)} column(s)): {', '.join(COLUMNS)}"
+    )
+
+
 def read_rows(tsv) -> Iterator[dict[str, str]]:
     with open(tsv) as fh:
         first = fh.readline()
