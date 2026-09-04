@@ -17,11 +17,26 @@ from ltrquest.reconcile import (
     compute_chain_inward,
     parse_tsv,
 )
+from ltrquest.table import Columns
 
 
 def rec(key: str, chrom: str, start: int, end: int) -> dict:
     """A reconciler record, cut down to the fields these functions read."""
     return {"key": key, "chrom": chrom, "s": start, "e": end}
+
+
+# A minimal stand-in for the pooled element table's header: just enough for
+# apply_depth_masking to find `orientation` by name, as the real header does.
+ORIENTATION_COLS = Columns.of(["seq_id", "orientation"])
+
+
+def rec_with_orientation(key: str, chrom: str, start: int, end: int,
+                         orientation: str) -> dict:
+    """A reconciler record whose row carries a real `orientation` value,
+    positioned to match ORIENTATION_COLS."""
+    r = rec(key, chrom, start, end)
+    r["cols"] = [key, orientation]
+    return r
 
 
 class TestBuildDirectChildren:
@@ -187,6 +202,58 @@ class TestApplyDepthMasking:
             {outer["key"]: depth + 1, inner["key"]: depth},
         )
         assert out[40:50] == char * 10
+
+    def test_a_forward_outer_masks_at_the_plain_offset(self):
+        # Same layout as test_a_depth0_child_is_masked_with_n, but with a
+        # real orientation column read: `+` must land the mark exactly where
+        # the orientation-blind path already did.
+        outer = rec_with_orientation("chr1:1-100", "chr1", 1, 100, "+")
+        inner = rec("chr1:41-50", "chr1", 41, 50)
+        out = apply_depth_masking(
+            "A" * 100, outer,
+            {outer["key"]: [inner["key"]]},
+            {outer["key"]: outer, inner["key"]: inner},
+            {outer["key"]: 1, inner["key"]: 0},
+            ORIENTATION_COLS,
+        )
+        assert out[:40] == "A" * 40
+        assert out[40:50] == "N" * 10
+        assert out[50:] == "A" * 50
+
+    def test_a_revcomped_outer_mirrors_the_mask(self):
+        # Same genomic interval as the forward case above, but outer_seq here
+        # stands in for what the library stores for a minus-strand record --
+        # bounded_fasta_oriented's reverse complement of the forward
+        # sequence -- so the mark has to land at the mirror-image offset.
+        outer = rec_with_orientation("chr1:1-100", "chr1", 1, 100, "-")
+        inner = rec("chr1:41-50", "chr1", 41, 50)
+        out = apply_depth_masking(
+            "A" * 100, outer,
+            {outer["key"]: [inner["key"]]},
+            {outer["key"]: outer, inner["key"]: inner},
+            {outer["key"]: 1, inner["key"]: 0},
+            ORIENTATION_COLS,
+        )
+        assert out[:50] == "A" * 50
+        assert out[50:60] == "N" * 10
+        assert out[60:] == "A" * 40
+
+    def test_an_unreadable_orientation_is_not_mirrored_and_does_not_raise(self):
+        # A row too short to reach the orientation index is what a malformed
+        # or foreign-schema row looks like; masking must still complete,
+        # falling back to the orientation-blind placement rather than raising
+        # or guessing.
+        outer = rec("chr1:1-100", "chr1", 1, 100)
+        outer["cols"] = ["chr1:1-100"]
+        inner = rec("chr1:41-50", "chr1", 41, 50)
+        out = apply_depth_masking(
+            "A" * 100, outer,
+            {outer["key"]: [inner["key"]]},
+            {outer["key"]: outer, inner["key"]: inner},
+            {outer["key"]: 1, inner["key"]: 0},
+            ORIENTATION_COLS,
+        )
+        assert out[40:50] == "N" * 10
 
 
 class TestIupacInvariants:
