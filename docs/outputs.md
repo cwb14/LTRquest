@@ -119,7 +119,7 @@ classification and clustering have run.
 | 25 | `k2p_time` | `round(k2p / (2 × mutation_rate))`, years since insertion; set by `--mutation-rate` (default `3e-8`) |
 | 26 | `orientation` | Whether *this record* is stored reverse-complemented relative to its own header locus. Not biology — see `strand` below |
 | 27 | `tsd` | Target-site duplication at the called boundary. `.` = searched and absent; `NA` = could not be searched |
-| 28 | `tsd_offset` | `d5,d3` — how far each boundary had to move for `tsd` to appear, positive meaning *into* the element. `NA` when `tsd` is `.` |
+| 28 | `tsd_offset` | `d5,d3` — how far each boundary had to move for `tsd` to appear, positive meaning *into* the element. `NA` whenever `tsd` carries no sequence, whether that is `.` or `NA` |
 | 29 | `tsd_input` | The same measurement at the record's termini as originally supplied, before re-bounding |
 | 30 | `strand` | The element's biological orientation, resolved by LTRquest from classification, domain order and pass-2 homology: `+`, `-`, or `.` if none of those resolved it |
 | 31 | `family` | Family id from the pooled consensus-LTR clustering, `<prefix>_fam00001` … — see section 5 |

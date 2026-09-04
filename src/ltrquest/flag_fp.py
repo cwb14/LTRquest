@@ -228,13 +228,6 @@ def classify_family(fm, max_recon=DEFAULT_MAX_RECON, max_dominance=DEFAULT_MAX_D
     return "false_positive"          # failed both gates
 
 
-def classify_fp(fm, min_members=DEFAULT_MIN_MEMBERS, max_recon=DEFAULT_MAX_RECON,
-                max_dominance=DEFAULT_MAX_DOMINANCE):
-    """True iff the family is a false positive (size gate + two-gate filter)."""
-    return (fm.n >= min_members
-            and classify_family(fm, max_recon, max_dominance) == "false_positive")
-
-
 # -----------------------------------------------------------------------------
 # Report TSVs
 # -----------------------------------------------------------------------------

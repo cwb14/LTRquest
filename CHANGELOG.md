@@ -11,34 +11,21 @@ developer workstation. All three were found by installing from scratch — pulli
 the published image and creating the conda environment — rather than by testing
 the source tree.
 
-### Fixed
+Upgrades the bundled Kmer2LTR from its original k-mer/MAFFT implementation to
+the rewritten package, and reorders the pipeline around what that rewrite
+makes possible. Kmer2LTR now runs *ahead of* classification instead of after
+it, so its boundary calls, K2P divergence figures and TSDs are the round's
+single source of truth rather than figures LTRquest re-derived and could
+disagree with. The new tool's CLI and output schema are not compatible with
+the old one's, which forces the schema, flag and stage changes below.
 
-- **`./ltrquest.sif --genome x.fa` did not work.** The image declared
-  `ENTRYPOINT []` with only a `CMD`, and Apptainer builds a SIF's runscript from
-  those two: with no ENTRYPOINT it *replaces* the command with the user's
-  arguments, so the first flag was run as a program —
-  `FATAL: "--help": executable file not found in $PATH`. The image now has an
-  entry point ([`bin/entrypoint.sh`](bin/entrypoint.sh)) that runs a first
-  argument naming a command and treats anything else as `ltrquest` arguments.
-  `apptainer exec IMG ltrquest …` and `docker run IMG ltrquest …` are unchanged
-  — `exec` never reaches an entry point, and an explicit command still wins.
-- **A working directory reached through a symlink left the run in `$HOME`.**
-  Apptainer mounts your home and working directories and nothing else. Where
-  home points elsewhere — `/home/you/data -> /scratch/you`, the usual cluster
-  layout — it adds no mount for the target, cannot follow the link from inside,
-  and falls back to `$HOME` with a warning that scrolls past. Every relative
-  path in the command then resolved somewhere else, and the only symptom was
-  `ERROR: Genome not found: your_genome.fa`. Two changes: a missing input inside
-  a container now says so and names the fix, and
-  [`bin/ltrquest-container`](bin/ltrquest-container) — shipped inside the image
-  — works the mounts out from the command it is given.
-- **The conda environment could not build the helpers it needs.**
-  `environment.yml` had no `git`, `make` or compiler, but TRF-mod is compiled on
-  first use and runs by default, so a clean environment died on `cc: not found`
-  the first time it saw a genome. This was invisible on any machine with system
-  build tools. The environment now carries them, and TRF-mod's build is retried
-  with `CC=$CC` because its makefile hardcodes `CC=gcc`, which a conda toolchain
-  does not provide.
+### Added
+
+- `--mutation-rate`, forwarded to Kmer2LTR's `-u` for both the per-round
+  table and the pooled family-clustering pass. Insertion age used to come
+  from a fixed μ = 3×10⁻⁸ baked into the old Kmer2LTR script with no flag to
+  change it; now `k2p_time` is `NA` unless you supply a rate that actually
+  matches your organism.
 
 ### Changed
 
@@ -52,25 +39,6 @@ the source tree.
   no longer needs a compiler.
 - Failures to find or build a helper name the conda package that provides it and
   the compiler toolchain that would build it, instead of only the tool.
-
-Upgrades the bundled Kmer2LTR from its original k-mer/MAFFT implementation to
-the rewritten package, and reorders the pipeline around what that rewrite
-makes possible. Kmer2LTR now runs *ahead of* classification instead of after
-it, so its boundary calls, K2P divergence figures and TSDs are the round's
-single source of truth rather than figures LTRquest re-derived and could
-disagree with. The new tool's CLI and output schema are not compatible with
-the old one's, which forces everything below.
-
-### Added
-
-- `--mutation-rate`, forwarded to Kmer2LTR's `-u` for both the per-round
-  table and the pooled family-clustering pass. Insertion age used to come
-  from a fixed μ = 3×10⁻⁸ baked into the old Kmer2LTR script with no flag to
-  change it; now `k2p_time` is `NA` unless you supply a rate that actually
-  matches your organism.
-
-### Changed
-
 - LTRquest's own `depth<N>_clean_ltr.tsv` is now Kmer2LTR's 33-column schema
   (see [docs/outputs.md](docs/outputs.md)), replacing the old 21-column one
   built around `LTR_len`, `raw_d`/`raw_T`, `JC69_d`/`JC69_T` and
@@ -101,6 +69,32 @@ the old one's, which forces everything below.
 
 ### Fixed
 
+- **`./ltrquest.sif --genome x.fa` did not work.** The image declared
+  `ENTRYPOINT []` with only a `CMD`, and Apptainer builds a SIF's runscript from
+  those two: with no ENTRYPOINT it *replaces* the command with the user's
+  arguments, so the first flag was run as a program —
+  `FATAL: "--help": executable file not found in $PATH`. The image now has an
+  entry point ([`bin/entrypoint.sh`](bin/entrypoint.sh)) that runs a first
+  argument naming a command and treats anything else as `ltrquest` arguments.
+  `apptainer exec IMG ltrquest …` and `docker run IMG ltrquest …` are unchanged
+  — `exec` never reaches an entry point, and an explicit command still wins.
+- **A working directory reached through a symlink left the run in `$HOME`.**
+  Apptainer mounts your home and working directories and nothing else. Where
+  home points elsewhere — `/home/you/data -> /scratch/you`, the usual cluster
+  layout — it adds no mount for the target, cannot follow the link from inside,
+  and falls back to `$HOME` with a warning that scrolls past. Every relative
+  path in the command then resolved somewhere else, and the only symptom was
+  `ERROR: Genome not found: your_genome.fa`. Two changes: a missing input inside
+  a container now says so and names the fix, and
+  [`bin/ltrquest-container`](bin/ltrquest-container) — shipped inside the image
+  — works the mounts out from the command it is given.
+- **The conda environment could not build the helpers it needs.**
+  `environment.yml` had no `git`, `make` or compiler, but TRF-mod is compiled on
+  first use and runs by default, so a clean environment died on `cc: not found`
+  the first time it saw a genome. This was invisible on any machine with system
+  build tools. The environment now carries them, and TRF-mod's build is retried
+  with `CC=$CC` because its makefile hardcodes `CC=gcc`, which a conda toolchain
+  does not provide.
 - **GFF3 `long_terminal_repeat` sub-features landed on the wrong span for
   minus-strand elements.** This predates the rewrite: `gff3.py` applies
   `start + ltr5_end - 1` as a forward-genomic offset, but the pipeline used to
