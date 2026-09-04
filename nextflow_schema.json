@@ -77,6 +77,23 @@
                     "help_text": "All genomes are clustered together in one pass, so `<family_prefix>_fam00001` denotes the same family in every genome's output. That shared vocabulary is what makes between-species family comparisons meaningful.",
                     "fa_icon": "fas fa-tag"
                 },
+                "mutation_rate": {
+                    "type": "number",
+                    "default": 3e-8,
+                    "exclusiveMinimum": 0,
+                    "description": "Neutral substitution rate per site per year.",
+                    "help_text": "Sets the k2p_time (insertion age) column: k2p / (2 * mutation_rate). Used both for each round's element table and for the pooled family-clustering pass.",
+                    "fa_icon": "fas fa-hourglass-half"
+                },
+                "min_seq_id": {
+                    "type": "number",
+                    "default": 0.75,
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "Sequence identity threshold for the pooled family-clustering pass.",
+                    "help_text": "Forwarded to Kmer2LTR's consensus and internal clustering as --min-seq-id. Lower values merge more distant elements into one family.",
+                    "fa_icon": "fas fa-object-group"
+                },
                 "skip_plots": {
                     "type": "boolean",
                     "description": "Skip the structure PDFs, summary PDF and TEGV browser.",

@@ -42,6 +42,10 @@ the source tree.
 
 ### Changed
 
+- `ltrquest-plots`' `--min_ltr_aln` is renamed `--min_ltr_len`, and
+  `flagged_false_positives.tsv`'s `aln_len_raw` column is renamed
+  `ltr3_len_raw`. Both hold a 3' LTR length, not an alignment length; the
+  names say what they measure.
 - `ensure_trfmod` and `ensure_sdust` look in `--tools-dir`, then on `PATH`, then
   clone and build — the order `ensure_tools` has used since 1.0.1. `sdust` is
   packaged (`bioconda::sdust`) and is now in `environment.yml`, so `--run-sdust`

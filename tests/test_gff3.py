@@ -10,6 +10,7 @@ from ltrquest.gff3 import (
     SOURCE,
     Raw,
     SeqidRanker,
+    build_element_blocks,
     escape,
     format_clade_composition,
     gff_line,
@@ -195,3 +196,42 @@ class TestReadSeqLengths:
     def test_a_real_chromosome_slice(self, athal_slice):
         lengths = read_seq_lengths(str(athal_slice))
         assert list(lengths.values()) == [200_000]
+
+
+class TestBuildElementBlocksColumnLookups:
+    """Pins every renamed element-table column lookup in build_element_blocks,
+    so a typo in a column name breaks this test rather than silently emitting
+    '.' in the GFF3."""
+
+    def test_renamed_columns_reach_the_emitted_attributes(self, tmp_path):
+        from ltrquest.annotate import DepthTable
+        from ltrquest.detect import DETECT_COLUMNS
+
+        row = ["."] * len(DETECT_COLUMNS)
+        row[DETECT_COLUMNS.index("seq_id")] = "chr1:100-600#LTR/Copia/Ale"
+        row[DETECT_COLUMNS.index("ltr5_len")] = "340"
+        row[DETECT_COLUMNS.index("ltr3_len")] = "338"
+        row[DETECT_COLUMNS.index("n_ts")] = "5"
+        row[DETECT_COLUMNS.index("n_tv")] = "2"
+        row[DETECT_COLUMNS.index("k2p")] = "0.0521"
+        row[DETECT_COLUMNS.index("k2p_time")] = "868333"
+        row[DETECT_COLUMNS.index("tsd")] = "TGCAA"
+
+        path = tmp_path / "depth0_ltr.tsv"
+        path.write_text("#" + "\t".join(DETECT_COLUMNS) + "\n" + "\t".join(row) + "\n")
+        table = DepthTable(str(path), depth=0, variant="raw")
+
+        blocks, skipped = build_element_blocks(
+            "Athal", [table], SeqidRanker(), {}, ({}, {}))
+
+        assert skipped == 0
+        assert len(blocks) == 1
+        attrs = blocks[0].payload[0]
+        assert "ltr5_len=340" in attrs
+        assert "ltr3_len=338" in attrs
+        assert "subs=7" in attrs  # n_ts(5) + n_tv(2)
+        assert "ti=5" in attrs
+        assert "tv=2" in attrs
+        assert "K2P_d=0.0521" in attrs
+        assert "K2P_T=868333" in attrs
+        assert "tsd=TGCAA" in attrs

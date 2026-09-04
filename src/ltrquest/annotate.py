@@ -670,9 +670,12 @@ def write_annotated_table(table: DepthTable,
             strand.get(key, UNKNOWN) if key else UNKNOWN,
             family.family_id if family else UNKNOWN,
         ]
-        # A row shorter than the header (malformed input) still gets both
-        # columns appended rather than mis-inserted mid-row.
-        at = len(row) if insert_at is None else min(insert_at, len(row))
+        # No header at all leaves no schema to locate `domains` in; fall back
+        # to the historical trailing pair (domains, nest_status) so nest_status
+        # -- a hard invariant elsewhere -- stays last even on this path. A row
+        # shorter than the header (malformed input) still gets both columns
+        # inserted at its own end rather than mis-inserted mid-row.
+        at = max(0, len(row) - 2) if insert_at is None else min(insert_at, len(row))
         row[at:at] = values
 
     write_table(table.path, header, rows)

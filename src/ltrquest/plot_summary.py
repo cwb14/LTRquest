@@ -428,10 +428,10 @@ def parse_alignment_file(path, subtract_nested=True):
       nest_status => LTR-RTs nested inside this element (by header name when the
                      file has a header, else the last column)
 
-    internal_len comes from the explicit boundary columns (ltr3_start -
-    ltr5_end - 1) rather than full_len - 2*ltr5_len, which was only ever an
-    approximation: it assumed both LTRs share ltr5_len's length and ignored
-    the flanking bases the boundary calls actually landed on.
+    internal_len is derived from the explicit boundary columns
+    (ltr3_start - ltr5_end - 1), which is exact regardless of how the two
+    LTRs' lengths compare to each other or to the flanks the boundary calls
+    landed on.
 
     With subtract_nested (the default), full_len and internal_len exclude any
     LTR-RT nested inside the element. A nest-outer element spans its insertions,
@@ -482,7 +482,7 @@ def parse_alignment_file(path, subtract_nested=True):
 
             ltr5_end = as_int(cols.get(parts, "ltr5_end"))
             ltr3_start = as_int(cols.get(parts, "ltr3_start"))
-            internal_len = (ltr3_start - ltr5_end - 1
+            internal_len = (max(0, ltr3_start - ltr5_end - 1 - nested_bp)
                             if ltr5_end is not None and ltr3_start is not None
                             else None)
 
