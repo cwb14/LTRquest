@@ -66,6 +66,12 @@ the old one's, which forces the schema, flag and stage changes below.
   internal span of a candidate; structurally inert now that Kmer2LTR needs
   both LTRs to measure divergence, so classification must always receive the
   full-length element and the internals-only path can no longer feed it).
+- `ltrquest-reconcile --scn`. It fed a shared-LTR lookup keyed on each round's
+  pre-trim SCN locus, but Kmer2LTR renames every element to its post-trim
+  locus before reconcile ever sees it, so the flag could no longer reach the
+  elements it was meant to describe. Boundaries are read from each round's
+  own `--tsv` table instead (`ltr_bounds_from_table`), which carries the
+  right key and the right coordinates on the same row.
 
 ### Fixed
 

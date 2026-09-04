@@ -2602,6 +2602,39 @@ def load_scn_ltr_boundaries(
     return result
 
 
+def ltr_bounds_from_table(tsv: str) -> Dict[str, Tuple[int, int, int, int]]:
+    """Derive per-element LTR boundaries from the element table itself.
+
+    Every row carries its own seq_id alongside its own ltr5_start, ltr5_end,
+    ltr3_start and ltr3_end (element-relative, 1-based), so the key and the
+    bounds returned for it always describe the same row. That is what keeps
+    a lookup in `_ltrs_shared` honest: a boundary map keyed in a different
+    frame than the elements it is checked against fails there silently (a
+    missing key reads as "distinct LTRs"), so deriving both from one row
+    forecloses that failure mode rather than merely avoiding it.
+
+    Returns dict: "chrom:start-end" (any #classification suffix stripped) ->
+    (s_lLTR, e_lLTR, s_rLTR, e_rLTR), in absolute genomic coordinates. A row
+    with an unparseable seq_id, or a missing or unparseable LTR coordinate,
+    is skipped.
+    """
+    result: Dict[str, Tuple[int, int, int, int]] = {}
+    for row in k2l.read_rows(tsv):
+        parsed = _parse_interval_from_kmer2ltr_col1(row["seq_id"])
+        if parsed is None:
+            continue
+        chrom, s, e = parsed
+        l5s = as_int(row.get("ltr5_start"))
+        l5e = as_int(row.get("ltr5_end"))
+        l3s = as_int(row.get("ltr3_start"))
+        l3e = as_int(row.get("ltr3_end"))
+        if None in (l5s, l5e, l3s, l3e):
+            continue
+        key = f"{chrom}:{s}-{e}"
+        result[key] = (s + l5s - 1, s + l5e - 1, s + l3s - 1, s + l3e - 1)
+    return result
+
+
 def _parse_rexdb_path(clade: str) -> Tuple[str, str]:
     # Mirror of TEsorter's Classifier._parse_rexdb (tools/TEsorter/TEsorter/app.py).
     if clade.startswith("Class_I/LTR/Ty1_copia"):

@@ -121,3 +121,66 @@ def test_classification_relabel_through_the_candidate_side_mismatches(tmp_path):
 
     with pytest.raises(RuntimeError, match="key elements differently"):
         detect.relabel_kmer2ltr_tsv(str(p), mismatched)
+
+
+def _bounds_row(seq_id, l5s, l5e, l3s, l3e):
+    """A row carrying all four LTR-boundary columns, unlike _row() above
+    (which leaves ltr5_end/ltr3_start at kmer2ltr's own "no value" marker)."""
+    v = dict.fromkeys(kmer2ltr.COLUMNS, "NA")
+    v.update(seq_id=seq_id, seq_len=str(l3e), status="pass",
+             ltr5_start=str(l5s), ltr5_end=str(l5e),
+             ltr3_start=str(l3s), ltr3_end=str(l3e))
+    return "\t".join(v[c] for c in kmer2ltr.COLUMNS)
+
+
+def test_ltr_bounds_from_table_computes_absolute_coordinates(tmp_path):
+    # S=5001; s_lLTR=5001+1-1=5001, e_lLTR=5001+300-1=5300,
+    # s_rLTR=5001+702-1=5702, e_rLTR=5001+1001-1=6001.
+    p = tmp_path / "t.tsv"
+    p.write_text("#" + HDR + "\n"
+                 + _bounds_row("chr3:5001-6001", l5s=1, l5e=300, l3s=702, l3e=1001) + "\n")
+
+    bounds = detect.ltr_bounds_from_table(str(p))
+    assert bounds == {"chr3:5001-6001": (5001, 5300, 5702, 6001)}
+
+
+def test_ltr_bounds_from_table_strips_the_classification_suffix(tmp_path):
+    p = tmp_path / "t.tsv"
+    p.write_text("#" + HDR + "\n"
+                 + _bounds_row("chr3:5001-6001#LTR/Copia/Ale",
+                               l5s=1, l5e=300, l3s=702, l3e=1001) + "\n")
+
+    bounds = detect.ltr_bounds_from_table(str(p))
+    assert bounds == {"chr3:5001-6001": (5001, 5300, 5702, 6001)}
+
+
+def test_ltr_bounds_from_table_skips_a_row_with_NA_coordinates(tmp_path):
+    """_row() leaves ltr5_end/ltr3_start at kmer2ltr's own "no value" marker;
+    a row that cannot supply all four LTR coordinates contributes nothing
+    rather than raising."""
+    p = tmp_path / "t.tsv"
+    p.write_text("#" + HDR + "\n" + _row("chr1:1-100", 100, 1, 100, 0, 0) + "\n")
+
+    assert detect.ltr_bounds_from_table(str(p)) == {}
+
+
+def test_ltr_bounds_from_table_keys_match_the_tables_own_row_loci(tmp_path):
+    """The regression this guards against: a boundary map built from a
+    separate merged SCN file is keyed on each round's pre-trim locus, and
+    Kmer2LTR renames every element to its post-trim locus before this table
+    is written -- so a map from that source silently stops matching the rows
+    it is meant to describe. Deriving the key from the same row as the
+    bounds forecloses that: whatever locus a row carries is the key its own
+    bounds land under, so this equality holds no matter what the round
+    renamed the element to. A derivation that fell back to an SCN-shaped
+    source would not touch these rows' own seq_id at all, and would return
+    the wrong keys (or none)."""
+    rows = [
+        _bounds_row("chr2:2000-2500#LTR/Gypsy/Tekay", l5s=1, l5e=200, l3s=301, l3e=500),
+        _bounds_row("chr5:100000-100800", l5s=1, l5e=250, l3s=551, l3e=800),
+    ]
+    p = tmp_path / "t.tsv"
+    p.write_text("#" + HDR + "\n" + "\n".join(rows) + "\n")
+
+    own_loci = {r["seq_id"].split("#", 1)[0] for r in kmer2ltr.read_rows(str(p))}
+    assert detect.ltr_bounds_from_table(str(p)).keys() == own_loci
