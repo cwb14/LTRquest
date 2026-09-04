@@ -16,7 +16,7 @@ python -m ltrquest.plot_summary --species Slati --aln-suffix _ltr_kmer2ltr_dedup
 LTR-RT multi-page PDF plots across species.
 
 Per species, the script can produce 5 plot types:
-  1) K2P density (ONE overall density; area partitioned by TE type; uses column11)
+  1) K2P density (ONE overall density; area partitioned by TE type; uses the `k2p` column)
   2) Chromosome distribution (karyotype-style; TE intervals colored by type; uses FAI + column1)
      Optional: overlay dots for any user-specified TE type(s)
   3) Full-length LTR-RT size distribution (stacked bars; 50 bp bins; from col1 start/end)
@@ -70,10 +70,11 @@ Chromosome detection:
   --min-chrom-len; force the pages off with --no-chrom-plots.
 
 Assumptions:
-- Alignment file is whitespace-delimited with >= 11 columns
+- Alignment file carries a '#'-prefixed header naming its columns, like every
+  ltrquest depth table; columns are read by name, not position.
 - Column 1: "Chr:start-end#TYPE"
-- Column 2: LTR length (bp)
-- Column 11: K2P divergence
+- `ltr5_len`: 5' LTR length (bp)
+- `k2p`: K2P divergence
 - Full-length LTR-RT length is (end - start) (NOT +1), per your example (100-200 => 100)
 """
 
@@ -90,6 +91,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.patches import Patch
+
+from .table import Columns, as_float, as_int
 
 COL1_RE = re.compile(r"^(?P<chrom>[^:]+):(?P<start>\d+)-(?P<end>\d+)#(?P<typ>.+)$")
 
@@ -420,10 +423,15 @@ def parse_alignment_file(path, subtract_nested=True):
     """
     Parse alignment file:
       col1        => chrom, start, end, type
-      col2        => LTR length
-      col11       => K2P
+      ltr5_len    => 5' LTR length
+      k2p         => K2P divergence
       nest_status => LTR-RTs nested inside this element (by header name when the
                      file has a header, else the last column)
+
+    internal_len comes from the explicit boundary columns (ltr3_start -
+    ltr5_end - 1) rather than full_len - 2*ltr5_len, which was only ever an
+    approximation: it assumed both LTRs share ltr5_len's length and ignored
+    the flanking bases the boundary calls actually landed on.
 
     With subtract_nested (the default), full_len and internal_len exclude any
     LTR-RT nested inside the element. A nest-outer element spans its insertions,
@@ -433,6 +441,7 @@ def parse_alignment_file(path, subtract_nested=True):
     """
     records = []
     names = []
+    cols = Columns.of([])
     nest_index = None
     with open(path, "r") as f:
         for line in f:
@@ -442,12 +451,13 @@ def parse_alignment_file(path, subtract_nested=True):
             if line.startswith("#"):
                 if not names:
                     names = [c.lstrip("#").strip() for c in split_row(line)]
+                    cols = Columns.of(names)
                     if "nest_status" in names:
                         nest_index = names.index("nest_status")
                 continue
 
             parts = split_row(line)
-            if len(parts) < 11:
+            if not parts:
                 continue
 
             m = COL1_RE.match(parts[0])
@@ -468,19 +478,15 @@ def parse_alignment_file(path, subtract_nested=True):
             # per your example: 100-200 => 100
             full_len = max(0, end - start - nested_bp)
 
-            try:
-                ltr_len = int(float(parts[1]))  # column 2: LTR_len
-            except ValueError:
-                ltr_len = None
+            ltr_len = as_int(cols.get(parts, "ltr5_len"))
 
-            internal_len = None
-            if ltr_len is not None:
-                internal_len = full_len - 2 * ltr_len
+            ltr5_end = as_int(cols.get(parts, "ltr5_end"))
+            ltr3_start = as_int(cols.get(parts, "ltr3_start"))
+            internal_len = (ltr3_start - ltr5_end - 1
+                            if ltr5_end is not None and ltr3_start is not None
+                            else None)
 
-            try:
-                k2p = float(parts[10])  # column11
-            except ValueError:
-                k2p = None
+            k2p = as_float(cols.get(parts, "k2p"))
 
             rec_id = parts[0]
 

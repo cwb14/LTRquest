@@ -4268,7 +4268,7 @@ def main():
     # what it keeps. Removing rows moves no coordinate, so the two steps below
     # still work in the candidates' own frame.
     n_kept, n_dropped, n_malformed = filter_kmer2ltr_in_place(k2l_tsv)
-    msg = (f"[Step8a] length filter (LTR_len>=100, aln_len>=90, "
+    msg = (f"[Step8a] length filter (min(ltr5_len,ltr3_len)>=100, aln_len>=90, "
            f"len_ratio>=0.65, LTRRT_len>=300): kept {n_kept}, dropped {n_dropped}")
     if n_malformed:
         msg += f", malformed {n_malformed}"

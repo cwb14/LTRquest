@@ -3,15 +3,13 @@
 ltrquest.reconcile (and FP-purged by ltrquest.flag_fp).
 
 Both {prefix}_depth{N}_ltr.tsv and {prefix}_depth{N}_clean_ltr.tsv are rewritten
-in place, gaining two columns immediately after `tsd`:
+in place, gaining two columns immediately before `domains`:
 
-    ... 16 ltr3_start | 17 tsd | 18 strand | 19 family | 20 domains | 21 nest_status
+    ... tsd | tsd_offset | tsd_input | strand | family | domains | nest_status
 
-The columns go *before* `domains`/`nest_status` on purpose. ltrquest.plot_struct
-and ltrquest.tegv both read those two fields from the end of the row (parts[-2], parts[-1]);
-appending would silently feed them the new columns instead, emptying the domain track
-in the structure PDFs and the TEGV viewer. This placement also leaves every positional
-index intact for consumers that count from the front (cols[10] == K2P_d, etc).
+`nest_status` being last is a hard invariant elsewhere -- ltrquest.reconcile
+writes it last and refuses to run against a table that doesn't -- so `strand`
+and `family` go before `domains` rather than at the end, keeping it last.
 
 Strand is resolved by a four-tier cascade, most authoritative first:
 
@@ -47,10 +45,12 @@ import tempfile
 from collections import defaultdict
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
-# Columns this script manages, and the column they are inserted after.
+from .table import Columns
+
+# Columns this script manages, and the column they are inserted before.
 STRAND_COL = "strand"
 FAMILY_COL = "family"
-ANCHOR_COL = "tsd"
+DOMAINS_COL = "domains"
 
 UNKNOWN = "."
 
@@ -406,14 +406,12 @@ def collect_elements(loaded) -> Dict[str, ElementInfo]:
     """
     elements: Dict[str, ElementInfo] = {}
     for header, rows in loaded:
-        names = header_names(header)
-        tail = _tail_width(names) if names else 2
+        cols = Columns.of(header_names(header))
         for row in rows:
             key = element_key(row[0]) if row else None
             if key is None or key in elements:
                 continue
-            # `domains` is the first of the trailing pair, wherever the row ends.
-            domain_field = row[len(row) - tail] if len(row) >= tail else ""
+            domain_field = cols.get(row, DOMAINS_COL)
             elements[key] = ElementInfo(row[0], superfamily_of(row[0]),
                                         parse_domains_field(domain_field))
     return elements
@@ -578,13 +576,16 @@ def load_families(prefix: str, indir: str = ".", verbose: bool = False,
 # -----------------------------
 # Table rewriting
 # -----------------------------
-def _tail_width(names: Sequence[str]) -> int:
-    """How many columns sit after `tsd` -- i.e. where to insert, counted from
-    the end of each row. Falls back to 2 (domains, nest_status) when the anchor
-    is missing, which keeps the trailing pair trailing whatever the layout."""
-    if ANCHOR_COL in names:
-        return len(names) - 1 - names.index(ANCHOR_COL)
-    return 2
+def annotation_insert_index(names: Sequence[str]) -> int:
+    """Where `strand`/`family` go: right before `domains`.
+
+    Falls back to the end of the row when `domains` is absent, so a header
+    that has been stripped down to something minimal still gets an index
+    rather than an exception.
+    """
+    if DOMAINS_COL in names:
+        return names.index(DOMAINS_COL)
+    return len(names)
 
 
 def strip_annotation_columns(header: Optional[List[str]], rows: List[List[str]]
@@ -653,10 +654,9 @@ def write_annotated_table(table: DepthTable,
     Returns (rows written, rows whose element name was unparseable).
     """
     names = header_names(header)
-    tail = _tail_width(names) if names else 2
+    insert_at = annotation_insert_index(names) if names else None
 
     if header is not None:
-        insert_at = len(header) - tail
         header = header[:insert_at] + [STRAND_COL, FAMILY_COL] + header[insert_at:]
 
     skipped = 0
@@ -670,8 +670,10 @@ def write_annotated_table(table: DepthTable,
             strand.get(key, UNKNOWN) if key else UNKNOWN,
             family.family_id if family else UNKNOWN,
         ]
-        insert_at = max(0, len(row) - tail)
-        row[insert_at:insert_at] = values
+        # A row shorter than the header (malformed input) still gets both
+        # columns appended rather than mis-inserted mid-row.
+        at = len(row) if insert_at is None else min(insert_at, len(row))
+        row[at:at] = values
 
     write_table(table.path, header, rows)
     if verbose:

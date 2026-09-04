@@ -15,6 +15,7 @@ from ltrquest.reconcile import (
     build_direct_children,
     build_updated_nest_status,
     compute_chain_inward,
+    parse_tsv,
 )
 
 
@@ -203,3 +204,34 @@ class TestIupacInvariants:
         # is silently misattributed, so the coupling is asserted rather than
         # merely commented.
         assert list(IUPAC_DEPTH_SEQ) == driver_iupac_seq
+
+
+class TestParseTsv:
+    """p (p_dist) and aln (aln_len) feed the cross-round dedup score, so a
+    misread here does not crash -- it just picks the wrong survivor."""
+
+    def test_reads_p_dist_and_aln_len_by_name(self, tmp_path):
+        from ltrquest.detect import DETECT_COLUMNS
+
+        header = "#" + "\t".join(DETECT_COLUMNS)
+        row = ["."] * len(DETECT_COLUMNS)
+        row[DETECT_COLUMNS.index("seq_id")] = "chr1:100-500#LTR/Copia/Ale"
+        row[DETECT_COLUMNS.index("aln_len")] = "220"
+        row[DETECT_COLUMNS.index("p_dist")] = "0.05"
+        path = tmp_path / "r1_ltr.tsv"
+        path.write_text(header + "\n" + "\t".join(row) + "\n")
+
+        parsed_header, recs = parse_tsv(str(path), round_idx=1)
+        assert parsed_header == header
+        assert len(recs) == 1
+        assert recs[0]["aln"] == 220
+        assert recs[0]["p"] == pytest.approx(0.05)
+
+    def test_falls_back_to_zero_without_a_header(self, tmp_path):
+        path = tmp_path / "r1_ltr.tsv"
+        path.write_text("chr1:100-500#LTR/Copia/Ale\t.\t.\n")
+
+        _header, recs = parse_tsv(str(path), round_idx=1)
+        assert len(recs) == 1
+        assert recs[0]["aln"] == 0
+        assert recs[0]["p"] == 0.0

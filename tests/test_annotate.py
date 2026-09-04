@@ -194,3 +194,22 @@ class TestTableRoundTrip:
         path.write_text("")
         _header, rows = read_table(str(path))
         assert rows == []
+
+
+def test_strand_and_family_land_before_domains():
+    from ltrquest.annotate import FAMILY_COL, STRAND_COL, annotation_insert_index
+    from ltrquest.detect import DETECT_COLUMNS, ELEMENT_COLUMNS
+
+    i = annotation_insert_index(DETECT_COLUMNS)
+    assert DETECT_COLUMNS[i] == "domains"
+    assert DETECT_COLUMNS[i - 1] == "tsd_input"
+
+    widened = list(DETECT_COLUMNS)
+    widened[i:i] = [STRAND_COL, FAMILY_COL]
+    assert widened == ELEMENT_COLUMNS
+
+
+def test_annotation_insert_index_falls_back_to_the_end():
+    from ltrquest.annotate import annotation_insert_index
+
+    assert annotation_insert_index(["name", "tsd"]) == 2
