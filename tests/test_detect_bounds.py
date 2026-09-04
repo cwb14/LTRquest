@@ -38,6 +38,10 @@ def test_rebase_shifts_coordinates_and_renames(tmp_path):
     assert r["seq_id"] == "chr1:120-1080#LTR/x"
     assert (r["ltr5_start"], r["ltr3_end"], r["seq_len"]) == ("1", "961", "961")
     assert (r["flank5_len"], r["flank3_len"]) == ("0", "0")
+    # _row() leaves ltr5_end/ltr3_start unset (kmer2ltr's own "no value" marker);
+    # shifting must pass a missing field through unchanged, not arithmetic it
+    # into a number or raise.
+    assert (r["ltr5_end"], r["ltr3_start"]) == ("NA", "NA")
     detect.assert_bounded(str(p))
 
 
@@ -55,6 +59,25 @@ def test_rebase_shifts_ltr5_end_and_ltr3_start_too(tmp_path):
     detect.rebase_to_trimmed(str(p), {"chr1:100-1100#LTR/x": "chr1:120-1080#LTR/x"})
     r = next(kmer2ltr.read_rows(str(p)))
     assert (r["ltr5_end"], r["ltr3_start"]) == ("300", "680")
+
+
+def test_rebase_skips_a_truncated_row(tmp_path):
+    """A short row can't supply every coordinate column rebase_to_trimmed
+    reads; matching relabel_kmer2ltr_tsv's own guard, it is dropped rather
+    than raising IndexError, even though its name is one rebase_to_trimmed
+    would otherwise carry forward."""
+    good = _row("chr1:100-1100#LTR/x", 1001, 21, 981, 20, 20)
+    victim = _row("chr1:5000-5200#LTR/x", 201, 1, 201, 0, 0)
+    truncated = "\t".join(victim.split("\t")[:5])  # ends before ltr3_start
+    p = tmp_path / "t.tsv"
+    p.write_text("#" + HDR + "\n" + good + "\n" + truncated + "\n")
+
+    rename = {"chr1:100-1100#LTR/x": "chr1:120-1080#LTR/x",
+              "chr1:5000-5200#LTR/x": "chr1:5001-5200#LTR/x"}
+    detect.rebase_to_trimmed(str(p), rename)
+
+    rows = list(kmer2ltr.read_rows(str(p)))
+    assert [r["seq_id"] for r in rows] == ["chr1:120-1080#LTR/x"]
 
 
 def test_classification_relabel_matches_the_table_once_rebased(tmp_path):
