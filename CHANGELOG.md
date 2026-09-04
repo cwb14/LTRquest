@@ -71,7 +71,10 @@ the old one's, which forces the schema, flag and stage changes below.
   locus before reconcile ever sees it, so the flag could no longer reach the
   elements it was meant to describe. Boundaries are read from each round's
   own `--tsv` table instead (`ltr_bounds_from_table`), which carries the
-  right key and the right coordinates on the same row.
+  right key and the right coordinates on the same row. The reconcile
+  Nextflow module's fourth input path -- each round's SCN file, staged only
+  to feed that flag -- goes with it, along with the workflow term that
+  collected those files; the process no longer stages input it never reads.
 
 ### Fixed
 

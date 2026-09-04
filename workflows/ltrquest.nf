@@ -30,7 +30,7 @@ workflow LTRQUEST {
     // Phase 2 - per genome: pool the rounds and resolve containment.
     //
     // Round N cannot know whether what it just found sits inside something round
-    // N-1 found, so containment is settled once, here, over the union. The three
+    // N-1 found, so containment is settled once, here, over the union. The two
     // lists are sorted by round so their indices line up.
     //
     ch_reconcile_in = LTRQUEST_DETECT_ROUNDS.out.results
@@ -40,8 +40,7 @@ workflow LTRQUEST {
             def ordered = per_round.sort { a, b -> a[0] <=> b[0] }
             [ meta,
               ordered.collect { it[1] },
-              ordered.collect { it[2] },
-              ordered.collect { it[3] }.collect { dir -> file("${dir}/*.ltrtools.stitched.scn") }.flatten() ]
+              ordered.collect { it[2] } ]
         }
 
     LTRQUEST_RECONCILE(ch_reconcile_in)
