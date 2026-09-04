@@ -321,3 +321,52 @@ def test_bounded_fasta_oriented_defaults_to_forward_when_cls_tsv_has_no_row(tmp_
 
     assert flipped == set()
     assert dict(detect.iter_fasta(str(out)))["chr1:1-50"] == "A" * 30 + "T" * 20
+
+
+def _wide_k2l(tmp_path, extra="ltr_score"):
+    """A Kmer2LTR table carrying one column more than this LTRquest knows."""
+    names = kmer2ltr.COLUMNS + [extra]
+    v = dict.fromkeys(names, "NA")
+    v.update(seq_id="chr1:100-2100#LTR/unknown", seq_len="2001", status="pass",
+             ltr5_start="1", ltr3_end="2001", flank5_len="0", flank3_len="0",
+             aln_len="305", p_dist="0.02", **{extra: "88.5"})
+    p = tmp_path / "wide.tsv"
+    p.write_text("#" + "\t".join(names) + "\n"
+                 + "\t".join(v[c] for c in names) + "\n")
+    return p
+
+
+def test_dedup_header_describes_the_rows_it_wrote(tmp_path):
+    """The emitted header comes from the input's own columns, so a Kmer2LTR
+    that reports one more field than DETECT_COLUMNS names still yields a table
+    whose every column means what the header says it means."""
+    src = _wide_k2l(tmp_path)
+    out = tmp_path / "dedup.tsv"
+    detect.dedup_kmer2ltr_tsv(str(src), str(out), threshold=0.8)
+
+    lines = out.read_text().splitlines()
+    names = lines[0].lstrip("#").split("\t")
+    row = lines[1].split("\t")
+    assert len(names) == len(kmer2ltr.COLUMNS) + 3       # + ltr_score + the two
+    assert names[-3:] == ["ltr_score", "domains", "nest_status"]
+    assert len(row) == len(names)
+    by_name = dict(zip(names, row))
+    assert by_name["ltr_score"] == "88.5"
+    assert by_name["domains"] == "." and by_name["nest_status"] == "."
+
+
+def test_dedup_of_an_absent_table_writes_the_canonical_header(tmp_path):
+    out = tmp_path / "dedup.tsv"
+    detect.dedup_kmer2ltr_tsv(str(tmp_path / "missing.tsv"), str(out), threshold=0.8)
+    assert out.read_text() == detect.DETECT_HEADER
+
+
+def test_assert_bounded_names_the_columns_a_truncated_row_lacks(tmp_path):
+    hdr = "#" + "\t".join(kmer2ltr.COLUMNS) + "\n"
+    p = tmp_path / "t.tsv"
+    p.write_text(hdr + "chr1:1-100\t100\tpass\n")
+    with pytest.raises(AssertionError) as e:
+        detect.assert_bounded(str(p))
+    msg = str(e.value)
+    assert "chr1:1-100" in msg
+    assert "ltr5_start" in msg and "flank5_len" in msg

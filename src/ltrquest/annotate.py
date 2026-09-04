@@ -407,6 +407,12 @@ def collect_elements(loaded) -> Dict[str, ElementInfo]:
     elements: Dict[str, ElementInfo] = {}
     for header, rows in loaded:
         cols = Columns.of(header_names(header))
+        if rows and DOMAINS_COL not in cols:
+            # Tier 2 of the strand cascade reads domain order off these rows,
+            # so without the column it contributes nothing and the strand of
+            # anything the other tiers cannot resolve stays '.'.
+            warn(f"no {DOMAINS_COL!r} column in {len(rows)} row(s) of a depth "
+                 f"table; the domain-order strand tier is disabled for them")
         for row in rows:
             key = element_key(row[0]) if row else None
             if key is None or key in elements:
@@ -581,10 +587,14 @@ def annotation_insert_index(names: Sequence[str]) -> int:
 
     Falls back to the end of the row when `domains` is absent, so a header
     that has been stripped down to something minimal still gets an index
-    rather than an exception.
+    rather than an exception. That fallback also puts the two columns past
+    `nest_status`, which everything downstream expects to find last, so it
+    says so rather than moving the column silently.
     """
     if DOMAINS_COL in names:
         return names.index(DOMAINS_COL)
+    warn(f"no {DOMAINS_COL!r} column in the table header; appending "
+         f"{STRAND_COL} and {FAMILY_COL} at the end of each row instead")
     return len(names)
 
 
