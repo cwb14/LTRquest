@@ -3454,7 +3454,7 @@ def assert_bounded(tsv: str) -> None:
         if (row["ltr5_start"], row["flank5_len"], row["flank3_len"]) != ("1", "0", "0") \
                 or row["ltr3_end"] != row["seq_len"]:
             raise AssertionError(
-                f"{row['seq_id']} is not Kmer2LTR-bounded: "
+                f"{tsv}: {row['seq_id']} is not Kmer2LTR-bounded: "
                 f"ltr5_start={row['ltr5_start']} ltr3_end={row['ltr3_end']} "
                 f"seq_len={row['seq_len']} flanks={row['flank5_len']},{row['flank3_len']}"
             )
@@ -3483,11 +3483,14 @@ def rebase_to_trimmed(tsv: str, rename: Dict[str, str]) -> None:
         shifted = [cols.require(c) for c in ("ltr5_end", "ltr3_start", "ltr3_end")]
         i_start = cols.require("ltr5_start")
         flanks = [cols.require("flank5_len"), cols.require("flank3_len")]
+        max_idx = max([i_id, i_len, i_start, *shifted, *flanks])
 
         for raw in fin:
             if not raw.strip():
                 continue
             parts = raw.rstrip("\n").split("\t")
+            if len(parts) <= max_idx:
+                continue
             name = parts[i_id]
             if name not in rename:
                 continue
@@ -4860,6 +4863,11 @@ def main():
     # rename, so every stage past this point shares the one frame and the one
     # set of names.
     rebase_to_trimmed(k2l_tsv, rename)
+    # Every downstream coordinate -- GFF3 sub-features, nest intervals, the
+    # masked genome the next round reads -- is built on the assumption that
+    # this table is Kmer2LTR-bounded from here on; catch a violation at its
+    # source rather than as corrupted output several stages later.
+    assert_bounded(k2l_tsv)
     tsd_after_trim = rekey_through(tsd_seqs, rename, "Kmer2LTR TSDs")
     bounded_ltr_bounds = rekey_through(ltr_bounds, rename, "SCN LTR boundaries")
 
