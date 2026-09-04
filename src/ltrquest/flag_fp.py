@@ -574,10 +574,11 @@ def select_borderline_families(metrics, max_recon, max_dominance, n):
 # Plotting (matplotlib Agg + PdfPages)
 # -----------------------------------------------------------------------------
 import matplotlib  # noqa: E402
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.patches import Patch  # noqa: E402
 from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
 
 _LTR_COLOR = "#333333"
 _ORPHAN_COLOR = "#BBBBBB"
@@ -1136,7 +1137,7 @@ def main(argv=None) -> int:
         if shutil.which(tool) is None:
             die(f"{tool} not found on PATH")
 
-    print(f"[INFO] FP fraction > threshold; FPs are pervasive -> mmseqs dedup + masking.",
+    print("[INFO] FP fraction > threshold; FPs are pervasive -> mmseqs dedup + masking.",
           file=sys.stderr)
     rep = run_mmseqs(fp_fa, args.out_prefix + "_mmseqs", args.threads)
     masked_out = args.masked_out or (
