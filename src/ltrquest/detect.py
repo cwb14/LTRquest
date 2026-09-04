@@ -1440,47 +1440,6 @@ def scn_to_intact_fasta(
         Path(out_fa).touch()
 
 
-def load_tesorter_te_to_annotation(cls_tsv_path: str) -> Dict[str, str]:
-    """
-    Build mapping:
-      TE (e.g. CP002684.1:7065623-7075763) -> "Order/Superfamily/Clade"
-    """
-    te2ann: Dict[str, str] = {}
-
-    p = Path(cls_tsv_path)
-    if not p.exists() or p.stat().st_size == 0:
-        return te2ann
-
-    with p.open("r") as f:
-        header_seen = False
-        for line in f:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-
-            if not header_seen:
-                header_seen = True
-                low = line.lower()
-                if low.startswith("te\t") or low.startswith("#te\t"):
-                    continue
-
-            cols = line.split("\t")
-            if len(cols) < 4:
-                continue
-
-            te, order, superfam, clade = cols[0], cols[1], cols[2], cols[3]
-            if not te:
-                continue
-
-            order = order or "unknown"
-            superfam = superfam or "unknown"
-            clade = clade or "unknown"
-
-            te2ann[te] = f"{order}/{superfam}/{clade}"
-
-    return te2ann
-
-
 def load_tesorter_gff3_domains(gff3_path: str) -> Dict[str, list]:
     """Parse a TEsorter .dom.gff3 file into per-TE domain lists.
 
@@ -3207,9 +3166,11 @@ def rekey_through(by_locus: Dict[str, T], rename: Dict[str, str],
                   what: str) -> Dict[str, T]:
     """Restate a map of elements against the names `rename` carries them to.
 
-    Both sides are reduced to the bare `chrom:start-end`, which is how every
-    stage of the round identifies an element; the classification suffix rides
-    along on the name and never on the key.
+    `rename` is keyed and valued on full names, so both of its sides are
+    reduced to the bare `chrom:start-end` before the lookup. `by_locus` is
+    already keyed that way -- every map crossing this seam is keyed on the
+    locus, which is how each stage of the round identifies an element, with
+    the classification suffix riding along on the name and never on the key.
 
     Two non-empty maps that share no key describe different sets of elements.
     That mismatch is otherwise silent -- it yields an empty map, an empty
@@ -4288,12 +4249,15 @@ def main():
 
     # Step 8: Kmer2LTR calls each element's termini and reports how far the
     # candidate over-reaches them, so the boundaries every later stage uses are
-    # measured rather than inherited from the detectors.
+    # measured rather than inherited from the detectors. It can cut the FASTA
+    # to those termini itself, but `bounded_fasta` does that here -- against
+    # the same table, with the exclusions and the rename map the round needs --
+    # so asking for the cut twice would only write a file nothing opens.
     k2l_tsv = str(workdir / f"{out_prefix}.kmer2ltr.tsv")
     print(f"[Step8] running Kmer2LTR on {Path(k2l_in_fa).name} -> {Path(k2l_tsv).name}")
     k2l.run(kmer2ltr_prefix, k2l_in_fa, k2l_tsv,
             threads=args.threads, mutation_rate=args.mutation_rate,
-            genome=args.genome, trim_flanks=True, verbose=verbose)
+            genome=args.genome, verbose=verbose)
     # This table is the element table every later stage extends and re-emits,
     # so the round can only append to a schema it recognises.
     k2l.assert_schema(k2l_tsv)
