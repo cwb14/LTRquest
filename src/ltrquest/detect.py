@@ -4370,12 +4370,11 @@ def main():
     rename = bounded_fasta(k2l_in_fa, k2l_tsv, bounded_fa, exclude=purge_set)
     print(f"[Step8d] bounded FASTA: {len(rename)} elements -> {Path(bounded_fa).name}")
 
-    # tsd_seqs (Step8b) and ltr_bounds (loaded ahead of Kmer2LTR) were both
-    # captured against the untrimmed loci, ahead of this line, on purpose:
-    # rebase_to_trimmed is where the element table itself crosses into the
-    # bounded frame, and rekey_through carries these two dicts across the same
-    # rename, so every stage past this point shares the one frame and the one
-    # set of names.
+    # tsd_seqs (Step8b) was captured against the untrimmed loci, ahead of this
+    # line, on purpose: rebase_to_trimmed is where the element table itself
+    # crosses into the bounded frame, and rekey_through carries it across the
+    # same rename, so every stage past this point shares the one frame and
+    # the one set of names.
     rebase_to_trimmed(k2l_tsv, rename)
     # Every downstream coordinate -- GFF3 sub-features, nest intervals, the
     # masked genome the next round reads -- is built on the assumption that
@@ -4383,7 +4382,6 @@ def main():
     # source rather than as corrupted output several stages later.
     assert_bounded(k2l_tsv)
     tsd_after_trim = rekey_through(tsd_seqs, rename, "Kmer2LTR TSDs")
-    bounded_ltr_bounds = rekey_through(ltr_bounds, rename, "SCN LTR boundaries")
 
     # Step 8f: seed pass-2 with the elements Kmer2LTR found a TSD for. A TSD is
     # independent evidence of a real insertion, so these anchor the homology
@@ -4477,9 +4475,12 @@ def main():
               f"{len(gff3_dom_data)} TEs with deconflicted domain annotations")
 
     nest_rename_map: Dict[str, str] = {}
+    # k2l_tsv's own ltr5_start/ltr5_end/ltr3_start/ltr3_end are Kmer2LTR's
+    # calls against the bounded record dedup is about to read, so the two
+    # share both frame and key by construction.
     dedup_kmer2ltr_tsv(k2l_tsv, k2l_dedup_out, threshold=args.dedup_threshold,
                        tsd_names=tsd_after_trim or None, gff3_domains=gff3_dom_data,
-                       ltr_bounds=bounded_ltr_bounds,
+                       ltr_bounds=ltr_bounds_from_table(k2l_tsv),
                        rename_map=nest_rename_map)
 
     if nest_rename_map:

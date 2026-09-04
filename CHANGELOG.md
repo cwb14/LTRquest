@@ -116,6 +116,21 @@ the old one's, which forces the schema, flag and stage changes below.
   family clustering, the interval was never mirrored before being painted
   onto the flipped record. `mask_same_round_inners_in_fa` now mirrors it for
   every record `bounded_fasta_oriented` flipped.
+- **A truncated or extended element could be recorded as a nested insertion.**
+  `_ltrs_shared` tells a truncation/extension variant from a genuine nested
+  insertion by checking whether the two elements' LTRs overlap, and returns
+  `False` ("distinct LTRs", i.e. a real nest) whenever either element's key is
+  absent from the LTR-boundary map it is given. Reconcile's map came from
+  `--scn`, keyed on each round's pre-trim locus, and was checked against
+  elements Kmer2LTR had already renamed to their post-trim locus, so a missing
+  key read as nesting instead of as a failed lookup -- disabling the
+  truncation guard for 38% of elements (79/206 survivors on a full
+  Arabidopsis chr2 run). `dedup_kmer2ltr_tsv` made the same call from a
+  boundary map re-keyed through the rename rather than read from the
+  post-trim table. Both now derive their map with `ltr_bounds_from_table`,
+  which reads each element's `ltr5_start`/`ltr5_end`/`ltr3_start`/`ltr3_end`
+  off its own row, so the key and the bounds it is checked against can no
+  longer fall in different frames.
 
 ## [1.0.1] - 2026-08-24
 
