@@ -4696,50 +4696,49 @@ def main():
     print(f"[Step8] Kmer2LTR bounded {n_pass}/{sum(counts.values())} candidates"
           + (f" ({other})" if other else ""))
 
-    # Step 8a: the target-site duplications Kmer2LTR found. These are keyed on
-    # the untrimmed locus, which is what merged_scn and the candidate FASTA use.
-    tsd_seqs = tsd_names_from_kmer2ltr(k2l_tsv)
-    print(f"[Step8a] Kmer2LTR reported a TSD for {len(tsd_seqs)} candidate(s)")
-
-    # Step 8b: a non-TSD candidate overlapping a TSD+ one at >= the dedup
-    # threshold would be eliminated by Layer-1 of dedup anyway, so dropping it
-    # here spares the classifier the work. Contained candidates with distinct
-    # LTRs are protected (putative nested TEs).
-    purge_set: Set[str] = set()
-    if args.use_tesorter and tsd_seqs:
-        # 8c has not run yet, so a candidate Kmer2LTR could not bound is still
-        # in the table. It is about to be dropped, and must not take a
-        # neighbouring element with it on the way out.
-        anchors = {row["seq_id"].split("#", 1)[0]
-                   for row in k2l.read_rows(k2l_tsv)
-                   if row["status"] == "pass"} & set(tsd_seqs)
-        purge_set = pre_purge_tsd_dominated(
-            merged_scn, anchors,
-            threshold=args.dedup_threshold,
-            ltr_bounds=ltr_bounds,
-        )
-        if purge_set:
-            print(f"[Step8b] pre-purge: {len(purge_set)} TSD-dominated "
-                  "candidate(s) identified for exclusion")
-
-    # Step 8c: filtering here, against the untrimmed span, keeps the length
-    # floor on the more permissive side of the trim and stops the bounded FASTA
-    # carrying records that are about to be dropped.
+    # Step 8a: the gates are applied against the untrimmed span, which keeps
+    # the length floor on the more permissive side of the trim, and ahead of
+    # everything else, so that an element the round discards cannot influence
+    # what it keeps. Removing rows moves no coordinate, so the two steps below
+    # still work in the candidates' own frame.
     n_kept, n_dropped, n_malformed = filter_kmer2ltr_in_place(k2l_tsv)
-    msg = (f"[Step8c] length filter (LTR_len>=100, aln_len>=90, "
+    msg = (f"[Step8a] length filter (LTR_len>=100, aln_len>=90, "
            f"len_ratio>=0.65, LTRRT_len>=300): kept {n_kept}, dropped {n_dropped}")
     if n_malformed:
         msg += f", malformed {n_malformed}"
     print(msg)
 
+    # Step 8b: the target-site duplications Kmer2LTR found, keyed on the
+    # untrimmed locus that merged_scn and the candidate FASTA both use.
+    tsd_seqs = tsd_names_from_kmer2ltr(k2l_tsv)
+    print(f"[Step8b] Kmer2LTR reported a TSD for {len(tsd_seqs)} of the "
+          f"{n_kept} retained candidate(s)")
+
+    # Step 8c: a non-TSD candidate overlapping a TSD+ one at >= the dedup
+    # threshold would be eliminated by Layer-1 of dedup anyway, so dropping it
+    # here spares the classifier the work. Contained candidates with distinct
+    # LTRs are protected (putative nested TEs). Only retained elements may
+    # purge: merged_scn still holds every candidate to purge from, but an
+    # element the round has already dropped must not take a neighbour with it.
+    purge_set: Set[str] = set()
+    if args.use_tesorter and tsd_seqs:
+        purge_set = pre_purge_tsd_dominated(
+            merged_scn, set(tsd_seqs),
+            threshold=args.dedup_threshold,
+            ltr_bounds=ltr_bounds,
+        )
+        if purge_set:
+            print(f"[Step8c] pre-purge: {len(purge_set)} TSD-dominated "
+                  "candidate(s) identified for exclusion")
+
     bounded_fa = str(workdir / f"{out_prefix}.bounded.fa")
     rename = bounded_fasta(k2l_in_fa, k2l_tsv, bounded_fa, exclude=purge_set)
     print(f"[Step8d] bounded FASTA: {len(rename)} elements -> {Path(bounded_fa).name}")
 
-    # Steps 8a and 8b answer questions about the candidates, so their keys are
-    # the untrimmed loci; everything from the bounded FASTA onwards is stated
-    # against the trimmed ones. `rekey_through` is the round's only crossing
-    # between the two frames, and its own tripwire.
+    # The TSDs and the SCN boundaries are keyed on the candidates' untrimmed
+    # loci; everything from the bounded FASTA onwards is stated against the
+    # trimmed ones. `rekey_through` is the round's only crossing between the
+    # two frames, and its own tripwire.
     tsd_after_trim = rekey_through(tsd_seqs, rename, "Kmer2LTR TSDs")
     bounded_ltr_bounds = rekey_through(ltr_bounds, rename, "SCN LTR boundaries")
 
