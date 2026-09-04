@@ -1391,11 +1391,9 @@ fi
 if (( ${#completed_round_prefixes[@]} > 0 )); then
   recon_tsv_args=()
   recon_fa_args=()
-  recon_scn_args=()
   for prefix in "${completed_round_prefixes[@]}"; do
     recon_tsv_args+=( "${prefix}_ltr.tsv" )
     recon_fa_args+=(  "${prefix}_ltr.fa"  )
-    recon_scn_args+=( "${prefix}.work/${prefix}.ltrtools.stitched.scn" )
   done
 
   echo ""
@@ -1405,8 +1403,7 @@ if (( ${#completed_round_prefixes[@]} > 0 )); then
   "${RECONCILE[@]}" \
     --out-prefix "$OUT_PREFIX" \
     --tsv "${recon_tsv_args[@]}" \
-    --fa  "${recon_fa_args[@]}" \
-    --scn "${recon_scn_args[@]}"
+    --fa  "${recon_fa_args[@]}"
   set +x
 fi
 

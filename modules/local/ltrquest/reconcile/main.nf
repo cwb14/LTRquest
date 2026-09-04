@@ -23,17 +23,15 @@ process LTRQUEST_RECONCILE {
     def args = task.ext.args ?: ''
     prefix   = task.ext.prefix ?: "${meta.id}"
 
-    // The three lists are round-ordered and index-aligned; the reconciler reads
+    // The two lists are round-ordered and index-aligned; the reconciler reads
     // the round index off the position, so they must be sorted identically.
     def tsv_list = tsvs.collect  { it.toString() }.sort().join(' ')
     def fa_list  = fastas.collect{ it.toString() }.sort().join(' ')
-    def scn_list = scns.collect  { it.toString() }.sort().join(' ')
     """
     ltrquest-reconcile \\
         --out-prefix ${prefix} \\
         --tsv ${tsv_list} \\
         --fa ${fa_list} \\
-        --scn ${scn_list} \\
         ${args}
 
     cat <<-END_VERSIONS > versions.yml

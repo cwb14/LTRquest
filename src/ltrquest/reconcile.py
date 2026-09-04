@@ -17,8 +17,7 @@ Usage:
   python -m ltrquest.reconcile \
       --out-prefix mafft_update \
       --tsv mafft_update_r1_ltr.tsv mafft_update_r2_ltr.tsv ... \
-      --fa  mafft_update_r1_ltr.fa  mafft_update_r2_ltr.fa  ... \
-      --scn mafft_update_r1.work/mafft_update_r1.ltrtools.stitched.scn ...
+      --fa  mafft_update_r1_ltr.fa  mafft_update_r2_ltr.fa  ...
 """
 from __future__ import annotations
 
@@ -26,7 +25,6 @@ import argparse
 import re
 import sys
 from collections import defaultdict
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .detect import (
@@ -34,7 +32,7 @@ from .detect import (
     _ltrs_shared,
     _sub_dedup_shared_ltr_group,
     iter_fasta,
-    load_scn_ltr_boundaries,
+    ltr_bounds_from_table,
 )
 from .table import Columns, as_float, as_int, parse_header
 
@@ -326,19 +324,12 @@ def main() -> None:
                     help="Per-round _ltr.tsv files (in round order).")
     ap.add_argument("--fa", nargs="+", required=True,
                     help="Per-round _ltr.fa files matching --tsv.")
-    ap.add_argument("--scn", nargs="*", default=[],
-                    help="Per-round merged SCN files (ltrtools.stitched.scn) "
-                         "for LTR-boundary-based shared-LTR detection. "
-                         "If omitted, shared-LTR check is skipped (falls back "
-                         "to pure coordinate containment).")
     ap.add_argument("--out-prefix", required=True,
                     help="Output prefix for _depth{N}_ltr.{tsv,fa} files.")
     args = ap.parse_args()
 
     if len(args.tsv) != len(args.fa):
         ap.error("--tsv and --fa must have the same number of entries")
-    if args.scn and len(args.scn) != len(args.tsv):
-        ap.error("--scn count must match --tsv when provided")
 
     # 1. Load pool
     pool: List[dict] = []
@@ -362,13 +353,12 @@ def main() -> None:
                 f"got: {header!r}"
             )
 
-    # 2. Load LTR boundaries (union across rounds)
+    # 2. Load LTR boundaries (union across rounds). Read from each round's own
+    # table rather than a separate file, so a boundary and the key it is
+    # filed under always come from the same row -- see ltr_bounds_from_table.
     ltr_bounds: Dict[str, Tuple[int, int, int, int]] = {}
-    for scn in args.scn:
-        if not Path(scn).exists():
-            print(f"[reconcile] WARNING: SCN not found: {scn}", file=sys.stderr)
-            continue
-        lb = load_scn_ltr_boundaries(scn)
+    for tsv in args.tsv:
+        lb = ltr_bounds_from_table(tsv)
         for k, v in lb.items():
             ltr_bounds.setdefault(k, v)
     print(f"[reconcile] LTR boundaries loaded: {len(ltr_bounds)} keys",
