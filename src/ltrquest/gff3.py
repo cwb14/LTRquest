@@ -86,10 +86,57 @@ class Raw(str):
     """
 
 
+# Every character escape() actually had to replace, over the whole run. LTRquest
+# chooses value formats that need no escaping, so anything landing here came in
+# from outside -- a sequence name with a ';' in it, say. That is worth one line
+# on stderr, because the alternative is the reader meeting '%3B' unannounced.
+_escaped_chars: Dict[str, int] = {}
+
+
 def escape(value: object) -> str:
     if isinstance(value, Raw):
         return str(value)
-    return "".join(_ESCAPES.get(ch, ch) for ch in str(value))
+    out = []
+    for ch in str(value):
+        sub = _ESCAPES.get(ch)
+        if sub is None:
+            out.append(ch)
+        else:
+            out.append(sub)
+            _escaped_chars[ch] = _escaped_chars.get(ch, 0) + 1
+    return "".join(out)
+
+
+def report_escapes() -> None:
+    """Warn once if column 9 ended up carrying percent-escapes after all."""
+    if not _escaped_chars:
+        return
+    detail = ", ".join(
+        f"{_ESCAPES[ch]} ({count}x)"
+        for ch, count in sorted(_escaped_chars.items(), key=lambda kv: -kv[1]))
+    warn(f"percent-escapes were needed in column 9: {detail}. GFF3 reserves "
+         f"these characters, so input names containing them cannot be written "
+         f"literally; readers will decode them back.")
+
+
+def list_value(value: object, sep: str = ",") -> object:
+    """Re-render a list-valued field using GFF3's own multi-value separator.
+
+    ',' separates multiple values *inside* one attribute value, so a list
+    belongs in column 9 as 'a,b' -- spec-legal, and legible to someone reading
+    the file rather than parsing it. Escaping it to 'a%2Cb' is defensible but
+    unreadable, and a ';'-joined field like nest_status is worse still: ';'
+    separates whole attributes, so it has no in-value meaning to fall back on
+    and escaping is the only way to keep it. Splitting on the field's own
+    separator and rejoining on ',' removes both cases at the source.
+
+    Each element is still escaped individually, so a stray ';' or '=' inside
+    one of them cannot break column 9; only the separator itself is literal.
+    """
+    text = "" if value is None else str(value)
+    if text in ("", UNKNOWN):
+        return text
+    return Raw(",".join(escape(part) for part in text.split(sep) if part))
 
 
 def render_attributes(pairs: Sequence[Tuple[str, object]]) -> str:
@@ -331,9 +378,9 @@ def build_element_blocks(prefix: str, tables, ranker: SeqidRanker,
                 ("K2P_T", _field(row, names, "k2p_time")),
                 ("motif", _field(row, names, "motif")),
                 ("tsd", _field(row, names, "tsd")),
-                ("tsd_offset", _field(row, names, "tsd_offset")),
+                ("tsd_offset", list_value(_field(row, names, "tsd_offset"))),
                 ("strand_source", source_label),
-                ("nest_status", _field(row, names, "nest_status")),
+                ("nest_status", list_value(_field(row, names, "nest_status"), ";")),
             ])
             lines = [gff_line(seqid, LTR_TYPE, start, end, strand, attributes)]
 
@@ -604,6 +651,7 @@ def convert(prefix: str, indir: str = ".", genome: Optional[str] = None,
         if verbose:
             log("no round-1 genic GFF (run with --proteins to produce one); "
                 "skipping the protein GFF3")
+        report_escapes()
         return 0
 
     miniprot_blocks = index_miniprot_blocks(genic, ranker, verbose)
@@ -614,6 +662,7 @@ def convert(prefix: str, indir: str = ".", genome: Optional[str] = None,
                verbose=verbose)
     log(f"LTR-RT + miniprot GFF3: {os.path.basename(protein_out)} "
         f"({len(element_blocks)} elements, {len(miniprot_blocks)} gene models)")
+    report_escapes()
     return 0
 
 
