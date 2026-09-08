@@ -356,3 +356,10 @@ repository.
 ## License
 
 [GPL-3.0-or-later](LICENSE).
+
+## Developers note:
+Kmer2LTR re-classifies LTR regions using a more sensative approach.  
+It usually only adjusts a few bases, but for LTR-RTs with internal repeats, it may adjust them substantially, hacking off more than a few bases. 
+In these cases, the internal region often becomes quite small. 
+I may consider throwing out candidates where Kmer2LTR classifies short internal regions (<80bp) or those that kmer2LTR hacks out >20% (ie substantial adjusting. 
+Or if I prefer not to lose them, I could try to fall back to using the Ltrharvest and LTRfinder boundaries if LTRquest observes a larger kmer2LTR hack. 
