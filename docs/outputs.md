@@ -260,6 +260,19 @@ Notes:
   section 4.1. Keeping the attribute names stable regardless of what the
   table's own columns are called is what lets an existing GFF3 consumer keep
   working unmodified.
+- **Column 9 is meant to be read, not just parsed**, so it carries no
+  percent-escapes. GFF3 reserves `;` `=` `&` `,` inside an attribute value,
+  and the two LTRquest attributes that are *lists* — `tsd_offset` (`d5,d3`)
+  and `nest_status` — would otherwise arrive as `0%2C0` and
+  `nest-outer:…%3Bnest-inner:…`. Both are instead written with `,`, which is
+  GFF3's own separator for multiple values within one attribute: `tsd_offset=0,0`,
+  `nest_status=nest-outer:chr1:200-300,nest-inner:chr1:50-900`. Spec-legal and
+  legible. Note this differs from the element table, where `nest_status` joins
+  on `;` (section 4.1).
+- Escaping is still applied as a backstop to text LTRquest does not control —
+  a sequence named `scaf;1` cannot be written literally without corrupting the
+  file. If that ever happens the run says so on stderr rather than letting you
+  discover a `%3B` by eye.
 
 ## 7. Plots (`<prefix>_plots/`)
 
