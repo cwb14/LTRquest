@@ -6,6 +6,7 @@ import gzip
 
 import pytest
 
+from ltrquest import gff3 as gff3_module
 from ltrquest.gff3 import (
     SOURCE,
     Raw,
@@ -15,6 +16,7 @@ from ltrquest.gff3 import (
     format_clade_composition,
     gff_line,
     is_gzip,
+    list_value,
     order_block_lines,
     read_seq_lengths,
     render_attributes,
@@ -51,6 +53,35 @@ class TestEscape:
     def test_raw_values_bypass_escaping(self):
         # Used where ',' is GFF3's own multi-value separator rather than data.
         assert escape(Raw("50%_SIRE,30%_Tekay")) == "50%_SIRE,30%_Tekay"
+
+
+class TestListValue:
+    def test_a_comma_list_stays_readable(self):
+        # tsd_offset='0,0' reads as a GFF3 two-value list; '0%2C0' reads as noise.
+        assert render_attributes([("tsd_offset", list_value("0,0"))]) == "tsd_offset=0,0"
+
+    def test_a_semicolon_list_is_rejoined_on_the_gff3_separator(self):
+        # ';' cannot survive column 9 at all, so nest_status is re-separated
+        # rather than escaped to '%3B'.
+        value = list_value("nest-outer:chr1:100-200;nest-inner:chr2:5-9", ";")
+        assert render_attributes([("nest_status", value)]) == (
+            "nest_status=nest-outer:chr1:100-200,nest-inner:chr2:5-9")
+
+    def test_a_single_element_list_is_unremarkable(self):
+        assert render_attributes([("tsd_offset", list_value("NA"))]) == "tsd_offset=NA"
+
+    def test_elements_are_still_escaped_individually(self):
+        # Only the separator is literal; anything reserved inside an element
+        # must not be allowed to break column 9.
+        assert render_attributes([("x", list_value("a=1;b", ";"))]) == "x=a%3D1,b"
+
+    def test_empty_elements_are_dropped(self):
+        assert render_attributes([("x", list_value("a;;b", ";"))]) == "x=a,b"
+
+    def test_absent_values_are_still_dropped(self):
+        assert render_attributes(
+            [("ID", "x"), ("tsd_offset", list_value(None)),
+             ("nest_status", list_value(".", ";"))]) == "ID=x"
 
 
 class TestRenderAttributes:
@@ -235,3 +266,47 @@ class TestBuildElementBlocksColumnLookups:
         assert "K2P_d=0.0521" in attrs
         assert "K2P_T=868333" in attrs
         assert "tsd=TGCAA" in attrs
+
+    def test_the_emitted_line_carries_no_percent_escapes(self, tmp_path):
+        """The whole point: this file is read by people, not just parsers."""
+        import re
+
+        from ltrquest.annotate import DepthTable
+        from ltrquest.detect import DETECT_COLUMNS
+
+        row = ["."] * len(DETECT_COLUMNS)
+        row[DETECT_COLUMNS.index("seq_id")] = "chr1:100-600#LTR/Copia/Ale"
+        row[DETECT_COLUMNS.index("tsd")] = "TGCAA"
+        row[DETECT_COLUMNS.index("tsd_offset")] = "0,0"
+        row[DETECT_COLUMNS.index("nest_status")] = (
+            "nest-outer:chr1:200-300;nest-inner:chr1:50-900")
+
+        path = tmp_path / "depth0_ltr.tsv"
+        path.write_text("#" + "\t".join(DETECT_COLUMNS) + "\n" + "\t".join(row) + "\n")
+        table = DepthTable(str(path), depth=0, variant="raw")
+
+        blocks, _ = build_element_blocks(
+            "Athal", [table], SeqidRanker(), {}, ({}, {}))
+        attrs = blocks[0].payload[0]
+
+        assert not re.search(r"%[0-9A-Fa-f]{2}", attrs), attrs
+        assert "tsd_offset=0,0" in attrs
+        assert ("nest_status=nest-outer:chr1:200-300,"
+                "nest-inner:chr1:50-900") in attrs
+
+
+class TestEscapeReporting:
+    def test_nothing_is_reported_when_no_escaping_was_needed(self, capsys):
+        gff3_module._escaped_chars.clear()
+        escape("chr1")
+        gff3_module.report_escapes()
+        assert capsys.readouterr().err == ""
+
+    def test_an_escape_that_slips_through_is_announced(self, capsys):
+        # An input name LTRquest does not control, e.g. a seqid 'scaf;1'.
+        gff3_module._escaped_chars.clear()
+        escape("scaf;1")
+        gff3_module.report_escapes()
+        err = capsys.readouterr().err
+        assert "%3B" in err and "WARNING" in err
+        gff3_module._escaped_chars.clear()
