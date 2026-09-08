@@ -11,7 +11,7 @@ dependencies:
   - ltr_finder=1.07
   - bedtools=2.31.1
   # --- clustering / alignment (Kmer2LTR, TEsorter2) ---
-  - mmseqs2=16.747c6
+  - mmseqs2=18.8cc5c
   - mafft=7.526
   - trimal=1.5.1
   - hmmer=3.4                       # hmmsearch/nhmmer (TEsorter2)
