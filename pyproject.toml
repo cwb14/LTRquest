@@ -27,10 +27,15 @@ classifiers = [
 
 # Detection, masking, reconciliation, annotation and GFF3 need nothing beyond the
 # standard library. numpy and matplotlib are here because the plotting stage runs
-# by default; disable it with --no-plots and they go unused.
+# by default; disable it with --no-plots and they go unused. pyfaidx is what
+# ltrquest-flagfp pulls the flagged LTRs out of --ltr-fasta with, and that write
+# is unconditional -- no flag turns it off -- so it is a hard dependency of the
+# entry point, not an extra. The conda environment.yml files have always carried
+# it; this keeps a pip install honest.
 dependencies = [
     "matplotlib>=3.5",
     "numpy>=1.21",
+    "pyfaidx>=0.7.2",
 ]
 
 [project.optional-dependencies]
