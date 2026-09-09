@@ -105,7 +105,8 @@ def build_argv(prefix: Sequence[str], in_fa, out_tsv, *,
                trim_flanks: bool = False,
                ltr_cluster: bool = False,
                internal_cluster: bool = False,
-               min_seq_id: Optional[float] = None) -> list[str]:
+               min_seq_id: Optional[float] = None,
+               period_rule: Optional[str] = None) -> list[str]:
     argv = list(prefix) + [str(in_fa), "-o", str(out_tsv), "-t", str(threads)]
     if mutation_rate is not None:
         argv += ["-u", f"{mutation_rate:g}"]
@@ -119,6 +120,8 @@ def build_argv(prefix: Sequence[str], in_fa, out_tsv, *,
         argv += ["--internal-cluster"]
     if min_seq_id is not None:
         argv += ["--min-seq-id", f"{min_seq_id:g}"]
+    if period_rule is not None:
+        argv += ["--period-rule", str(period_rule)]
     return argv
 
 
