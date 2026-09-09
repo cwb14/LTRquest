@@ -4317,11 +4317,15 @@ def main():
     # to those termini itself, but `bounded_fasta` does that here -- against
     # the same table, with the exclusions and the rename map the round needs --
     # so asking for the cut twice would only write a file nothing opens.
+    # `--period-rule outermost` takes the pair reaching furthest towards both
+    # termini rather than the best-scoring one: LTRs carrying a tandem array
+    # otherwise get called too far in, the aligner having locked onto a
+    # register shifted by whole array units.
     k2l_tsv = str(workdir / f"{out_prefix}.kmer2ltr.tsv")
     print(f"[Step8] running Kmer2LTR on {Path(k2l_in_fa).name} -> {Path(k2l_tsv).name}")
     k2l.run(kmer2ltr_prefix, k2l_in_fa, k2l_tsv,
             threads=args.threads, mutation_rate=args.mutation_rate,
-            genome=args.genome, verbose=verbose)
+            genome=args.genome, period_rule="outermost", verbose=verbose)
     # This table is the element table every later stage extends and re-emits,
     # so the round can only append to a schema it recognises.
     k2l.assert_schema(k2l_tsv)
