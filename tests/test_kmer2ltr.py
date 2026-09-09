@@ -77,6 +77,13 @@ def test_build_argv_omits_optional_flags():
     assert "--trim-flanks" not in argv
     assert "-u" not in argv
     assert "--min-seq-id" not in argv
+    assert "--period-rule" not in argv
+
+
+def test_build_argv_period_rule():
+    argv = kmer2ltr.build_argv(["Kmer2LTR"], "in.fa", "out.tsv",
+                               period_rule="outermost")
+    assert argv[argv.index("--period-rule") + 1] == "outermost"
 
 
 def test_build_argv_clustering():
