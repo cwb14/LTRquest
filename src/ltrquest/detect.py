@@ -3458,9 +3458,10 @@ def names_from_kmer2ltr_dedup(dedup_tsv: str) -> set:
 def ltr_names_from_cls_tsv(cls_tsv_path: str) -> Dict[str, str]:
     """{element: element#LTR/superfamily/clade} for TEsorter2's LTR calls.
 
-    An element TEsorter2 left unclassified, or called as something other than
-    an LTR retrotransposon, has no entry; that absence is what removes it from
-    the round.
+    Only elements TEsorter2 positively classified as an LTR retrotransposon
+    get an entry. Absence here means one of two different things -- see
+    `non_ltr_names_from_cls_tsv`, which separates them -- so absence alone is
+    not grounds for dropping an element from the round.
     """
     names: Dict[str, str] = {}
     with open(cls_tsv_path) as fin:
@@ -3484,6 +3485,53 @@ def ltr_names_from_cls_tsv(cls_tsv_path: str) -> Dict[str, str]:
                 continue
             names[te] = f"{te}#LTR/{superfam}/{clade}"
     return names
+
+
+def non_ltr_names_from_cls_tsv(cls_tsv_path: str) -> Set[str]:
+    """Elements TEsorter2 positively called something other than an LTR-RT.
+
+    `ltr_names_from_cls_tsv` returns nothing for two very different verdicts:
+    "this is a DNA transposon" and "I could not classify this". Only the first
+    is evidence against the element, and it is the only one named here.
+    """
+    out: Set[str] = set()
+    with open(cls_tsv_path) as fin:
+        header_seen = False
+        for line in fin:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            if not header_seen:
+                header_seen = True
+                low = line.lower()
+                if low.startswith("te\t") or low.startswith("#te\t"):
+                    continue
+            cols = line.split("\t")
+            if len(cols) < 7:
+                continue
+            if cols[1] != "LTR":
+                out.add(cols[0])
+    return out
+
+
+def unclassified_ltr_names(bounded_names: Iterable[str],
+                           cls_names: Dict[str, str],
+                           non_ltr: Set[str]) -> Dict[str, str]:
+    """{element: element#LTR/unknown/unknown} for the candidates to re-admit.
+
+    A Kmer2LTR-bounded candidate TEsorter2 neither classified nor called
+    non-LTR carries no homology evidence either way. It reached here by
+    structure -- a terminal repeat pair Kmer2LTR could bound -- and TEsorter2's
+    silence does not withdraw that, so the element keeps its place under the
+    only classification the evidence supports.
+    """
+    keep: Dict[str, str] = {}
+    for name in bounded_names:
+        bare = name.split("#", 1)[0]
+        if bare in cls_names or bare in non_ltr:
+            continue
+        keep[bare] = f"{bare}#LTR/unknown/unknown"
+    return keep
 
 
 def relabel_kmer2ltr_tsv(kmer2ltr_tsv: str, names: Dict[str, str]) -> Tuple[int, int]:
@@ -4437,6 +4485,19 @@ def main():
         # anyway keeps the tripwire live against a cls.tsv keyed on anything
         # else.
         cls_names = ltr_names_from_cls_tsv(cls_tsv_path)
+
+        # TEsorter2 reports homology. Silence on an element means no HMM
+        # domain hit and no pass-2 match -- not that the element is not an
+        # LTR-RT -- and short, domain-free elements are exactly the population
+        # it is silent about. Only a positive non-LTR call is evidence against
+        # a candidate, so that is the only verdict that still drops one.
+        rescued = unclassified_ltr_names(
+            rename.values(), cls_names, non_ltr_names_from_cls_tsv(cls_tsv_path))
+        if rescued:
+            cls_names.update(rescued)
+            print(f"[Step9] kept {len(rescued)} element(s) TEBinSorter left "
+                  f"unclassified as LTR/unknown/unknown")
+
         if not cls_names:
             print(f"[Step9] WARNING: {Path(cls_tsv_path).name} classified no "
                   f"element as an LTR retrotransposon")
