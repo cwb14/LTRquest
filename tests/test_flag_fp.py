@@ -119,3 +119,64 @@ def test_classify_family_gates():
     assert flag_fp.classify_family(_metrics(dominance=0.9, recon=0.0)) == "safe"
     assert flag_fp.classify_family(_metrics(dominance=0.1, recon=0.9)) == "recovered"
     assert flag_fp.classify_family(_metrics(dominance=0.1, recon=0.1)) == "false_positive"
+
+
+def _cluster_inputs(tmp_path, cons_rows, int_rows):
+    """Write a consensus/internal cluster pair plus a stand-in consensus FASTA."""
+    consensus = tmp_path / "consensus.tsv"
+    internal = tmp_path / "internal.tsv"
+    ltr_fasta = tmp_path / "ltrs.fa"
+    consensus.write_text("".join(f"{rep}\t{mem}\n" for rep, mem in cons_rows))
+    internal.write_text("".join(f"{rep}\t{mem}\n" for rep, mem in int_rows))
+    ltr_fasta.write_text(">rep\nACGT\n")
+    return ["--consensus-cluster", str(consensus),
+            "--internal-cluster", str(internal),
+            "--ltr-fasta", str(ltr_fasta),
+            "--no-plot", "-o", str(tmp_path / "out")]
+
+
+def test_main_tolerates_any_number_of_members_with_no_internal_region(tmp_path, capsys):
+    """An element whose two LTRs abut has a zero-length internal region, so
+    Kmer2LTR never writes it to the internal FASTA and it cannot appear in the
+    internal cluster table. That is biology, not a truncated table, and it is
+    not rare enough to sit under a 1% tolerance."""
+    members = [f"chr1:{i}00-{i}99#LTR/Gypsy/Tekay" for i in range(1, 5)]
+    argv = _cluster_inputs(tmp_path,
+                           [(members[0], m) for m in members],
+                           [(members[0], m) for m in members[:3]])  # 1 of 4 = 25%
+
+    assert flag_fp.main(argv) == 0
+    assert "treating as orphans" in capsys.readouterr().err
+
+
+def test_a_member_with_no_internal_region_never_counts_as_reconstituted(tmp_path):
+    """The orphan is its own singleton internal cluster: it counts toward family
+    size but never toward the co-clustered numerator, exactly like a member whose
+    internal region clustered with nothing else."""
+    members = [f"chr1:{i}000-{i}999#LTR/Gypsy/Tekay" for i in range(1, 11)]
+    argv = _cluster_inputs(tmp_path,
+                           [(members[0], m) for m in members],
+                           [("irep", m) for m in members[:9]])  # members[9] has none
+
+    assert flag_fp.main(argv) == 0
+
+    header, row = (tmp_path / "out.family_scores.tsv").read_text().splitlines()[:2]
+    cells = dict(zip(header.split("\t"), row.split("\t")))
+    assert int(cells["n"]) == 10
+    assert float(cells["reconstitution"]) == pytest.approx(0.9)
+
+
+def test_main_warns_when_the_internal_table_carries_an_unknown_member(tmp_path, capsys):
+    """Dropping the equality check leaves a weaker but exact invariant: internal
+    members are a *subset* of consensus members, so a member that is only in the
+    internal table means the two tables are not from the same run."""
+    members = [f"chr1:{i}00-{i}99#LTR/Gypsy/Tekay" for i in range(1, 5)]
+    argv = _cluster_inputs(tmp_path,
+                           [(members[0], m) for m in members],
+                           [(members[0], m) for m in members]
+                           + [("srep", "scaf9:1-9#LTR/Copia/Ale")])
+
+    assert flag_fp.main(argv) == 0
+    err = capsys.readouterr().err
+    assert "scaf9:1-9#LTR/Copia/Ale" in err
+    assert "not from the same run" in err
