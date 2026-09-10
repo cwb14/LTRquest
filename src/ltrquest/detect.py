@@ -3524,6 +3524,12 @@ def unclassified_ltr_names(bounded_names: Iterable[str],
     structure -- a terminal repeat pair Kmer2LTR could bound -- and TEsorter2's
     silence does not withdraw that, so the element keeps its place under the
     only classification the evidence supports.
+
+    Every element named here lacks a TSD, and not by chance: `--tsd-pass2`
+    seeds TEsorter2's pass 2 with each TSD-bearing bounded record, which puts
+    it in the classification map and so gives it a cls.tsv row. Structural
+    evidence therefore cannot narrow this set -- the pipeline has already
+    spent it upstream.
     """
     keep: Dict[str, str] = {}
     for name in bounded_names:
@@ -3847,6 +3853,22 @@ def main():
              "classify_from_blast skips targets that aren't in the live `classifications` map "
              "at pass-2 time. With this flag enabled, the matches inherit "
              "LTR/unknown/unknown from their weak-HMM target. Default: off."
+    )
+
+    ap.add_argument(
+        "--keep-unclassified",
+        choices=("none", "all"),
+        default="none",
+        help="What to do with a Kmer2LTR-bounded candidate TEBinSorter left "
+             "unclassified -- no HMM domain hit and no pass-2 homology. That "
+             "silence is absence of evidence, not a non-LTR call, so 'all' "
+             "keeps every such element as LTR/unknown/unknown; 'none' "
+             "(default) drops them, which is the historical behaviour. An "
+             "element TEBinSorter positively called non-LTR is dropped either "
+             "way. There is no middle setting because there is nothing left to "
+             "gate on: --tsd-pass2 has already seeded every TSD-bearing record "
+             "into pass 2, so each one has a cls.tsv row and none of them "
+             "reaches this decision."
     )
 
     ap.add_argument(
@@ -4490,13 +4512,16 @@ def main():
         # domain hit and no pass-2 match -- not that the element is not an
         # LTR-RT -- and short, domain-free elements are exactly the population
         # it is silent about. Only a positive non-LTR call is evidence against
-        # a candidate, so that is the only verdict that still drops one.
-        rescued = unclassified_ltr_names(
-            rename.values(), cls_names, non_ltr_names_from_cls_tsv(cls_tsv_path))
-        if rescued:
+        # a candidate, so that is the only verdict that drops one regardless
+        # of the mode asked for here.
+        if args.keep_unclassified == "all":
+            rescued = unclassified_ltr_names(
+                rename.values(), cls_names,
+                non_ltr_names_from_cls_tsv(cls_tsv_path))
             cls_names.update(rescued)
             print(f"[Step9] kept {len(rescued)} element(s) TEBinSorter left "
-                  f"unclassified as LTR/unknown/unknown")
+                  f"unclassified as LTR/unknown/unknown "
+                  f"(--keep-unclassified all)")
 
         if not cls_names:
             print(f"[Step9] WARNING: {Path(cls_tsv_path).name} classified no "
