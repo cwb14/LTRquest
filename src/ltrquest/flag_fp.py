@@ -982,7 +982,9 @@ def parse_args(argv=None):
     ap.add_argument("--consensus-cluster", required=True,
                     help="mmseqs consensus-LTR cluster TSV (rep<TAB>member); defines families")
     ap.add_argument("--internal-cluster", required=True,
-                    help="mmseqs internal-region cluster TSV (rep<TAB>member); same element IDs")
+                    help="mmseqs internal-region cluster TSV (rep<TAB>member); a subset of "
+                         "the consensus element IDs -- elements whose LTRs abut have no "
+                         "internal region and are scored as unclustered internals")
     ap.add_argument("--ltr-fasta", required=True,
                     help="consensus LTR FASTA (*.consensus.fa); source of FP output sequences")
     ap.add_argument("-o", "--out-prefix", required=True, help="output path prefix")
@@ -1032,15 +1034,23 @@ def main(argv=None) -> int:
     member2rep = parse_clusters(args.consensus_cluster)
     internal_raw = parse_clusters(args.internal_cluster)
 
+    # An element whose two LTRs abut has a zero-length internal region, so
+    # Kmer2LTR writes no internal record for it and it cannot reach the internal
+    # clustering. The member sets are therefore internal-subset-of-consensus, not
+    # equal. Such a member becomes its own singleton internal cluster below: it
+    # counts toward family size but never toward reconstitution, exactly like a
+    # member whose internal region clustered with nothing else.
     cons_ids, int_ids = set(member2rep), set(internal_raw)
     missing = cons_ids - int_ids
     if missing:
-        frac = len(missing) / len(cons_ids)
-        if frac > 0.01:
-            sys.exit(f"[ERROR] {len(missing)} ({frac:.1%}) consensus members absent from "
-                     f"the internal TSV; aborting (expected identical member sets)")
-        print(f"[WARN] {len(missing)} members absent from internal TSV; treating as orphans",
+        print(f"[WARN] {len(missing)}/{len(cons_ids)} members absent from the internal TSV "
+              f"(no internal region between abutting LTRs); treating as orphans",
               file=sys.stderr)
+    unknown = int_ids - cons_ids
+    if unknown:
+        shown = ", ".join(sorted(unknown)[:3]) + (", ..." if len(unknown) > 3 else "")
+        print(f"[WARN] {len(unknown)} internal members are not consensus members ({shown}); "
+              f"the two cluster tables are not from the same run", file=sys.stderr)
     internal_map = dict(internal_raw)
     for m in missing:
         internal_map[m] = f"__orphan__{m}"
