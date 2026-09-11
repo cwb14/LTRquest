@@ -113,10 +113,22 @@ per genome ─┬─ ROUND_01: detect ──► mask ─┐
                    │
               flag-fp              purge false-positive families
   ═════════════════▼══════════════ back to per genome ═══════════════════════
+        recoverstrand:align        recover strand for unstranded elements  (opt-in)
+                   │
               annotate             strand + family columns
+                   │
+        recoverstrand:apply        re-orient the depth FASTAs to match     (opt-in)
                    │
               gff3 ──► plots
 ```
+
+The two `recoverstrand` steps run only with `--strand_recovery`. The first
+calls strand for the elements the annotator's cascade cannot reach and writes
+`<prefix>_strand_recovery.tsv`; the annotator reads that as a fourth tier; the
+second brings the depth FASTAs into line with the strand column it wrote. With
+the parameter unset an empty list flows in the sidecar's place, so the DAG is
+exactly what it was. See
+[outputs.md](outputs.md#7-strand-recovery---strand-recovery) for the presets.
 
 The pooled middle is the point of running several genomes together: families
 computed per species are not comparable between species, and a repeat that looks
@@ -159,8 +171,10 @@ grep 'FP fraction' results/families/*_fpcheck.log
 ```
 
 Everything else — the rounds, the reconciliation, the pooled family basis, the
-annotation, the GFF3, the plots — is the same code the CLI calls, invoked the
-same way.
+annotation, strand recovery, the GFF3, the plots — is the same code the CLI
+calls, invoked the same way. The CLI's `--strand-recovery` and
+`--strand-recovery-ppt` are `--strand_recovery` and `--strand_recovery_ppt`
+here, following the pipeline's own underscore convention.
 
 ## Development
 

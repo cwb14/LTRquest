@@ -8,6 +8,8 @@ include { LTRQUEST_DETECT_ROUNDS } from '../subworkflows/local/ltrquest_detect_r
 include { LTRQUEST_RECONCILE     } from '../modules/local/ltrquest/reconcile/main'
 include { LTRQUEST_CLUSTER       } from '../modules/local/ltrquest/cluster/main'
 include { LTRQUEST_FLAGFP        } from '../modules/local/ltrquest/flagfp/main'
+include { LTRQUEST_RECOVERSTRAND_ALIGN } from '../modules/local/ltrquest/recoverstrand/main'
+include { LTRQUEST_RECOVERSTRAND_APPLY } from '../modules/local/ltrquest/recoverstrand/main'
 include { LTRQUEST_ANNOTATE      } from '../modules/local/ltrquest/annotate/main'
 include { LTRQUEST_GFF3          } from '../modules/local/ltrquest/gff3/main'
 include { LTRQUEST_PLOTS         } from '../modules/local/ltrquest/plots/main'
@@ -18,6 +20,19 @@ workflow LTRQUEST {
     ch_samples  // channel: [ meta, genome, proteins ]
 
     main:
+    // nextflow_schema.json is documentation, not a gate: nothing calls
+    // validateParameters(). Check here so a typo'd preset fails now rather than
+    // at the recovery stage, which sits after every expensive one. The CLI does
+    // the same at ltrquest.sh's argument validation.
+    if (params.strand_recovery
+            && !(params.strand_recovery in ['conservative', 'balanced', 'sensitive'])) {
+        error "--strand_recovery must be conservative, balanced or sensitive " +
+              "(got '${params.strand_recovery}')"
+    }
+    if (params.strand_recovery_ppt && !params.strand_recovery) {
+        error "--strand_recovery_ppt has no effect without --strand_recovery"
+    }
+
     ch_versions = Channel.empty()
 
     //
@@ -114,23 +129,59 @@ workflow LTRQUEST {
               workdirs, genome, cluster ]
         }
 
+    // Strand recovery, first half. Only when asked for. It calls strand for the
+    // elements the annotator's cascade cannot reach and writes the sidecar the
+    // annotator reads back as a fourth tier. With recovery off, an empty list
+    // flows in its place: it stages nothing and the modules render no flag for
+    // it, so the run is exactly what it was before.
+    if (params.strand_recovery) {
+        LTRQUEST_RECOVERSTRAND_ALIGN(
+            ch_bundle.map { meta, tsvs, _fastas, workdirs, genome, _cluster ->
+                [ meta, tsvs, workdirs, genome ]
+            }
+        )
+        ch_versions = ch_versions.mix(LTRQUEST_RECOVERSTRAND_ALIGN.out.versions)
+        ch_recovery = LTRQUEST_RECOVERSTRAND_ALIGN.out.recovery
+    } else {
+        ch_recovery = ch_bundle.map { meta, _t, _f, _w, _g, _c -> [ meta, [] ] }
+    }
+
     LTRQUEST_ANNOTATE(
         ch_bundle.map { meta, tsvs, _fastas, workdirs, _genome, cluster ->
             [ meta, tsvs, workdirs, cluster ]
-        }
+        }.join(ch_recovery)
     )
     ch_versions = ch_versions.mix(LTRQUEST_ANNOTATE.out.versions)
 
+    // Second half: bring the depth FASTAs into line with the strand column the
+    // annotator just wrote, so a recovered minus element is stored in coding
+    // sense exactly like a TEsorter2-called one. The GFF3 carries no sequence,
+    // so it is indifferent to this and could equally have run first.
+    if (params.strand_recovery) {
+        LTRQUEST_RECOVERSTRAND_APPLY(
+            LTRQUEST_ANNOTATE.out.tsv
+                .join(ch_bundle.map { meta, _t, fastas, _w, _g, _c -> [ meta, fastas ] })
+                .join(ch_recovery)
+        )
+        ch_versions = ch_versions.mix(LTRQUEST_RECOVERSTRAND_APPLY.out.versions)
+        ch_tables = LTRQUEST_RECOVERSTRAND_APPLY.out.tsv
+        ch_fastas = LTRQUEST_RECOVERSTRAND_APPLY.out.fasta
+    } else {
+        ch_tables = LTRQUEST_ANNOTATE.out.tsv
+        ch_fastas = ch_bundle.map { meta, _t, fastas, _w, _g, _c -> [ meta, fastas ] }
+    }
+
     // From here on the tables are the ANNOTATED ones, not the reconciler's.
-    ch_annotated = LTRQUEST_ANNOTATE.out.tsv
-        .join(ch_bundle.map { meta, _tsvs, fastas, workdirs, genome, cluster ->
-            [ meta, fastas, workdirs, genome, cluster ]
+    ch_annotated = ch_tables
+        .join(ch_fastas)
+        .join(ch_bundle.map { meta, _tsvs, _fastas, workdirs, genome, cluster ->
+            [ meta, workdirs, genome, cluster ]
         })
 
     LTRQUEST_GFF3(
         ch_annotated.map { meta, tables, _fastas, workdirs, genome, cluster ->
             [ meta, tables, workdirs, genome, cluster ]
-        }
+        }.join(ch_recovery)
     )
     ch_versions = ch_versions.mix(LTRQUEST_GFF3.out.versions)
 
@@ -147,7 +198,7 @@ workflow LTRQUEST {
     }
 
     emit:
-    depth_tables = LTRQUEST_ANNOTATE.out.tsv
+    depth_tables = ch_tables
     gff3         = LTRQUEST_GFF3.out.gff3
     versions     = ch_versions
 }

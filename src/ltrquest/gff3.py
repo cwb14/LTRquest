@@ -48,6 +48,7 @@ from .annotate import (
     header_names,
     load_families,
     load_pass2_links,
+    load_recovered_strands,
     load_tesorter_strands,
     load_unannotated,
     lookup_family,
@@ -572,7 +573,9 @@ def write_gff3(path: str,
 # Strand provenance
 # -----------------------------
 def strand_provenance(prefix: str, indir: str, tables, families,
-                      verbose: bool = False) -> Dict[str, Tuple[str, str]]:
+                      verbose: bool = False,
+                      recovered_strands: Optional[str] = None
+                      ) -> Dict[str, Tuple[str, str]]:
     """Recompute the strand cascade purely to label each call's origin.
 
     Returns element key -> (strand the cascade would give, tier name). The
@@ -590,8 +593,12 @@ def strand_provenance(prefix: str, indir: str, tables, families,
                                      warn_missing=False)
     target_of, orientation = load_pass2_links(prefix, indir, verbose=False,
                                               warn_missing=False)
+    recovered = {}
+    if recovered_strands:
+        recovered = load_recovered_strands(prefix, indir, verbose=False,
+                                           path=recovered_strands)
     strand, source = resolve_strands(elements, tesorter, target_of, orientation,
-                                     verbose=False)
+                                     verbose=False, recovered=recovered)
     return {key: (strand[key], source[key]) for key in elements
             if key in strand and key in source}
 
@@ -602,7 +609,8 @@ def strand_provenance(prefix: str, indir: str, tables, families,
 def convert(prefix: str, indir: str = ".", genome: Optional[str] = None,
             miniprot_gff: Optional[str] = None, verbose: bool = False,
             consensus_cluster: Optional[str] = None,
-            family_prefix: Optional[str] = None) -> int:
+            family_prefix: Optional[str] = None,
+            recovered_strands: Optional[str] = None) -> int:
     variant, tables = select_annotation_set(prefix, indir)
     if not tables:
         print(f"[ltr_tsv_to_gff3] ERROR: no {prefix}_depth<N>[_clean]_ltr.tsv "
@@ -628,7 +636,8 @@ def convert(prefix: str, indir: str = ".", genome: Optional[str] = None,
     families = load_families(prefix, indir, verbose=False, warn_missing=False,
                              consensus_cluster=consensus_cluster,
                              family_prefix=family_prefix)
-    provenance = strand_provenance(prefix, indir, tables, families, verbose)
+    provenance = strand_provenance(prefix, indir, tables, families, verbose,
+                                   recovered_strands)
     element_blocks, skipped = build_element_blocks(prefix, tables, ranker,
                                                    provenance, families, verbose)
     if skipped:
@@ -689,6 +698,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--family-prefix", default=None,
                         help="Namespace for family labels (<NAME>_fam00001). "
                              "Default: --prefix.")
+    parser.add_argument("--recovered-strands", default=None,
+                        help="ltrquest.recover_strand sidecar, so a recovered "
+                             "element's strand_source reads 'homology' or 'ppt' "
+                             "rather than 'table'. Must match what "
+                             "ltrquest-annotate was given.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Per-step progress and per-file counts")
     args = parser.parse_args(argv)
@@ -698,7 +712,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               file=sys.stderr)
         return 1
     return convert(args.prefix, args.indir, args.genome, args.miniprot_gff,
-                   args.verbose, args.consensus_cluster, args.family_prefix)
+                   args.verbose, args.consensus_cluster, args.family_prefix,
+                   args.recovered_strands)
 
 
 if __name__ == "__main__":

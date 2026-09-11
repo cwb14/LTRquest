@@ -1,0 +1,11 @@
+name: ltrquest_recoverstrand
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  # dc-megablast drives every preset; minimap2 adds two more views for the
+  # balanced and sensitive ones.
+  - blast
+  - minimap2
+  - pyfaidx

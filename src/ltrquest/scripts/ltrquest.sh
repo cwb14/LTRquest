@@ -67,11 +67,16 @@
 #   debugging. See the "FP-correction orchestrator" section below.
 
 # ANNOTATION ADD-ONS (post FP-correction):
+#   (a0) with --strand-recovery, ltrquest.recover_strand --phase align calls
+#        strand for the elements the cascade below cannot reach and writes
+#        {OUT_PREFIX}_strand_recovery.tsv; --phase apply then runs after (b) to
+#        re-orient the depth FASTAs to the strand the annotator wrote.
 #   (a) ltrquest.annotate inserts `strand` and `family` columns into every
 #       {OUT_PREFIX}_depth{N}_ltr.tsv and _depth{N}_clean_ltr.tsv, between `tsd`
 #       and `domains`. Strand is TEsorter2's call, falling back to protein-domain
-#       order and then to the minimap2 pass-2 homology target; elements with no
-#       usable evidence keep '.'. Family is the Kmer2LTR/mmseqs consensus
+#       order, then to the minimap2 pass-2 homology target, then to (a0)'s
+#       sidecar when it was written; elements with no usable evidence keep '.'.
+#       Family is the Kmer2LTR/mmseqs consensus
 #       cluster, labelled {OUT_PREFIX}_fam00001 onward.
 #   (b) ltrquest.gff3 pools those tables into
 #       {OUT_PREFIX}_all_depth_LTR_cleaned.gff3, and - when round 1 produced a
@@ -138,6 +143,10 @@ MUTATION_RATE="3e-8"
 KEEP_WEAK_HMM_PASS2=false
 PASS2_ALIGNER="minimap2"
 RUN_PLOTS=true
+
+# Strand recovery (opt-in post-processing; empty = off)
+STRAND_RECOVERY=""
+STRAND_RECOVERY_PPT=false
 
 # FP-family correction (post-detection Kmer2LTR stage)
 FP_MASK_THRESHOLD="0.10"   # user-tunable: FP-element fraction above which the
@@ -260,6 +269,17 @@ Optional:
   --no-plots            Skip the post-completion plotting stage (structure
                         PDFs, summary PDF, TEGV HTML into <out_prefix>_plots/).
                         Default: run it.
+  --strand-recovery     Recover strand for the LTR-RTs the usual cascade leaves
+                        unstranded, by transferring orientation from the elements
+                        that already carry one. Off by default. One of:
+                          conservative  two dc-megablast views; recall 0.58 at
+                                        0.19% disagreement with the cascade
+                          balanced      four views, two must agree; 0.79 / 0.70%
+                          sensitive     four views, one is enough unless another
+                                        contradicts it; 0.84 / 1.06%
+                        Needs blast+, and minimap2 for balanced/sensitive.
+  --strand-recovery-ppt Add the polypurine-tract fallback for loci homology
+                        cannot reach. Measured at 93%, so off by default.
 
 Post-detection FP-family correction runs automatically: it clusters the detected
 LTR-RTs with Kmer2LTR, purges false-positive families into
@@ -271,6 +291,12 @@ Annotation add-ons then run automatically: every depth table gains `strand` and
 <out_prefix>_all_depth_LTR_cleaned.gff3 (plus
 <out_prefix>_all_depth_protein_LTR_cleaned.gff3 when --proteins was given, which
 also carries the miniprot alignments).
+
+With --strand-recovery, a recovery pass runs either side of the annotator: it
+writes <out_prefix>_strand_recovery.tsv (locus, strand, source, evidence), the
+annotator reads that as a fourth strand tier so `strand_source` reads `homology`
+or `ppt`, and the depth FASTAs are then re-oriented so a recovered minus element
+is stored in coding sense exactly like a TEsorter2-called one.
 
 Extra detection options:
   --detect-args "KEY=VALUE [KEY2=VALUE2 ...]"
@@ -487,6 +513,13 @@ promote_fp_outputs() {
   for p in "${OUT_PREFIXES[@]}"; do
     rm -f "${src}/${p}.input_genome.fa"* 2>/dev/null || true
     rm -f "${src}/${p}_FP_masked.fa" 2>/dev/null || true
+    # A sidecar already in the destination describes some earlier run's
+    # elements, not these, and would invite `ltrquest-annotate
+    # --recovered-strands` at a file that does not match the tables beside it.
+    # Unconditional: this attempt may have asked for recovery and still not
+    # produced one, if the stage failed. The promotion below moves this
+    # attempt's own sidecar in afterwards when there is one.
+    rm -f "${dst}/${p}_strand_recovery.tsv"
   done
 
   shopt -s nullglob
@@ -640,18 +673,54 @@ run_annotation_stage() {
     die "Expected exactly 1 pooled consensus cluster TSV, found ${#merged_cons[@]}"
   fi
 
-  for p in "${OUT_PREFIXES[@]}"; do
+  local -a rec_opts=() rec_align=()
+  local i recovery_genome sidecar
+  for i in "${!OUT_PREFIXES[@]}"; do
+    p="${OUT_PREFIXES[$i]}"
     depth_tables_for "$p" tsv annot_tsvs
     if (( ${#annot_tsvs[@]} == 0 )); then
       echo "WARNING: no ${p}_depth<N>_ltr.tsv present; skipping the" >&2
       echo "strand/family annotation and GFF3 stages for ${p}." >&2
       continue
     fi
+
+    # Strand recovery, phase 1: call strand for what the cascade cannot reach and
+    # publish the sidecar the annotator reads as its fourth tier. The sidecar is
+    # passed by path, never globbed, so one left behind by an earlier recovered
+    # run cannot re-strand this one.
+    rec_opts=()
+    if [[ -n "$STRAND_RECOVERY" ]]; then
+      # The ORIGINAL genome, not {p}.input_genome.fa: from FP attempt 2 onward
+      # that symlink points at the hard-masked FASTA, and aligning against its
+      # N-runs would degrade the very homology signal this stage depends on.
+      recovery_genome="${abs_genomes[$i]:-${p}.input_genome.fa}"
+      sidecar="${p}_strand_recovery.tsv"
+      rec_align=( --phase align --prefix "$p" --indir . --genome "$recovery_genome"
+                  --preset "$STRAND_RECOVERY" --threads "$THREADS" )
+      [[ "$STRAND_RECOVERY_PPT" == true ]] && rec_align+=( --ppt )
+      echo ""
+      echo "============================================================"
+      echo "Recovering strand for ${p} (--strand-recovery ${STRAND_RECOVERY})..."
+      set -x
+      if "${RECOVER[@]}" "${rec_align[@]}"; then
+        set +x
+        rec_opts=( --recovered-strands "$sidecar" )
+      else
+        set +x
+        echo "WARNING: strand recovery failed for ${p}; continuing with the" >&2
+        echo "unrecovered strand cascade. Annotation outputs are unaffected." >&2
+        # The stage removes its own working directory on a clean exit; a killed
+        # one leaves it, and promotion would move it into the user's results.
+        rm -f "$sidecar"
+        rm -rf "${p}_strand_recovery.work"
+      fi
+    fi
+
     echo ""
     echo "============================================================"
     echo "Annotating ${#annot_tsvs[@]} depth table(s) for ${p} with strand + family..."
     set -x
-    "${ANNOTATE[@]}" --prefix "$p" --indir . "${fam_opts[@]}"
+    "${ANNOTATE[@]}" --prefix "$p" --indir . "${fam_opts[@]}" "${rec_opts[@]}"
     set +x
 
     echo ""
@@ -659,8 +728,24 @@ run_annotation_stage() {
     echo "Writing LTR-RT GFF3 for ${p}..."
     set -x
     "${GFF3[@]}" --prefix "$p" --indir . \
-      --genome "${p}.input_genome.fa" "${fam_opts[@]}"
+      --genome "${p}.input_genome.fa" "${fam_opts[@]}" "${rec_opts[@]}"
     set +x
+
+    # Phase 2: bring the depth FASTAs into line with the strand column the
+    # annotator just wrote, so a recovered minus element is stored in coding
+    # sense exactly like a TEsorter2-called one.
+    if (( ${#rec_opts[@]} > 0 )); then
+      echo ""
+      echo "============================================================"
+      echo "Re-orienting ${p} depth FASTAs to the recovered strand..."
+      set -x
+      "${RECOVER[@]}" --phase apply --prefix "$p" --indir . || {
+        set +x
+        echo "WARNING: could not re-orient the depth FASTAs for ${p}; the tables" >&2
+        echo "and GFF3s still carry the recovered strand." >&2
+      }
+      set +x
+    fi
   done
 }
 
@@ -789,6 +874,12 @@ carry_forward_genome() {
     case "$name" in
       "${prefix}.input_genome.fa"*|"${prefix}_FP_masked.fa") continue;;
       *_clean_ltr.*|*_fpcheck*|*_all_ltr.*) continue;;
+      # The strand-recovery sidecar describes one attempt's element set, and
+      # carrying it into the next would let a stale call re-strand a re-detected
+      # genome. The glob covers the stage's working directory as well, which a
+      # killed run can leave behind and which ends in '.work' like the ones
+      # above that ARE carried forward.
+      *_strand_recovery.*) continue;;
     esac
     if [[ -d "$e" && ( "$name" == *.work || "$name" == *_tools ) ]]; then
       cp -al "$e" "${adir}/"
@@ -981,6 +1072,13 @@ while [[ $# -gt 0 ]]; do
     --mutation-rate) MUTATION_RATE="${2:-}"; shift 2;;
     --keep-weak-hmm-pass2-matches) KEEP_WEAK_HMM_PASS2=true; shift;;
     --pass2-aligner) PASS2_ALIGNER="${2:-}"; shift 2;;
+    --strand-recovery)
+      STRAND_RECOVERY="${2:-}"
+      # An empty value would fall through the -n guard below and silently turn
+      # the stage off, which is the opposite of what typing the flag means.
+      [[ -n "$STRAND_RECOVERY" ]] || die "--strand-recovery needs a value: conservative, balanced or sensitive"
+      shift 2;;
+    --strand-recovery-ppt) STRAND_RECOVERY_PPT=true; shift;;
     --fp-mask-threshold) FP_MASK_THRESHOLD="${2:-}"; shift 2;;
     --no-plots) RUN_PLOTS=false; shift;;
     --dev-keep-fp-rounds) DEV_KEEP_FP_ROUNDS=true; shift;;      # hidden dev flag
@@ -1023,6 +1121,26 @@ awk -v x="$FP_MASK_THRESHOLD" 'BEGIN{exit !(x>=0 && x<=1)}' \
   || die "--max-dust-frac must be a number in (0,1] (got '$MAX_DUST_FRAC')"
 awk -v x="$MAX_DUST_FRAC" 'BEGIN{exit !(x>0 && x<=1)}' \
   || die "--max-dust-frac must be in (0,1] (got '$MAX_DUST_FRAC')"
+
+# Validate the strand-recovery knobs here, before any detection starts. The
+# stage itself runs last, after every expensive one, so a missing aligner or a
+# typo'd preset has to fail in the first second rather than the last.
+if [[ -n "$STRAND_RECOVERY" ]]; then
+  case "$STRAND_RECOVERY" in
+    conservative|balanced|sensitive) ;;
+    *) die "--strand-recovery must be conservative, balanced or sensitive (got '$STRAND_RECOVERY')";;
+  esac
+  for _t in blastn makeblastdb; do
+    command -v "$_t" >/dev/null 2>&1 \
+      || die "--strand-recovery needs ${_t} on PATH (every preset uses dc-megablast); it is in environment.yml"
+  done
+  if [[ "$STRAND_RECOVERY" != conservative ]]; then
+    command -v minimap2 >/dev/null 2>&1 \
+      || die "--strand-recovery ${STRAND_RECOVERY} needs minimap2 on PATH for two of its four views; it is in environment.yml, or use --strand-recovery conservative"
+  fi
+elif [[ "$STRAND_RECOVERY_PPT" == true ]]; then
+  die "--strand-recovery-ppt has no effect without --strand-recovery"
+fi
 
 # ----------------------------
 # Derived names
@@ -1093,6 +1211,7 @@ RECONCILE=( "$PY" -m ltrquest.reconcile )
 ANNOTATE=(  "$PY" -m ltrquest.annotate  )
 GFF3=(      "$PY" -m ltrquest.gff3      )
 FLAG_FP=(   "$PY" -m ltrquest.flag_fp   )
+RECOVER=(   "$PY" -m ltrquest.recover_strand )
 
 # ----------------------------
 # Orchestrator vs. worker

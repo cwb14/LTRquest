@@ -25,6 +25,8 @@ build:
     - ltrquest-reconcile = ltrquest.reconcile:main
     - ltrquest-annotate = ltrquest.annotate:main
     - ltrquest-gff3 = ltrquest.gff3:main
+    - ltrquest-flagfp = ltrquest.flag_fp:main
+    - ltrquest-recover-strand = ltrquest.recover_strand:main
 
 requirements:
   host:
@@ -69,6 +71,7 @@ test:
     - ltrquest.reconcile
     - ltrquest.annotate
     - ltrquest.gff3
+    - ltrquest.recover_strand
   commands:
     - ltrquest --help
     - ltrquest-detect --help
@@ -76,6 +79,8 @@ test:
     - ltrquest-reconcile --help
     - ltrquest-annotate --help
     - ltrquest-gff3 --help
+    - ltrquest-flagfp --help
+    - ltrquest-recover-strand --help
     - ltrquest-plots --help
     # The driver is a shell script shipped as package data; a packaging mistake
     # would leave it out without breaking the imports above.

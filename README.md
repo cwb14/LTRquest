@@ -337,10 +337,19 @@ ltrquest (driver)
   │
   ├── ltrquest.reconcile                  pool rounds, resolve containment → depth buckets
   ├── Kmer2LTR + ltrquest.flag_fp         cluster into families, purge false-positive families
+  ├── ltrquest.recover_strand             recover strand for unstranded elements  (opt-in)
   ├── ltrquest.annotate                   add strand + family columns
   ├── ltrquest.gff3                       pooled GFF3
+  ├── ltrquest.recover_strand             re-orient the depth FASTAs to match     (opt-in)
   └── ltrquest-plots                      structure PDFs, summary PDF, TEGV browser
 ```
+
+`--strand-recovery conservative|balanced|sensitive` turns on the two opt-in
+steps. They fill in strand for the elements the usual cascade leaves at `.`, by
+transferring orientation from the elements that already carry one, and then
+store a recovered minus element in coding sense like any other. Off by default;
+see [docs/outputs.md](docs/outputs.md#7-strand-recovery---strand-recovery) for
+the presets and what each costs in accuracy.
 
 Every stage is also its own command, so any of them can be re-run alone without
 redoing the rest — `ltrquest-reconcile --help`, `ltrquest-gff3 --help`, and so

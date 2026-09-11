@@ -21,6 +21,29 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Added
 
+- `--strand-recovery conservative|balanced|sensitive`, off by default, which
+  recovers strand for the LTR-RTs the strand cascade leaves at `.`. The
+  unstranded element, in genome-forward orientation, is aligned against the
+  elements that already carry a strand, held in coding sense, so the
+  alignment's orientation is the query's own genomic strand. Four views run
+  (dc-megablast and minimap2, each on the whole element and on the internal
+  region); a view calls only when all of its own alignments agree, and
+  disagreement between views vetoes the locus. Leave-one-out against
+  LTRquest's own tesorter strand over 3616 elements: 58% recovered at 0.19%
+  disagreement (conservative), 79% at 0.70% (balanced), 84% at 1.06%
+  (sensitive). `--strand-recovery-ppt` adds a polypurine-tract fallback for
+  loci homology cannot reach, measured at 93% and therefore off by default.
+
+  The calls land in a new `<prefix>_strand_recovery.tsv`, which
+  `ltrquest-annotate` reads as a fourth cascade tier via `--recovered-strands`
+  — pinned by path, never globbed, so a sidecar left behind by an earlier run
+  cannot re-strand a later one. Every primary output follows: `strand` in the
+  depth tables, `strand_source=homology`/`ppt` in both GFF3s, and the depth
+  FASTAs re-oriented so a recovered minus element is stored in coding sense
+  exactly like a TEsorter2-called one, with `orientation` restated to match.
+  Available on the Nextflow path as `--strand_recovery` and
+  `--strand_recovery_ppt`, and standalone as `ltrquest-recover-strand`.
+
 - `--mutation-rate`, forwarded to Kmer2LTR's `-u` for both the per-round
   table and the pooled family-clustering pass. Insertion age used to come
   from a fixed μ = 3×10⁻⁸ baked into the old Kmer2LTR script with no flag to
