@@ -85,6 +85,7 @@ from .annotate import (
     target_mode,
     write_table,
 )
+
 # The one true record-level flip. detect.revcomp reverses the IUPAC depth codes
 # without complementing them, which is exactly what a depth FASTA needs; see
 # `reorient_fasta` for why complementing them would be a silent corruption.
