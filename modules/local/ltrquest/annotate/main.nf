@@ -9,7 +9,7 @@ process LTRQUEST_ANNOTATE {
     container 'ghcr.io/cwb14/ltrquest:1.0.1'
 
     input:
-    tuple val(meta), path(tables, stageAs: 'in/*'), path(workdirs), path(consensus_cluster)
+    tuple val(meta), path(tables, stageAs: 'in/*'), path(workdirs), path(consensus_cluster), path(recovered_strands)
 
     output:
     tuple val(meta), path("*_depth*_ltr.tsv", arity: '1..*'), emit: tsv
@@ -20,6 +20,9 @@ process LTRQUEST_ANNOTATE {
 
     script:
     def args = task.ext.args ?: ''
+    // Pinned by path, never globbed: a sidecar left behind by an earlier
+    // recovered run must not quietly re-strand a run that asked for none.
+    def recovered = recovered_strands ? "--recovered-strands ${recovered_strands}" : ''
     prefix   = task.ext.prefix ?: "${meta.id}"
 
     // The annotator rewrites its tables in place, so they are copied out of the
@@ -36,6 +39,7 @@ process LTRQUEST_ANNOTATE {
         --indir . \\
         --consensus-cluster ${consensus_cluster} \\
         --family-prefix ${params.family_prefix} \\
+        ${recovered} \\
         ${args}
 
     cat <<-END_VERSIONS > versions.yml

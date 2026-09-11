@@ -16,10 +16,11 @@ import pytest
 import ltrquest
 from ltrquest import cli
 
-STAGES = ["detect", "mask", "reconcile", "annotate", "gff3",
+STAGES = ["detect", "mask", "reconcile", "annotate", "gff3", "recover_strand",
           "plot_struct", "plot_summary", "tegv"]
 CONSOLE_SCRIPTS = ["ltrquest", "ltrquest-plots", "ltrquest-detect", "ltrquest-mask",
-                   "ltrquest-reconcile", "ltrquest-annotate", "ltrquest-gff3"]
+                   "ltrquest-reconcile", "ltrquest-annotate", "ltrquest-gff3",
+                   "ltrquest-flagfp", "ltrquest-recover-strand"]
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 

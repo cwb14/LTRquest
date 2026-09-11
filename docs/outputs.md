@@ -121,7 +121,7 @@ classification and clustering have run.
 | 27 | `tsd` | Target-site duplication at the called boundary. `.` = searched and absent; `NA` = could not be searched |
 | 28 | `tsd_offset` | `d5,d3` — how far each boundary had to move for `tsd` to appear, positive meaning *into* the element. `NA` whenever `tsd` carries no sequence, whether that is `.` or `NA` |
 | 29 | `tsd_input` | The same measurement at the record's termini as originally supplied, before re-bounding |
-| 30 | `strand` | The element's biological orientation, resolved by LTRquest from classification, domain order and pass-2 homology: `+`, `-`, or `.` if none of those resolved it |
+| 30 | `strand` | The element's biological orientation, resolved by LTRquest from classification, domain order and pass-2 homology, and from strand recovery when `--strand-recovery` was given: `+`, `-`, or `.` if none of those resolved it |
 | 31 | `family` | Family id from the pooled consensus-LTR clustering, `<prefix>_fam00001` … — see section 5 |
 | 32 | `domains` | Protein domains with genomic coordinates: `GENE\|clade@start-end;...`, or `.` |
 | 33 | `nest_status` | `nest-outer:chrom:s-e` (that element is inside me) and/or `nest-inner:chrom:s-e` (I am inside that element), `;`-joined, or `.` if un-nested |
@@ -146,7 +146,10 @@ Three things this table will burn you on if you skim it:
   an element stored forward (`orientation=+`) can carry either strand, and
   vice versa. `strand` can land on `.` when none of those sources resolve
   it; `orientation` never does, because it records a decision the writer
-  always makes.
+  always makes. With `--strand-recovery` the two do line up on the elements
+  recovery calls, and only those: it flips their records to coding sense and
+  restates `orientation` to match, exactly as the classification step already
+  does for the elements TEsorter2 strands. Every other row is untouched.
 - **Every row satisfies `ltr5_start == 1` and `ltr3_end == seq_len`.** That is
   what "Kmer2LTR-bounded" means: the record has already been cut down to the
   called LTR pair, so both flanks report `0` and there is nothing upstream or
@@ -273,8 +276,71 @@ Notes:
   a sequence named `scaf;1` cannot be written literally without corrupting the
   file. If that ever happens the run says so on stderr rather than letting you
   discover a `%3B` by eye.
+- `strand_source` names which tier of the cascade decided column 7:
+  `tesorter`, `domain_order`, `pass2`, `homology` or `ppt` from strand
+  recovery, `none` where the strand is `.`, or `table` if the strand in the
+  element table is not one the cascade would reach — a hand-edited table, say.
 
-## 7. Plots (`<prefix>_plots/`)
+## 7. Strand recovery (`--strand-recovery`)
+
+Off unless asked for. A meaningful fraction of elements come out of the strand
+cascade at `.`, most often because TEsorter2 could not classify them and they
+carry too few protein domains to read an order off. Recovery transfers
+orientation onto those from the elements that already carry a strand: the
+unstranded element, in genome-forward orientation, is aligned against the
+stranded ones held in coding sense, and the alignment's orientation is the
+query's own genomic strand.
+
+Four independent views run — dc-megablast and minimap2, each on the whole
+element and on the internal region between the LTRs. A view calls only when
+every one of its own alignments agrees, and any disagreement between views
+vetoes the locus outright. The preset sets how much agreement a surviving locus
+needs:
+
+| Preset | Views | Agreement | Recall | Disagreement with the cascade |
+|---|---|---|---|---|
+| `conservative` | the two dc-megablast views | 1 | 0.58 | 0.19% |
+| `balanced` | all four | 2 | 0.79 | 0.70% |
+| `sensitive` | all four | 1, unless another contradicts | 0.84 | 1.06% |
+
+Measured by leave-one-out against LTRquest's own tesorter strand, pooled over
+five Brassicaceae genomes and 3616 labelled elements. Disagreement tracks how
+well LTRquest could label the element in the first place: 0.37% where five or
+more protein domains support the label, 2.54% where only one does.
+
+`--strand-recovery-ppt` adds a polypurine-tract fallback for loci homology
+cannot reach. It scores both strand hypotheses on the two windows flanking the
+internal region and calls only when one wins by a margin and clears an absolute
+floor. Measured at 93% on real genomes, so it is off by default.
+
+What changes in the outputs:
+
+| Output | Change |
+|---|---|
+| `<prefix>_strand_recovery.tsv` | New. `locus`, `strand`, `source`, `evidence`, one row per element recovery was asked about — declines included, so comparing two presets is a diff |
+| `depth<N>[_clean]_ltr.tsv` | `strand` filled on the recovered rows; `orientation` restated on those it flipped |
+| `depth<N>[_clean]_ltr.fa` | Recovered minus elements stored in coding sense, like TEsorter2-called ones |
+| both GFF3s | `strand` on the recovered elements, and `strand_source=homology` or `ppt` |
+
+It rewrites the four depth FASTAs and nothing else. `<prefix>_r<N>_ltr.fa`, the
+per-round library, and `<prefix>_all_ltr.fa`, the pooled clustering input, both
+describe the state at the moment they were written, which is before annotation
+ran; the reconciler already documents the per-round files as left untouched.
+They keep TEsorter2's orientation, so re-clustering either of them after a
+recovered run reproduces the original answer rather than the recovered one.
+
+Two further things it deliberately does not do. Family clustering runs before
+annotation, so it sees the pre-flip sequences: recovery does not re-cluster and
+does not change any family label. And the structure PDFs re-infer strand from
+domain order rather than reading the `strand` column, so they will not show a
+recovered call.
+
+Needs `blast+` on `PATH` for every preset, and `minimap2` as well for
+`balanced` and `sensitive`. Both are in `environment.yml`, and the wrapper
+checks for them while parsing its arguments, so a missing one fails the run
+immediately rather than after every expensive stage has already succeeded.
+
+## 8. Plots (`<prefix>_plots/`)
 
 | Output | What it shows |
 |---|---|
@@ -284,7 +350,7 @@ Notes:
 | `<prefix>_summary.pdf` | Multi-page summary |
 | `<prefix>_TEGV.html` | Self-contained interactive genome browser (open in web browser) |
 
-## 8. Benchmarks
+## 9. Benchmarks
 
 On a simulated genome (PrinTE) with 4,468 true intact LTR-RTs, 20 threads,
 scored at ≥90% reciprocal overlap:

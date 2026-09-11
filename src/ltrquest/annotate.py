@@ -11,16 +11,21 @@ in place, gaining two columns immediately before `domains`:
 writes it last and refuses to run against a table that doesn't -- so `strand`
 and `family` go before `domains` rather than at the end, keeping it last.
 
-Strand is resolved by a four-tier cascade, most authoritative first:
+Strand is resolved by a cascade, most authoritative first:
 
   1. tesorter     TEsorter2's own call, column 6 of {prefix}_r*.work/*.cls.tsv
   2. domain_order inferred from the genomic order of protein domains
   3. pass2        inherited from the minimap2 pass-2 homology target
-  4. .            unknown
+  4. homology/ppt ltrquest.recover_strand's sidecar, present only when the run
+                  opted into --strand-recovery. Pass it with
+                  --recovered-strands; it is never picked up by globbing.
+  5. .            unknown
 
-A fifth tier was tried and removed: orienting an unstranded element against
-stranded members of its own family. It returned '+' for every element it
-touched, and was wrong on 5 of the 5 elements whose own domains said '-'.
+Tier 4 is NOT the family-orientation tier that was tried and removed: that one
+oriented an unstranded element against stranded members of its own family
+regardless of evidence, returned '+' for every element it touched, and was wrong
+on 5 of the 5 elements whose own domains said '-'. Tier 4 transfers only where
+several independent alignment views agree and vetoes the locus when they do not.
 
 Family labels ({prefix}_fam00001, ...) come from the Kmer2LTR/mmseqs consensus
 cluster table, numbered by descending family size.
@@ -53,6 +58,16 @@ FAMILY_COL = "family"
 DOMAINS_COL = "domains"
 
 UNKNOWN = "."
+
+# The strand cascade, most authoritative first. Enumerated once so a new tier
+# cannot be added to resolve_strands and then forgotten by the log lines.
+STRAND_TIERS = ("tesorter", "domain_order", "pass2", "homology", "ppt")
+
+# The sidecar ltrquest.recover_strand writes and this module reads back as its
+# fourth tier. The format lives here, with the reader, so producer and consumer
+# cannot drift apart.
+RECOVERY_SIDECAR_SUFFIX = "_strand_recovery.tsv"
+RECOVERY_HEADER = ("locus", "strand", "source", "evidence")
 
 # Clade label for members whose name carries no '#Order/Superfamily/Clade'
 # suffix. Matches the token TEsorter itself writes for an unresolved clade, so
@@ -145,7 +160,7 @@ def read_table(path: str) -> Tuple[Optional[List[str]], List[List[str]]]:
     return header, rows
 
 
-def _target_mode(path: str) -> int:
+def target_mode(path: str) -> int:
     """Permissions the rewritten file should end up with.
 
     mkstemp deliberately creates at 0600 and os.replace carries that mode onto
@@ -166,7 +181,7 @@ def write_table(path: str, header: Optional[Sequence[str]],
                 rows: Sequence[Sequence[str]]) -> None:
     """Rewrite `path` atomically, so an interrupted run cannot truncate it."""
     directory = os.path.dirname(os.path.abspath(path))
-    mode = _target_mode(path)
+    mode = target_mode(path)
     fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp",
                                dir=directory)
     try:
@@ -388,6 +403,50 @@ def load_pass2_links(prefix: str, indir: str = ".", verbose: bool = False,
     return target_of, orientation
 
 
+def recovery_sidecar_path(prefix: str, indir: str = ".") -> str:
+    """Where ltrquest.recover_strand publishes its calls for this prefix."""
+    return os.path.join(indir, prefix + RECOVERY_SIDECAR_SUFFIX)
+
+
+def load_recovered_strands(prefix: str, indir: str = ".", verbose: bool = False,
+                           warn_missing: bool = False, called_only: bool = True,
+                           path: Optional[str] = None
+                           ) -> Dict[str, Tuple[str, str]]:
+    """Element key -> (strand, tier) from ltrquest.recover_strand's sidecar.
+
+    The file is only there when the run opted into strand recovery, so its
+    absence is the normal case and returns an empty map. `path` pins the file
+    explicitly the way --consensus-cluster pins the cluster table: a stale
+    sidecar left in a directory by an earlier, recovered run must not quietly
+    re-strand a later run that asked for none.
+
+    `called_only` keeps just the rows that carry a strand, which is what the
+    cascade wants. ltrquest.recover_strand's apply phase asks for the declines
+    too, because a locus it called last time and declines this time still has to
+    be put back the way it found it.
+    """
+    sidecar = path or recovery_sidecar_path(prefix, indir)
+    if not os.path.isfile(sidecar):
+        if warn_missing:
+            warn(f"no strand-recovery sidecar at {os.path.basename(sidecar)}")
+        return {}
+
+    header, rows = read_table(sidecar)
+    cols = Columns.of(header_names(header))
+    out: Dict[str, Tuple[str, str]] = {}
+    for row in rows:
+        if not row:
+            continue
+        strand = cols.get(row, "strand", UNKNOWN)
+        if called_only and strand not in FLIP:
+            continue
+        out[row[0]] = (strand, cols.get(row, "source", UNKNOWN))
+    if verbose:
+        called = sum(1 for value in out.values() if value[0] in FLIP)
+        log(f"recovered: {called} strand(s) from {os.path.basename(sidecar)}")
+    return out
+
+
 # -----------------------------
 # Strand cascade
 # -----------------------------
@@ -427,7 +486,9 @@ def resolve_strands(elements: Dict[str, ElementInfo],
                     tesorter: Dict[str, str],
                     target_of: Dict[str, str],
                     orientation: Dict[Tuple[str, str], str],
-                    verbose: bool = False
+                    verbose: bool = False,
+                    *,
+                    recovered: Optional[Dict[str, Tuple[str, str]]] = None
                     ) -> Tuple[Dict[str, str], Dict[str, str]]:
     """Run the strand cascade.
 
@@ -435,6 +496,9 @@ def resolve_strands(elements: Dict[str, ElementInfo],
     drives tier 2, which needs per-element evidence. Tiers 1 and 3 operate on the
     whole pool, so a pass-2 target that is not itself an output element can still
     donate its strand.
+
+    `recovered` is ltrquest.recover_strand's sidecar, the optional fourth tier.
+    It is keyword-only because both existing callers pass `verbose` positionally.
 
     Returns (key -> '+'/'-', key -> tier name).
     """
@@ -468,14 +532,36 @@ def resolve_strands(elements: Dict[str, ElementInfo],
         if not added:
             break
 
+    # Tier 4, only when the run opted into ltrquest.recover_strand. It sits last
+    # so it can never overrule a call the first three tiers were able to make;
+    # it only fills what they left at '.'. Distinct from the family-orientation
+    # tier described at the top of this module, which was tried and removed:
+    # that one transferred within a family regardless of evidence, while this
+    # one transfers only where independent alignment views agree.
+    for key, (value, tier) in (recovered or {}).items():
+        if key in strand or value not in FLIP:
+            continue
+        strand[key] = value
+        source[key] = tier
+
     if verbose:
-        tiers = defaultdict(int)
-        for key in elements:
-            tiers[source.get(key, "unknown")] += 1
         log("strand tiers: " + ", ".join(
-            f"{name}={tiers[name]}"
-            for name in ("tesorter", "domain_order", "pass2", "unknown")))
+            f"{name}={count}" for name, count in count_tiers(elements, source).items()))
     return strand, source
+
+
+def count_tiers(elements: Dict[str, ElementInfo],
+                source: Dict[str, str]) -> Dict[str, int]:
+    """How many of `elements` each tier resolved, plus the unresolved remainder.
+
+    Seeded from STRAND_TIERS so every tier is reported even at zero, and so a
+    tier added to the cascade cannot go missing from the log.
+    """
+    tiers = dict.fromkeys((*STRAND_TIERS, "unknown"), 0)
+    for key in elements:
+        name = source.get(key, "unknown")
+        tiers[name] = tiers.get(name, 0) + 1
+    return tiers
 
 
 # -----------------------------
@@ -700,7 +786,8 @@ def write_annotated_table(table: DepthTable,
 # -----------------------------
 def annotate(prefix: str, indir: str = ".", verbose: bool = False,
              consensus_cluster: Optional[str] = None,
-             family_prefix: Optional[str] = None) -> int:
+             family_prefix: Optional[str] = None,
+             recovered_strands: Optional[str] = None) -> int:
     tables = discover_depth_tables(prefix, indir)
     if not tables:
         print(f"[ltr_annotate] ERROR: no {prefix}_depth<N>[_clean]_ltr.tsv found "
@@ -717,8 +804,16 @@ def annotate(prefix: str, indir: str = ".", verbose: bool = False,
     family_by_name, family_by_coord = load_families(
         prefix, indir, verbose,
         consensus_cluster=consensus_cluster, family_prefix=family_prefix)
+    # Only when a sidecar was named. An explicitly named one that is not there
+    # is worth saying so about; a run that asked for no recovery has none, and
+    # that is silent.
+    recovered = {}
+    if recovered_strands:
+        recovered = load_recovered_strands(prefix, indir, verbose,
+                                           warn_missing=True,
+                                           path=recovered_strands)
     strand, source = resolve_strands(elements, tesorter, target_of, orientation,
-                                     verbose)
+                                     verbose, recovered=recovered)
 
     total_rows = 0
     total_skipped = 0
@@ -728,12 +823,10 @@ def annotate(prefix: str, indir: str = ".", verbose: bool = False,
         total_rows += written
         total_skipped += skipped
 
-    tiers = defaultdict(int)
-    for key in elements:
-        tiers[source.get(key, "unknown")] += 1
-    log(f"strand: {tiers['tesorter']} tesorter, {tiers['domain_order']} "
-        f"domain_order, {tiers['pass2']} pass2, {tiers['unknown']} unknown "
-        f"({len(elements)} elements)")
+    tiers = count_tiers(elements, source)
+    log("strand: "
+        + ", ".join(f"{tiers[name]} {name}" for name in (*STRAND_TIERS, "unknown"))
+        + f" ({len(elements)} elements)")
     hits = [lookup_family(info.name, key, family_by_name, family_by_coord)
             for key, info in elements.items()]
     assigned = [f for f in hits if f is not None]
@@ -766,6 +859,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--family-prefix", default=None,
                         help="Namespace for family labels (<NAME>_fam00001). "
                              "Default: --prefix.")
+    parser.add_argument("--recovered-strands", default=None,
+                        help="ltrquest.recover_strand sidecar to read as the "
+                             "fourth strand tier. Pinned explicitly rather than "
+                             "globbed, so a sidecar left behind by an earlier "
+                             "recovered run cannot re-strand this one.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Per-step progress and per-file counts")
     args = parser.parse_args(argv)
@@ -775,7 +873,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               file=sys.stderr)
         return 1
     return annotate(args.prefix, args.indir, args.verbose,
-                    args.consensus_cluster, args.family_prefix)
+                    args.consensus_cluster, args.family_prefix,
+                    args.recovered_strands)
 
 
 if __name__ == "__main__":

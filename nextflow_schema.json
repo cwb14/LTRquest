@@ -94,6 +94,20 @@
                     "help_text": "Forwarded to Kmer2LTR's consensus and internal clustering as --min-seq-id. Lower values merge more distant elements into one family.",
                     "fa_icon": "fas fa-object-group"
                 },
+                "strand_recovery": {
+                    "type": "string",
+                    "enum": ["conservative", "balanced", "sensitive"],
+                    "description": "Recover strand for the LTR-RTs the annotator's cascade leaves unstranded.",
+                    "help_text": "Off unless set. Orientation is transferred onto an unstranded element from the elements that already carry a strand, using dc-megablast and minimap2 views of the whole element and of the internal region between the LTRs; disagreement between views vetoes the locus. Measured against LTRquest's own tesorter strand over 3616 elements, conservative recovers 58% at 0.19% disagreement, balanced 79% at 0.70%, sensitive 84% at 1.06%. Recovered elements read strand_source=homology in the GFF3, and their depth-FASTA records are stored in coding sense like TEsorter2-called ones.",
+                    "fa_icon": "fas fa-compass"
+                },
+                "strand_recovery_ppt": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Add the polypurine-tract fallback to strand recovery.",
+                    "help_text": "Covers loci homology cannot reach, at roughly 93% accuracy on real genomes, so it is off by default. No effect unless --strand_recovery is set.",
+                    "fa_icon": "fas fa-compass"
+                },
                 "skip_plots": {
                     "type": "boolean",
                     "description": "Skip the structure PDFs, summary PDF and TEGV browser.",

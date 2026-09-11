@@ -36,6 +36,10 @@ def helpMessage() {
       --fp_mask_threshold     False-positive element fraction above which the run
                               is flagged (default: ${params.fp_mask_threshold})
       --family_prefix         Names the shared family namespace (default: ${params.family_prefix})
+      --strand_recovery       Recover strand for the LTR-RTs the annotator leaves
+                              unstranded: conservative|balanced|sensitive
+                              (off by default)
+      --strand_recovery_ppt   Add the polypurine-tract fallback to it
       --skip_plots            Skip the plotting stage
 
     Profiles:
