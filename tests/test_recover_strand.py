@@ -39,7 +39,6 @@ from ltrquest.recover_strand import (
     write_sidecar,
 )
 
-
 # The depth-table schema, trimmed to the columns this stage reads and writes.
 # nest_status stays last, which ltrquest.reconcile treats as a hard invariant.
 HEADER = ("#name\tltr5_start\tltr5_end\tltr3_start\tltr3_end\t"
@@ -582,7 +581,8 @@ class TestBuildWorkFastas:
         out, name = {}, None
         for line in open(path):
             if line.startswith(">"):
-                name = line[1:].strip(); out[name] = []
+                name = line[1:].strip()
+                out[name] = []
             else:
                 out[name].append(line.strip())
         return {k: "".join(v) for k, v in out.items()}
