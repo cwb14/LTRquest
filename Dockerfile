@@ -25,8 +25,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Pinned so a rebuild six months from now produces the same tools.
-ARG KMER2LTR_REF=4ec6a3c8ae3877160a991d3fd56564a702c92235
-ARG TESORTER2_REF=4997e92f175f819b748866f4e66cc3c9f6116f50
+ARG KMER2LTR_REF=aa25f46262a32826c1fabf4a01977c032cd692dd
+ARG TESORTER2_REF=cc9b195ca25dbe63555d45af2b3e9380b697080b
 ARG TRFMOD_REF=3e891db310124f7e5f7a630a1c006650be9d1f3a
 ARG SDUST_REF=89c42cb41ba598e9cfa07c2ef99ae8c08f769b3e
 
