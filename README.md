@@ -255,6 +255,10 @@ reports ages — just ages computed from the wrong clock, with nothing in the
 output to flag that they are. Set it to a rate that describes your organism;
 `7e-9` is the usual choice for *Arabidopsis thaliana*.
 
+Several genomes (`--genome A.fa B.fa`) share one family vocabulary. To add one
+later, re-run in the same directory with the longer list: genomes already
+detected are reused, and families are rebuilt across all of them.
+
 ## A worked example
 
 Run the quickstart without `--max-rounds` and LTRquest iterates, masking between

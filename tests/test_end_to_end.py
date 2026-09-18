@@ -20,6 +20,7 @@ It skips itself, rather than failing, when the toolchain is not on PATH.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import os
 import shutil
 import subprocess
@@ -187,3 +188,136 @@ def test_the_family_column_was_filled_in(run_dir):
     assert any(f.startswith("athal_slice_LTRs_fam") for f in families), (
         f"no family labels were assigned: {sorted(families)[:5]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Adding a genome to an earlier multi-genome run
+# ---------------------------------------------------------------------------
+
+# Three 1 Mb windows of chr2, each holding enough LTR-RTs to survive one round.
+WINDOWS = {"a": 2_000_000, "b": 3_500_000, "c": 5_000_000}
+WINDOW_BP = 1_000_000
+
+
+def _write_windows(athal_genome, dirs):
+    end = max(WINDOWS.values()) + WINDOW_BP
+    chunks, total = [], 0
+    with gzip.open(athal_genome, "rt") as src:
+        src.readline()
+        for line in src:
+            if line.startswith(">") or total >= end:
+                break
+            chunks.append(line.strip())
+            total += len(chunks[-1])
+    seq = "".join(chunks)
+    with gzip.open(athal_genome.parent / "Athal.pep.gz", "rt") as src:
+        proteins = "".join(line for _, line in zip(range(40_000), src))
+    for d in dirs:
+        for name, start in WINDOWS.items():
+            window = seq[start:start + WINDOW_BP]
+            body = "\n".join(window[i:i + 60] for i in range(0, len(window), 60))
+            (d / f"{name}.fa").write_text(f">chr_{name}\n{body}\n")
+        (d / "prot.fa").write_text(proteins)
+
+
+def _ltrquest(cwd, *genomes, extra=()):
+    return subprocess.run(
+        ["ltrquest", "--genome", *genomes, "--proteins", "prot.fa",
+         "--threads", _threads(), "--max-rounds", "1", "--terminate_count", "1",
+         "--no-plots", *extra],
+        cwd=cwd, capture_output=True, text=True,
+    )
+
+
+def _require(result):
+    if result.returncode != 0:
+        pytest.fail(f"ltrquest exited {result.returncode}\n--- stderr ---\n{result.stderr[-4000:]}")
+    return result
+
+
+def _detection_digests(work, prefixes):
+    """sha256 of every round table and work-directory file of these genomes."""
+    return {
+        str(path.relative_to(work)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for prefix in prefixes
+        for top in sorted(work.glob(f"{prefix}_r*"))
+        for path in ([top] if top.is_file() else sorted(top.rglob("*")))
+        if path.is_file()
+    }
+
+
+def _families(tsv):
+    lines = [ln for ln in tsv.read_text().splitlines() if ln]
+    idx = lines[0].lstrip("#").split("\t").index("family")
+    return sorted((ln.split("\t")[0], ln.split("\t")[idx]) for ln in lines[1:])
+
+
+def _gff3_families(gff3):
+    found = []
+    for line in gff3.read_text().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        cols = line.split("\t")
+        attrs = dict(kv.split("=", 1) for kv in cols[8].split(";") if "=" in kv)
+        if "family" in attrs:
+            found.append((cols[0], cols[2], cols[3], cols[4],
+                          *(attrs.get(k) for k in ("family", "family_rep", "family_size",
+                                                   "family_clades"))))
+    return sorted(found)
+
+
+@pytest.fixture(scope="module")
+def incremental(tmp_path_factory, toolchain, athal_genome):
+    """Genomes a+b, then a+b+c in the same directory; and a+b+c from scratch."""
+    root = tmp_path_factory.mktemp("incremental")
+    inc, fresh = root / "inc", root / "fresh"
+    inc.mkdir()
+    fresh.mkdir()
+    _write_windows(athal_genome, (inc, fresh))
+
+    _require(_ltrquest(inc, "a.fa", "b.fa"))
+    before = _detection_digests(inc, ("a_LTRs", "b_LTRs"))
+    second = _require(_ltrquest(inc, "a.fa", "b.fa", "c.fa"))
+    _require(_ltrquest(fresh, "a.fa", "b.fa", "c.fa"))
+    return inc, fresh, second.stdout, before
+
+
+def test_adding_a_genome_detects_only_that_genome(incremental):
+    _inc, _fresh, stdout, _before = incremental
+    assert "reusing:     a_LTRs b_LTRs" in stdout
+    assert "detecting:   c_LTRs" in stdout
+
+
+def test_reused_detection_files_are_untouched(incremental):
+    inc, _fresh, _stdout, before = incremental
+    assert before, "the first run left no detection files"
+    assert _detection_digests(inc, ("a_LTRs", "b_LTRs")) == before
+
+
+def test_every_genome_has_a_detection_record(incremental):
+    inc, _fresh, _stdout, _before = incremental
+    for prefix in ("a_LTRs", "b_LTRs", "c_LTRs"):
+        assert (inc / f"{prefix}.detect.json").is_file()
+
+
+def test_families_match_a_run_from_scratch(incremental):
+    inc, fresh, _stdout, _before = incremental
+    tables = sorted(p.name for p in fresh.glob("*_depth*_clean_ltr.tsv"))
+    assert tables
+    assert sorted(p.name for p in inc.glob("*_depth*_clean_ltr.tsv")) == tables
+    for name in tables:
+        assert _families(inc / name) == _families(fresh / name), name
+
+
+def test_gff3_family_attributes_match_a_run_from_scratch(incremental):
+    inc, fresh, _stdout, _before = incremental
+    for prefix in ("a_LTRs", "b_LTRs", "c_LTRs"):
+        name = f"{prefix}_all_depth_LTR_cleaned.gff3"
+        assert _gff3_families(inc / name) == _gff3_families(fresh / name), name
+
+
+def test_a_changed_detection_setting_is_refused(incremental):
+    inc, _fresh, _stdout, _before = incremental
+    result = _ltrquest(inc, "a.fa", "b.fa", "c.fa", extra=("--max-rounds", "2"))
+    assert result.returncode != 0
+    assert "max_rounds: 1 before, 2 now" in result.stderr

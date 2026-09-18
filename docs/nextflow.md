@@ -47,6 +47,10 @@ directory, so a sheet and its data stay portable as a unit. Absolute paths and
 > awk '/^>/{sub(/^>/,">Aly_")}1' Alyrata.fa > Alyrata.renamed.fa
 > ```
 
+To add a genome later, add its row and re-run with `-resume`: the genomes
+already detected are reused from `work/`, and only the pooled family stages
+re-run for all of them.
+
 ## Profiles
 
 | Profile | |

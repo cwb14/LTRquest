@@ -104,6 +104,13 @@
 #   Sequence IDs must be unique across genomes -- pooled clustering keys
 #   elements on 'chrom:start-end', so a shared seqid would cross-assign
 #   families and cross-purge real elements. Checked before any work starts.
+#   Adding a genome later: each finished genome gets a {P_g}.detect.json
+#   record (ltrquest.record). Re-running in the same directory with more
+#   genomes reuses every genome whose record still matches -- same genome,
+#   same detection settings -- and detects only the rest; phases (2) and (3)
+#   then re-run over all of them. A record that no longer matches stops the
+#   run; --redetect ignores the records. A reused genome is never FP-masked
+#   or re-detected: its _clean_ tables are rebuilt from the new pooled call.
 
 set -euo pipefail
 
@@ -154,6 +161,10 @@ FP_MASK_THRESHOLD="0.10"   # user-tunable: FP-element fraction above which the
 DEV_KEEP_FP_ROUNDS=false   # hidden dev flag: keep every FP-round staging dir
 MAX_FP_ROUNDS=10           # hidden safety cap on automatic FP-masking re-runs
                            # (overridable via --dev-max-fp-rounds)
+
+# Reuse of genomes an earlier run in this directory already detected
+REDETECT=false             # --redetect: ignore every <prefix>.detect.json
+declare -a FROZEN=()       # per genome: true = reused, not detected by this run
 
 # Storage for extra ltrquest.detect arg directives
 # Each entry is tab-separated: "FROMROUND\tKEY\tVALUE\tIS_BOOL"
@@ -229,7 +240,9 @@ Required:
                         pooled for a single clustering pass, so the `family`
                         column means the same thing in every genome's output.
                         Sequence IDs must be unique across genomes (checked
-                        up front, before any work starts).
+                        up front, before any work starts). A genome an earlier
+                        run in this directory detected with the same settings
+                        is reused rather than detected again.
 
 Optional:
   --proteins            Protein FASTA for ltrquest.detect. One file, shared by
@@ -269,6 +282,8 @@ Optional:
   --no-plots            Skip the post-completion plotting stage (structure
                         PDFs, summary PDF, TEGV HTML into <out_prefix>_plots/).
                         Default: run it.
+  --redetect            Detect every genome again, ignoring the
+                        <prefix>.detect.json records an earlier run left here.
   --strand-recovery     Recover strand for the LTR-RTs the usual cascade leaves
                         unstranded, by transferring orientation from the elements
                         that already carry one. Off by default. One of:
@@ -586,9 +601,21 @@ resolve_merged_tools_dir() {
 run_fp_stage() {
   local cons="$1" int="$2" cons_fa="$3"; shift 3
   local -a dtsvs=( "$@" )
-  local first="${OUT_PREFIXES[0]}"
-  local log="${first}_fpcheck.log"
-  local i p frac
+  local -a maskable=() mask_opts=()
+  local i p frac log rc=0
+
+  # A reused genome's detection is final: it shares the pooled call (its
+  # _clean_ tables are rebuilt from it) but is never masked for a re-run.
+  for i in "${!OUT_PREFIXES[@]}"; do
+    [[ "${FROZEN[$i]:-false}" == true ]] || maskable+=( "${OUT_PREFIXES[$i]}" )
+  done
+  if (( ${#maskable[@]} > 0 )); then
+    log="${maskable[0]}_fpcheck.log"
+    mask_opts=( --genome "${maskable[0]}.input_genome.fa"
+                --masked-out "${maskable[0]}_FP_masked.fa" )
+  else
+    log="${RUN_PREFIX}_fpcheck.log"
+  fi
 
   # stderr is teed to $log via an fd swap, NOT process substitution: bash does
   # not wait for >(...) to finish, so the log would still be empty when the
@@ -600,12 +627,17 @@ run_fp_stage() {
       --ltr-fasta "$cons_fa" \
       --domains-tsv "${dtsvs[@]}" \
       -o "${RUN_PREFIX}_fpcheck" \
-      --genome "${first}.input_genome.fa" \
-      --masked-out "${first}_FP_masked.fa" \
+      "${mask_opts[@]}" \
       --threads "$THREADS" \
       --fp-mask-threshold "$FP_MASK_THRESHOLD" \
-      2>&1 1>&3 | tee "$log" >&2; } 3>&1
+      2>&1 1>&3 | tee "$log" >&2; } 3>&1 || rc=$?
   set +x
+  # Exit 2 with [ACTION REQUIRED] is ltrquest.flag_fp asking for a genome to
+  # mask; with every genome reused there is none to give it.
+  if (( rc != 0 )) && ! { (( rc == 2 && ${#maskable[@]} == 0 )) \
+                          && grep -q 'ACTION REQUIRED' "$log"; }; then
+    die "ltrquest.flag_fp failed (exit ${rc}); see ${log}"
+  fi
 
   frac="$(sed -n 's/^\[INFO\] FP fraction: [0-9]*\/[0-9]* = \([0-9.]*\).*/\1/p' "$log" | tail -1)"
   if [[ -z "$frac" ]] || ! awk -v f="$frac" -v t="$FP_MASK_THRESHOLD" \
@@ -614,9 +646,14 @@ run_fp_stage() {
     return 0
   fi
 
-  echo "FP fraction ${frac} exceeded ${FP_MASK_THRESHOLD}; masking each genome."
-  for (( i=1; i<N_GENOMES; i++ )); do
-    p="${OUT_PREFIXES[$i]}"
+  if (( ${#maskable[@]} == N_GENOMES )); then
+    echo "FP fraction ${frac} exceeded ${FP_MASK_THRESHOLD}; masking each genome."
+  else
+    echo "WARNING: FP fraction ${frac} exceeded ${FP_MASK_THRESHOLD}. Genomes reused from an" >&2
+    echo "  earlier run are not masked or re-detected, only their _clean_ tables rebuilt;" >&2
+    echo "  pass --redetect to include them." >&2
+  fi
+  for p in "${maskable[@]:1}"; do
     set -x
     { "${FLAG_FP[@]}" \
         --consensus-cluster "$cons" \
@@ -689,7 +726,13 @@ run_annotation_stage() {
     # passed by path, never globbed, so one left behind by an earlier recovered
     # run cannot re-strand this one.
     rec_opts=()
-    if [[ -n "$STRAND_RECOVERY" ]]; then
+    if [[ -n "$STRAND_RECOVERY" && "${FROZEN[$i]:-false}" == true ]]; then
+      # A reused genome keeps the calls it was detected with. They are drawn
+      # from its own raw elements, which the new pool does not change.
+      if [[ -s "${p}_strand_recovery.tsv" ]]; then
+        rec_opts=( --recovered-strands "${p}_strand_recovery.tsv" )
+      fi
+    elif [[ -n "$STRAND_RECOVERY" ]]; then
       # The ORIGINAL genome, not {p}.input_genome.fa: from FP attempt 2 onward
       # that symlink points at the hard-masked FASTA, and aligning against its
       # N-runs would degrade the very homology signal this stage depends on.
@@ -757,9 +800,12 @@ run_annotation_stage() {
 run_merged_stage() {
   local all_ltr_fa="${RUN_PREFIX}_all_ltr.fa"
   local p cons_fa
-  local -a depth_fas=() depth_tsvs=() dfas=() dtsvs=()
+  local -a depth_fas=() depth_tsvs=() dfas=() dtsvs=() pool=()
 
-  for p in "${OUT_PREFIXES[@]}"; do
+  # Pool in name order, not --genome order, so the families a set of genomes
+  # gets do not depend on the order they were listed or added in.
+  mapfile -t pool < <(printf '%s\n' "${OUT_PREFIXES[@]}" | LC_ALL=C sort)
+  for p in "${pool[@]}"; do
     depth_tables_for "$p" fa  dfas
     depth_tables_for "$p" tsv dtsvs
     depth_fas+=( "${dfas[@]}" )
@@ -890,6 +936,97 @@ carry_forward_genome() {
   echo "  reusing detection outputs for ${prefix} (input unchanged)"
 }
 
+# Every setting that shapes what detection finds in a genome. A genome is only
+# reused when it was detected under exactly these, so one pool never mixes
+# settings. Threads, plotting and naming do not change the elements found.
+detection_settings() {
+  local -n _ds_out="$1"
+  local d directives=""
+  for d in "${EXTRA_ARG_DIRECTIVES[@]}"; do
+    directives+="${d//$'\t'/,};"
+  done
+  _ds_out=( --setting "max_rounds=${MAX_ROUNDS}"
+            --setting "terminate_count=${TERMINATE_COUNT}"
+            --setting "trf=${RUN_TRF}"
+            --setting "sdust=${RUN_SDUST}"
+            --setting "mutation_rate=${MUTATION_RATE}"
+            --setting "keep_weak_hmm_pass2=${KEEP_WEAK_HMM_PASS2}"
+            --setting "pass2_aligner=${PASS2_ALIGNER}"
+            --setting "detect_args=${directives}"
+            --setting "fp_mask_threshold=${FP_MASK_THRESHOLD}"
+            --setting "strand_recovery=${STRAND_RECOVERY}"
+            --setting "strand_recovery_ppt=${STRAND_RECOVERY_PPT}" )
+  if [[ "$RUN_SDUST" == true ]]; then
+    _ds_out+=( --setting "sdust_args=${SDUST_ARGS}"
+               --setting "max_dust_frac=${MAX_DUST_FRAC}" )
+  fi
+}
+
+# Decide, before any work, which genomes an earlier run in this directory
+# already detected. A matching record means the genome is reused as it stands
+# (FROZEN); one that no longer matches stops the run here, not hours in.
+plan_reuse() {
+  local dir="$1" i p verdict rec name
+  local -a settings=() prot=() reused=() fresh=()
+  local -A in_run=()
+  detection_settings settings
+  [[ -n "${abs_proteins:-}" ]] && prot=( --proteins "$abs_proteins" )
+
+  for i in "${!GENOMES[@]}"; do
+    p="${OUT_PREFIXES[$i]}"
+    in_run["$p"]=1
+    FROZEN[$i]=false
+    if [[ "$REDETECT" == true ]]; then
+      fresh+=( "$p" )
+      continue
+    fi
+    verdict="$("${RECORD[@]}" check --indir "$dir" --prefix "$p" \
+                 --genome "${abs_genomes[$i]}" "${prot[@]}" "${settings[@]}")" \
+      || die "Cannot reuse ${p}, detected here by an earlier run (see above).
+  Re-run with the inputs it was detected from, delete ${p}.detect.json to
+  detect just ${p} again, or pass --redetect to detect every genome again."
+    if [[ "$verdict" == reuse ]]; then
+      FROZEN[$i]=true
+      reused+=( "$p" )
+    else
+      fresh+=( "$p" )
+    fi
+  done
+
+  if (( ${#reused[@]} > 0 )); then
+    echo "  reusing:     ${reused[*]}"
+    echo "  detecting:   ${fresh[*]:-(none)}"
+  fi
+
+  shopt -s nullglob
+  for rec in "${dir}"/*.detect.json; do
+    name="$(basename "$rec" .detect.json)"
+    if [[ -z "${in_run[$name]+_}" ]]; then
+      echo "WARNING: ${name} (detected here earlier) is not in this run, so its family" >&2
+      echo "  labels are not comparable with this run's." >&2
+    fi
+  done
+  shopt -u nullglob
+}
+
+# Stage a reused genome from the run directory: exactly the files its record
+# names. Directories are hardlinked and files copied, as in
+# carry_forward_genome and for the same reason.
+carry_recorded_genome() {
+  local src="$1" adir="$2" prefix="$3" names name
+  names="$("${RECORD[@]}" outputs --indir "$src" --prefix "$prefix")" \
+    || die "Could not read the detection record for ${prefix} in ${src}"
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    if [[ -d "${src}/${name}" ]]; then
+      cp -al "${src}/${name}" "${adir}/"
+    else
+      cp -a "${src}/${name}" "${adir}/"
+    fi
+  done <<< "$names"
+  echo "  reusing ${prefix} (detected by an earlier run)"
+}
+
 # Top-level driver. Runs one or more fully-isolated attempts, each in its own
 # staging directory. An attempt detects every genome (sequentially, skipping any
 # whose input is unchanged), then runs the pooled merged stage over all of them.
@@ -904,15 +1041,6 @@ run_fp_orchestrator() {
   [[ -n "$PROTEINS" ]] && abs_proteins="$(abspath "$PROTEINS")"
 
   staging="${final_dir}/${RUN_PREFIX}_FPstaging"
-  rm -rf "$staging"                 # defensive: clear a stale/partial staging dir
-  mkdir -p "$staging"
-
-  echo ""
-  echo "############################################################"
-  echo "FP-correction orchestrator: up to ${MAX_FP_ROUNDS} attempt(s)"
-  echo "  genomes:     ${N_GENOMES}"
-  echo "  staging dir: ${staging}"
-  echo "############################################################"
 
   local attempt=1 final_adir="" prev_adir="" adir rc i p is_final any_rerun
   local -a cur_genome=() reuse=() abs_genomes=()
@@ -921,6 +1049,17 @@ run_fp_orchestrator() {
     cur_genome+=( "${abs_genomes[$i]}" )
     reuse+=( false )
   done
+
+  echo ""
+  echo "############################################################"
+  echo "FP-correction orchestrator: up to ${MAX_FP_ROUNDS} attempt(s)"
+  echo "  genomes:     ${N_GENOMES}"
+  echo "  staging dir: ${staging}"
+  plan_reuse "$final_dir"
+  echo "############################################################"
+
+  rm -rf "$staging"                 # defensive: clear a stale/partial staging dir
+  mkdir -p "$staging"
 
   while (( attempt <= MAX_FP_ROUNDS )); do
     adir="${staging}/round${attempt}"
@@ -934,6 +1073,10 @@ run_fp_orchestrator() {
       p="${OUT_PREFIXES[$i]}"
       ln -sf "${cur_genome[$i]}" "${adir}/${p}.input_genome.fa"
 
+      if [[ "${FROZEN[$i]}" == true ]]; then
+        carry_recorded_genome "$final_dir" "$adir" "$p"
+        continue
+      fi
       if [[ "${reuse[$i]}" == true && -n "$prev_adir" ]]; then
         carry_forward_genome "$prev_adir" "$adir" "$p"
         continue
@@ -966,7 +1109,8 @@ run_fp_orchestrator() {
     any_rerun=false
     for i in "${!GENOMES[@]}"; do
       p="${OUT_PREFIXES[$i]}"
-      if ( cd "$adir" && genome_needs_rerun "$p" "${p}_fpcheck.log" ); then
+      if [[ "${FROZEN[$i]}" != true ]] \
+           && ( cd "$adir" && genome_needs_rerun "$p" "${p}_fpcheck.log" ); then
         reuse[$i]=false; any_rerun=true
         echo "FP round ${attempt}: ${p} was masked -> re-detecting next attempt."
       else
@@ -1008,9 +1152,41 @@ run_fp_orchestrator() {
   for p in "${OUT_PREFIXES[@]}"; do rm -rf "${final_adir}/${p}_tools"; done
   rm -rf "${final_adir}/${RUN_PREFIX}_tools"
 
+  # A reused genome's round tables and work dirs are read, never rewritten, so
+  # the originals stay put rather than being replaced by their staged copies.
+  # A genome detected by this run replaces what an earlier run left for it
+  # (ltrquest.record clear). FP logs describe one pool, so an earlier run's
+  # are cleared for everyone.
+  rm -f "${final_dir}/${RUN_PREFIX}_fpcheck.log"
+  for i in "${!GENOMES[@]}"; do
+    p="${OUT_PREFIXES[$i]}"
+    rm -f "${final_dir}/${p}_fpcheck.log"
+    if [[ "${FROZEN[$i]}" == true ]]; then
+      rm -rf "${final_adir}/${p}"_r[0-9]*
+    else
+      "${RECORD[@]}" clear --indir "$final_dir" --prefix "$p" > /dev/null \
+        || die "Could not clear the earlier outputs of ${p} in ${final_dir}"
+    fi
+  done
+
   echo ""
   echo "Promoting final outputs: ${final_adir} -> ${final_dir}"
   promote_fp_outputs "$final_adir" "$final_dir"
+
+  # Records last, once every output they list is in place: a run that dies
+  # before here leaves no record, and the genome is simply detected again.
+  local -a record_settings=() record_prot=() record_masked=()
+  detection_settings record_settings
+  [[ -n "${abs_proteins:-}" ]] && record_prot=( --proteins "$abs_proteins" )
+  for i in "${!GENOMES[@]}"; do
+    [[ "${FROZEN[$i]}" == true ]] && continue
+    record_masked=()
+    [[ "${cur_genome[$i]}" != "${abs_genomes[$i]}" ]] && record_masked=( --fp-masked )
+    "${RECORD[@]}" write --indir "$final_dir" --prefix "${OUT_PREFIXES[$i]}" \
+      --genome "${abs_genomes[$i]}" "${record_prot[@]}" "${record_settings[@]}" \
+      "${record_masked[@]}" \
+      || die "Could not write the detection record for ${OUT_PREFIXES[$i]}"
+  done
 
   if [[ "$DEV_KEEP_FP_ROUNDS" == true ]]; then
     echo "[dev] --dev-keep-fp-rounds set: retaining staging dir ${staging}"
@@ -1081,6 +1257,7 @@ while [[ $# -gt 0 ]]; do
     --strand-recovery-ppt) STRAND_RECOVERY_PPT=true; shift;;
     --fp-mask-threshold) FP_MASK_THRESHOLD="${2:-}"; shift 2;;
     --no-plots) RUN_PLOTS=false; shift;;
+    --redetect) REDETECT=true; shift;;
     --dev-keep-fp-rounds) DEV_KEEP_FP_ROUNDS=true; shift;;      # hidden dev flag
     --dev-max-fp-rounds) MAX_FP_ROUNDS="${2:-}"; shift 2;;       # hidden dev flag
     --detect-args)
@@ -1212,22 +1389,13 @@ ANNOTATE=(  "$PY" -m ltrquest.annotate  )
 GFF3=(      "$PY" -m ltrquest.gff3      )
 FLAG_FP=(   "$PY" -m ltrquest.flag_fp   )
 RECOVER=(   "$PY" -m ltrquest.recover_strand )
-
-# ----------------------------
-# Orchestrator vs. worker
-# ----------------------------
-# The top-level invocation orchestrates the (possibly iterated) FP-masking
-# re-runs, each isolated in its own staging dir. Every attempt re-execs this
-# script with _LTRQUEST_WORKER=1 set, which skips orchestration and
-# runs exactly one detection pipeline in the current (isolated) directory.
-if [[ -z "${_LTRQUEST_WORKER:-}" ]]; then
-  run_fp_orchestrator
-  exit $?
-fi
+RECORD=(    "$PY" -m ltrquest.record    )
 
 # ----------------------------
 # Config: IUPAC codes to use for successive rounds (exclude V)
 # ----------------------------
+# Resolved before the orchestrator branches off: the round cap is one of the
+# settings a genome's detection record holds.
 IUPAC_SEQ=(N R D Y S W K M B H)   # 10 codes => up to 10 rounds
 IUPAC_MAX="${#IUPAC_SEQ[@]}"       # 10
 
@@ -1241,6 +1409,18 @@ if [[ -n "$MAX_ROUNDS_OVERRIDE" ]]; then
   fi
 else
   MAX_ROUNDS="$IUPAC_MAX"
+fi
+
+# ----------------------------
+# Orchestrator vs. worker
+# ----------------------------
+# The top-level invocation orchestrates the (possibly iterated) FP-masking
+# re-runs, each isolated in its own staging dir. Every attempt re-execs this
+# script with _LTRQUEST_WORKER=1 set, which skips orchestration and
+# runs exactly one detection pipeline in the current (isolated) directory.
+if [[ -z "${_LTRQUEST_WORKER:-}" ]]; then
+  run_fp_orchestrator
+  exit $?
 fi
 
 echo "Max rounds set to: ${MAX_ROUNDS}"

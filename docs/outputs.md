@@ -58,6 +58,7 @@ Occasionally useful:
 | `--out_prefix` | Output prefix (default: `<genome>_LTRs`). With several genomes it names the shared family namespace instead — see [§5](#5-multiple-genomes-shared-family-names). |
 | `--terminate_count` | Stop iterating when a round finds fewer than this many elements (default 100). |
 | `--run-sdust` | Drop candidates made mostly of low-complexity sequence, early. Off by default. |
+| `--redetect` | Detect every genome again instead of reusing ones detected earlier in this directory — see [§5](#5-multiple-genomes-shared-family-names). |
 
 ## 4. Primary outputs: `depth<N>_clean_ltr.{tsv,fa}`
 
@@ -216,6 +217,16 @@ names only the shared pool — `--out_prefix Arabidopsis` gives
 single genome the two are the same thing, so nothing changes.
 
 One `--proteins` file serves every genome.
+
+**Adding a genome later.** Re-run in the same directory with the longer list
+(`--genome A.fa B.fa C.fa`). Genomes already detected there are reused (a
+single-genome re-run too); only `C` is detected. Families, `_clean_` tables and
+GFF3s are then rebuilt for all three, so `A`'s and `B`'s family ids can change.
+Each detected genome leaves a `<prefix>.detect.json`; the run stops if a reused
+genome's FASTA, `--proteins` or detection settings no longer match it. Delete
+that file to redo one genome, or pass `--redetect` to redo all. With
+`--strand-recovery`, reused genomes enter the pool already in coding sense, so
+families can differ slightly from a run from scratch.
 
 > **Sequence IDs must be unique across genomes.** Two files both calling a
 > chromosome `Chr2` are rejected before any work starts: pooled clustering keys

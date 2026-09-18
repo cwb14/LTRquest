@@ -21,6 +21,13 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Added
 
+- Add a genome to an earlier multi-genome run without re-detecting the others:
+  re-run in the same directory with the longer `--genome` list. Each detected
+  genome leaves a `<prefix>.detect.json` (input checksums, detection settings);
+  on any re-run, single-genome included, a genome whose record still matches is
+  reused, and families are rebuilt over all genomes. A mismatch stops the run;
+  `--redetect` ignores the records. Genomes are now pooled in name order, so
+  families no longer depend on the order `--genome` lists them.
 - `--strand-recovery conservative|balanced|sensitive`, off by default, which
   recovers strand for the LTR-RTs the strand cascade leaves at `.`. The
   unstranded element, in genome-forward orientation, is aligned against the

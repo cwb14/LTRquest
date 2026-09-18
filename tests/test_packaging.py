@@ -16,7 +16,7 @@ import pytest
 import ltrquest
 from ltrquest import cli
 
-STAGES = ["detect", "mask", "reconcile", "annotate", "gff3", "recover_strand",
+STAGES = ["detect", "mask", "reconcile", "annotate", "gff3", "recover_strand", "record",
           "plot_struct", "plot_summary", "tegv"]
 CONSOLE_SCRIPTS = ["ltrquest", "ltrquest-plots", "ltrquest-detect", "ltrquest-mask",
                    "ltrquest-reconcile", "ltrquest-annotate", "ltrquest-gff3",
