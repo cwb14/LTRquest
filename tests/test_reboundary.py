@@ -181,6 +181,24 @@ def test_genomes_from_different_family_namespaces_are_refused(tmp_path, k2l_api,
                TOOLS)
 
 
+def test_a_prefix_with_no_clean_tables_is_skipped_not_fatal(tmp_path, k2l_api, mafft):
+    fx = build(tmp_path / "syn_partial")
+    counts = rb.run(str(fx.indir), [fx.prefix, "missing_p"], [str(fx.genome), str(fx.genome)],
+                    rb.Settings(threads=2, mafft=mafft), TOOLS)
+    assert counts.get("extended", 0) == 4
+    e = fx.kind("del_left")
+    assert sidecar(fx)[e.key]["decision"] == "extended"
+    assert not (fx.indir / "missing_p_reboundary.tsv").exists()
+
+
+def test_all_prefixes_empty_raises_systemexit(tmp_path, k2l_api, mafft):
+    genome = tmp_path / "g.fa"
+    genome.write_text(">chr1\nACGT\n")
+    with pytest.raises(SystemExit, match="no _clean_ depth tables"):
+        rb.run(str(tmp_path), ["missing"], [str(genome)], rb.Settings(threads=1, mafft=mafft),
+               TOOLS)
+
+
 def test_a_second_run_extends_nothing_and_the_cli_works(tmp_path, k2l_api, mafft):
     fx = build(tmp_path / "syn_twice")
     args = ["--indir", str(fx.indir), "--prefix", fx.prefix, "--genome", str(fx.genome),

@@ -18,10 +18,10 @@ process LTRQUEST_REBOUNDARY {
     path(genomes, stageAs: 'genomes/g??/*')
 
     output:
-    path("*_depth*_clean_ltr.tsv"), emit: tsv
-    path("*_depth*_clean_ltr.fa") , emit: fasta
-    path("*_reboundary.tsv")      , emit: sidecar
-    path "versions.yml"           , emit: versions
+    path("*_depth*_clean_ltr.tsv", arity: '1..*'), emit: tsv
+    path("*_depth*_clean_ltr.fa" , arity: '1..*'), emit: fasta
+    path("*_reboundary.tsv"      , arity: '1..*'), emit: sidecar
+    path "versions.yml"                          , emit: versions
 
     when:
     task.ext.when == null || task.ext.when

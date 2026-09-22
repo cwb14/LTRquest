@@ -340,10 +340,15 @@ def run(indir: str, prefixes: Sequence[str], genomes: Sequence[str], s: Settings
         if not os.path.isfile(gpath):
             raise SystemExit(f"reboundary: genome not found: {gpath}")
     k2l.api(tools_dir)     # fail here, and clone at most once, before any worker starts
-    tables = {p: load_clean_tables(indir, p) for p in prefixes}
-    for p, t in tables.items():
-        if not t:
-            raise SystemExit(f"reboundary: no {p}_depth<N>_clean_ltr.tsv in {indir}")
+    tables_by_prefix = {p: load_clean_tables(indir, p) for p in prefixes}
+    for p in prefixes:
+        if not tables_by_prefix[p]:
+            warn(f"no {p}_depth<N>_clean_ltr.tsv in {indir}; skipping this genome")
+    kept = [(p, g) for p, g in zip(prefixes, genomes) if tables_by_prefix[p]]
+    if not kept:
+        raise SystemExit(f"reboundary: no _clean_ depth tables for any prefix in {indir}")
+    prefixes, genomes = [p for p, _ in kept], [g for _, g in kept]
+    tables = {p: tables_by_prefix[p] for p in prefixes}
     members = [m for p in prefixes for m in members_from(p, tables[p])]
     families: Dict[str, List[Member]] = defaultdict(list)
     for m in members:
