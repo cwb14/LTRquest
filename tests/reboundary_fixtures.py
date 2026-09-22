@@ -282,3 +282,15 @@ def _row(e: Element) -> List[str]:
         "nest_status": e.nest_status,
     }
     return [vals[c] for c in COLUMNS + TAIL]
+
+
+def members(fx: Fixture):
+    """The fixture's elements as ltr_model.Member objects, as reboundary_io
+    would load them."""
+    from ltrquest.ltr_model import Member
+    return [Member(prefix=fx.prefix, name=e.name, chrom=CHROM, start=e.start,
+                   end=e.end, l1=e.l1, r0=e.r0, strand=e.strand,
+                   orientation="-" if e.strand == "-" else "+", family=e.family,
+                   depth=e.depth, k2p=e.k2p, tsd=e.tsd,
+                   nest_status=e.nest_status)
+            for e in fx.elements]
