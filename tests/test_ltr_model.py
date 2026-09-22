@@ -120,6 +120,20 @@ def test_binomial_tail():
     assert abs(lm.binom_sf(5, 5, 0.5) - 1 / 32) < 1e-12
 
 
+def test_binomial_tail_survives_a_family_with_thousands_of_candidates():
+    # The real failure: math.comb(5000, i) is an int with thousands of digits.
+    assert 0.0 < lm.binom_sf(120, 5000, 0.02) < 1.0
+    assert lm.binom_sf(3000, 5000, 0.02) >= 0.0          # deep tail: underflows to 0, never raises
+    assert lm.binom_sf(120, 5000, 0.02) > lm.binom_sf(160, 5000, 0.02)
+
+
+def test_binomial_tail_still_matches_the_exact_sum_for_small_n():
+    import math as _math
+    for k, n, p in ((3, 20, 0.1), (5, 12, 0.5), (1, 8, 0.01)):
+        exact = sum(_math.comb(n, i) * p ** i * (1 - p) ** (n - i) for i in range(k, n + 1))
+        assert abs(lm.binom_sf(k, n, p) - exact) < 1e-12
+
+
 def test_tsd_enrichment_has_an_explicit_untested_branch():
     assert lm.tsd_enrichment(3, 3, 0.01, min_n=5) == "untested"
     assert lm.tsd_enrichment(6, 8, 0.01, min_n=5) == "pass"

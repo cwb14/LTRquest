@@ -454,11 +454,28 @@ def ratio_ok(model: Model, max_ratio: float) -> bool:
 
 
 def binom_sf(k: int, n: int, p: float) -> float:
-    """P(X >= k) for X ~ Binomial(n, p)."""
+    """P(X >= k) for X ~ Binomial(n, p).
+
+    Summed in log space: a family can put thousands of candidates through this
+    test, and `math.comb(n, i)` for n in the thousands is an integer too large
+    to multiply by a float.
+    """
     if k <= 0:
         return 1.0
-    return float(sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i)
-                     for i in range(k, n + 1)))
+    if k > n:
+        return 0.0
+    if p <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+    log_p, log_q, log_n = math.log(p), math.log1p(-p), math.lgamma(n + 1)
+    terms = [log_n - math.lgamma(i + 1) - math.lgamma(n - i + 1)
+             + i * log_p + (n - i) * log_q for i in range(k, n + 1)]
+    hi = max(terms)
+    if hi == -math.inf:
+        return 0.0
+    total = sum(math.exp(t - hi) for t in terms)
+    return min(1.0, math.exp(hi + math.log(total)))
 
 
 def tsd_enrichment(hits: int, n: int, p0: float, min_n: int,
