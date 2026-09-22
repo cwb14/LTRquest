@@ -13,12 +13,14 @@ it is read by header rather than by position.
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterator, Optional, Sequence
+from typing import Any, Iterator, NamedTuple, Optional, Sequence
 
 from .table import parse_header
 
@@ -43,6 +45,27 @@ def _importable(src_dir: Path) -> bool:
     return (src_dir / "kmer2ltr" / "cli.py").is_file()
 
 
+def _clone(tools_dir: Path) -> None:
+    """git-clone Kmer2LTR into tools_dir/Kmer2LTR unless something is already there."""
+    tools_dir = Path(tools_dir)
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    target = tools_dir / "Kmer2LTR"
+    if target.exists():
+        return
+    try:
+        subprocess.run(["git", "clone", "--depth", "1", REPO_URL, str(target)],
+                       check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"failed to clone {REPO_URL} into {target}: {e}. Compute nodes "
+            f"on this cluster often have no outbound network access -- "
+            f"clone it on a login node instead, or install Kmer2LTR "
+            f"(pip install kmer2ltr) so it is on PATH. If {target} exists "
+            f"from this failed attempt, delete it first: a leftover "
+            f"directory there stops the next run from retrying the clone."
+        ) from e
+
+
 def resolve(tools_dir: Path) -> list[str]:
     """An argv prefix that runs Kmer2LTR, cloning it if that is the only way.
 
@@ -62,21 +85,7 @@ def resolve(tools_dir: Path) -> list[str]:
     if _importable(src_dir):
         return _module_argv(src_dir)
 
-    tools_dir.mkdir(parents=True, exist_ok=True)
-    target = tools_dir / "Kmer2LTR"
-    if not target.exists():
-        try:
-            subprocess.run(["git", "clone", "--depth", "1", REPO_URL, str(target)],
-                           check=True)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"failed to clone {REPO_URL} into {target}: {e}. Compute nodes "
-                f"on this cluster often have no outbound network access -- "
-                f"clone it on a login node instead, or install Kmer2LTR "
-                f"(pip install kmer2ltr) so it is on PATH. If {target} exists "
-                f"from this failed attempt, delete it first: a leftover "
-                f"directory there stops the next run from retrying the clone."
-            ) from e
+    _clone(tools_dir)
     if _importable(src_dir):
         return _module_argv(src_dir)
 
@@ -183,3 +192,63 @@ def status_counts(tsv) -> dict[str, int]:
     for row in read_rows(tsv):
         counts[row["status"]] = counts.get(row["status"], 0) + 1
     return counts
+
+
+class Api(NamedTuple):
+    """The pieces of Kmer2LTR's Python API that per-record stages call.
+
+    The CLI is the right interface for a batch; ltrquest.reboundary needs a
+    per-record `tsd_credit`, which only the Python API takes.
+    """
+    classify: Any
+    format_row: Any
+    Window: Any
+    Options: Any
+    orient: Any
+    annotate: Any
+    find_tsd: Any
+    PAD: int
+    PROBE: int
+    TSD_K: tuple
+    TSD_SHIFTS: tuple
+
+
+_API: Optional[Api] = None
+
+
+def api(tools_dir, clone: bool = True) -> Api:
+    """Kmer2LTR's Python API: an installed package first, else a checkout in tools_dir.
+
+    Refuses a Kmer2LTR whose table or classify signature differs from the one
+    this LTRquest was written against -- the same guard `assert_schema` applies
+    to the CLI's output, moved to where the skew would enter.
+    """
+    global _API
+    if _API is not None:
+        return _API
+    try:
+        importlib.import_module("kmer2ltr")
+    except ImportError:
+        src_dir = Path(tools_dir) / "Kmer2LTR" / "src"
+        if not _importable(src_dir) and clone:
+            _clone(Path(tools_dir))
+        if not _importable(src_dir):
+            raise RuntimeError(
+                f"Kmer2LTR is not importable and {src_dir} holds no checkout. Install "
+                f"it (pip install kmer2ltr) or point --tools-dir at a Kmer2LTR clone.")
+        sys.path.insert(0, str(src_dir))
+        sys.modules.pop("kmer2ltr", None)
+    align = importlib.import_module("kmer2ltr.align")
+    genome = importlib.import_module("kmer2ltr.genome")
+    runner = importlib.import_module("kmer2ltr.runner")
+    params = inspect.signature(align._classify).parameters
+    missing = [p for p in ("tsd_credit", "period_rule", "mutation_rate") if p not in params]
+    if missing or list(runner.COLUMNS) != COLUMNS:
+        raise RuntimeError(
+            "the Kmer2LTR found does not match this LTRquest "
+            f"(classify lacks {missing or 'nothing'}; columns match: "
+            f"{list(runner.COLUMNS) == COLUMNS}). Use the commit the Dockerfile pins.")
+    _API = Api(align.classify, runner.format_row, genome.Window, genome.Options,
+               genome.orient, genome.annotate, genome.find_tsd, genome.PAD, genome.PROBE,
+               genome.TSD_K, genome.TSD_SHIFTS)
+    return _API

@@ -152,3 +152,38 @@ def test_assert_schema_rejects_a_headerless_table(tmp_path):
     p.write_text("chr1:100-200#LTR/Gypsy\t101\tpass\n")
     with pytest.raises(RuntimeError, match="out of step"):
         kmer2ltr.assert_schema(p)
+
+
+import random
+import sys
+
+
+def test_api_refuses_without_a_checkout_when_cloning_is_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(kmer2ltr, "_API", None)
+    monkeypatch.setitem(sys.modules, "kmer2ltr", None)   # make `import kmer2ltr` fail
+    with pytest.raises(RuntimeError, match="not importable"):
+        kmer2ltr.api(tmp_path, clone=False)
+
+
+def test_api_exposes_the_pieces_reboundary_needs(k2l_api):
+    assert callable(k2l_api.classify) and callable(k2l_api.find_tsd)
+    assert k2l_api.PAD == 32 and k2l_api.PROBE == 40
+    assert 5 in k2l_api.TSD_K and 0 in k2l_api.TSD_SHIFTS
+
+
+def test_api_classify_formats_to_the_twentynine_columns(k2l_api):
+    rng = random.Random(1)
+    ltr = "TG" + "".join(rng.choice("ACGT") for _ in range(396)) + "CA"
+    internal = "".join(rng.choice("ACGT") for _ in range(1500))
+    seq = ltr + internal + ltr
+    res = k2l_api.classify(f"chr1:1-{len(seq)}", seq, period_rule="outermost",
+                           mutation_rate=3e-8, tsd_credit=0.0)
+    row = k2l_api.format_row(res).split("\t")
+    assert len(row) == len(kmer2ltr.COLUMNS) == 29
+    assert row[2] == "pass" and row[3] == "1" and row[6] == str(len(seq))
+
+
+def test_api_find_tsd_reads_a_duplication(k2l_api):
+    ctx = "GGGGGACGTC" + "T" * 20 + "ACGTCGGGGG"
+    hit = k2l_api.find_tsd(ctx, 10, 30, k2l_api.TSD_K, k2l_api.TSD_SHIFTS)
+    assert hit is not None and hit[0].endswith("ACGTC")

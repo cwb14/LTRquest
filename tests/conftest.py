@@ -83,3 +83,25 @@ def toy_genome(tmp_path: Path) -> Path:
     path = tmp_path / "toy.fa"
     path.write_text(">chr1\n" + "A" * 300 + "\n>chr2\n" + "C" * 120 + "\n")
     return path
+
+
+import os
+import shutil
+
+
+@pytest.fixture(scope="session")
+def k2l_api():
+    """Kmer2LTR's Python API, from the environment or $LTRQUEST_TOOLS_DIR; skip if neither."""
+    from ltrquest import kmer2ltr
+    try:
+        return kmer2ltr.api(os.environ.get("LTRQUEST_TOOLS_DIR", "."), clone=False)
+    except RuntimeError as exc:
+        pytest.skip(f"Kmer2LTR API unavailable: {exc}")
+
+
+@pytest.fixture(scope="session")
+def mafft() -> str:
+    path = shutil.which("mafft")
+    if path is None:
+        pytest.skip("mafft is not on PATH")
+    return path
