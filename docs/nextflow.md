@@ -140,6 +140,16 @@ convincing in one genome but wrong across several is only caught when they are
 judged together. It is also a barrier — every genome's detection must finish
 before clustering starts.
 
+`--reboundary` adds a second pooled step, between `annotate`/`recoverstrand:apply`
+and `gff3`: each family's LTR model is built from that family's copies across every
+sample, so — like `cluster`/`flag-fp` — this task cannot be split one-per-sample
+either. Its outputs, the re-bounded `_clean_` depth tables and every sample's
+`<prefix>_reboundary.tsv`, publish to one shared `results/reboundary/` directory
+instead of landing under each sample's own, which is the one place this pipeline's
+output layout is not per-sample. `gff3` and `plots` still publish to
+`results/<sample>/` as usual. See
+[outputs.md](outputs.md#8-re-boundarying---reboundary).
+
 ### The round chain
 
 Round *N* scans the genome round *N−1* masked, so the rounds are a strict chain.

@@ -21,6 +21,13 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Added
 
+- `--reboundary` / `ltrquest-reboundary`: extend LTR-RT calls that stop short of
+  their true ends. Each family's LTR model (termini from 5′/3′-LTR agreement across
+  its full-length copies, pooled over genomes) proposes outward-only ends; family QC,
+  conflict rules and Kmer2LTR re-scoring decide. Rewrites the `_clean_` tables and
+  FASTAs, marks changed elements `boundary_source=family_model` in the GFF3, and
+  writes `<prefix>_reboundary.tsv`. `--posthoc` updates a finished run in place with
+  a backup. Defaults set by `benchmarks/reboundary/`.
 - Add a genome to an earlier multi-genome run without re-detecting the others:
   re-run in the same directory with the longer `--genome` list. Each detected
   genome leaves a `<prefix>.detect.json` (input checksums, detection settings);

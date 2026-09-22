@@ -307,6 +307,28 @@ hard-masked as `N`, so the host's own sequence stays contiguous.
 Full column and GFF3 reference: **[docs/outputs.md](docs/outputs.md)**.
 Every flag: `ltrquest --help`.
 
+## Re-boundarying truncated calls
+
+Some LTR-RT calls stop short of the element's real ends: an indel or a patch of
+mutations near one LTR end makes LTRharvest and LTR_FINDER stop extending there. In a
+family alignment those copies start late and end early. `--reboundary` fixes them
+using each family's own full-length copies as the guide, then lets Kmer2LTR re-score
+every changed element. It only ever extends a call, never trims one.
+
+```bash
+ltrquest --genome A.fa B.fa --proteins prot.fa --threads 32 --reboundary
+```
+
+Already have a finished run? Update it in place (originals are kept in
+`<prefix>_pre_reboundary/`; `--restore` puts them back):
+
+```bash
+ltrquest-reboundary --posthoc --indir my_run --prefix A_LTRs B_LTRs --genome A.fa B.fa --threads 32
+```
+
+Every candidate, and why it was or was not extended, is in `<prefix>_reboundary.tsv`.
+Details: [docs/outputs.md §8](docs/outputs.md#8-re-boundarying---reboundary).
+
 ## Nextflow
 
 Have more than a couple of genomes? The round loop is also a Nextflow DSL2

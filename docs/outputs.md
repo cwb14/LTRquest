@@ -351,7 +351,75 @@ Needs `blast+` on `PATH` for every preset, and `minimap2` as well for
 checks for them while parsing its arguments, so a missing one fails the run
 immediately rather than after every expensive stage has already succeeded.
 
-## 8. Plots (`<prefix>_plots/`)
+## 8. Re-boundarying (`--reboundary`)
+
+LTRharvest and LTR_FINDER extend an LTR pair outward from a seed and stop at the
+first obstacle between the element's two LTRs — an indel or a mutation-dense patch
+near an LTR end. Kmer2LTR can only trim. So such an element is called short: in a
+family alignment it starts late and ends early, and it has no TSD (target-site
+duplication, the short direct repeat a transposition leaves flanking the insertion)
+at its called ends.
+
+`--reboundary` (or `ltrquest-reboundary --posthoc` on a finished run) builds each
+family's LTR model from its full-length copies, pooled over every genome, and places
+it on every member. The model's ends come only from where the family's 5′ and 3′ LTR
+copies stop agreeing — never from a TSD or TG..CA. Ends move outward only. A family
+whose model is implausibly long, or whose proposed ends show no TSD enrichment over a
+displaced-flank null, is left alone. A genome with no `_depth<N>_clean_ltr.tsv`
+tables at all is warned about and skipped rather than aborting the run; such a genome
+contributes nothing to the pooled family models or the rewritten tables. Each widened
+element is re-scored by Kmer2LTR, which settles the final ends and every Kmer2LTR
+column (LTR coordinates, divergence, K2P, time, TSD, motif, CIGAR).
+
+What changes: the `_clean_` depth tables and FASTAs, the GFF3s and the plots. The raw
+`<prefix>_depth<N>_ltr.{tsv,fa}` tables keep the calls as detected. Family labels do
+not change; the pooled `<run>_all_ltr.*` clustering files describe the calls before
+re-boundarying.
+
+> When run through the Nextflow pipeline (`--reboundary`), the re-bounded `_clean_`
+> depth tables and `<prefix>_reboundary.tsv` are published to one pooled
+> `${params.outdir}/reboundary/`, not into each sample's own results
+> directory — the family models are built across all samples at once, so the
+> task that writes them is pooled too. The GFF3s and plots still publish per
+> sample. See [nextflow.md](nextflow.md#what-the-pipeline-does).
+
+### 8.1 `<prefix>_reboundary.tsv`
+
+One row per element whose model placement moved an end outward, extended or not.
+
+| Column | Meaning |
+|---|---|
+| `old_seq_id`, `new_seq_id` | the call before and after (`.` when not extended) |
+| `family`, `method`, `model_id` | the family and the model that placed it |
+| `decision`, `reason` | `extended`, or `rejected` with one of: `gate_identity`, `family_qc_failed`, `family_untested`, `host_exceeded`, `engulfs_element`, `overlaps_element`, `record_missing`, `kmer2ltr_not_pass`, `kmer2ltr_reverted`, `length_filter` |
+| `ext5`, `ext3` | bp added at the element's biological 5′ / 3′ end |
+| `end_source5`, `end_source3` | `core` (model aligned end to end), `anchor` (model's outer bases found past a large indel), `.` (did not move) |
+| `id_outer5`, `id_outer3` | identity of the model's outer 30 bp at each end |
+| `credit_bits`, `k2l_status` | evidence handed to Kmer2LTR and its status |
+| `tsd_called`, `tsd_new`, `tsd_null` | TSD at the called ends, at the new ends, and with the right flank displaced 1 kb (the null) |
+| `k2p_called`, `k2p_new` | LTR-pair K2P before and after |
+| `obstacle5`, `obstacle3` | what sits between the two LTRs at the old end: `gap:<bp>`, `mm:<rate>`, `none`, `.` |
+
+### 8.2 GFF3
+
+Re-bounded elements carry `boundary_source=family_model` and
+`boundary_shift=<ext5>,<ext3>`. The GFF3 writer reads the sidecar (`--reboundary-map`)
+so family and strand-provenance attributes still find renamed elements.
+
+### 8.3 Finished runs
+
+```bash
+ltrquest-reboundary --posthoc --indir RUN --prefix P1 P2 ... --genome G1 G2 ... --threads 32
+ltrquest-reboundary --restore --indir RUN --prefix P1 P2 ...     # undo
+```
+
+`--posthoc` moves the originals (clean tables and FASTAs, GFF3s, plots) into
+`<prefix>_pre_reboundary/` once, re-bounds, then rewrites the GFF3s and plots. A
+second `--posthoc` run starts again from that backup, so trying other settings never
+stacks on an earlier result. Benchmarks and the evidence behind every default:
+`benchmarks/reboundary/README.md`.
+
+## 9. Plots (`<prefix>_plots/`)
 
 | Output | What it shows |
 |---|---|
@@ -361,7 +429,7 @@ immediately rather than after every expensive stage has already succeeded.
 | `<prefix>_summary.pdf` | Multi-page summary |
 | `<prefix>_TEGV.html` | Self-contained interactive genome browser (open in web browser) |
 
-## 9. Benchmarks
+## 10. Benchmarks
 
 On a simulated genome (PrinTE) with 4,468 true intact LTR-RTs, 20 threads,
 scored at ≥90% reciprocal overlap:
