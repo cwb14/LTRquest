@@ -310,3 +310,42 @@ class TestEscapeReporting:
         err = capsys.readouterr().err
         assert "%3B" in err and "WARNING" in err
         gff3_module._escaped_chars.clear()
+
+
+def _renamed_run(tmp_path, with_map: bool):
+    from ltrquest.kmer2ltr import COLUMNS
+    from ltrquest.reboundary_io import SIDECAR_COLUMNS
+    tail = ["strand", "family", "domains", "nest_status"]
+    old, new = "chr1:150-3000#LTR/Gypsy/Tekay", "chr1:100-3000#LTR/Gypsy/Tekay"
+    vals = {c: "NA" for c in COLUMNS}
+    vals.update(seq_id=new, seq_len="2901", status="pass", ltr5_start="1", ltr5_end="450",
+                ltr3_start="2551", ltr3_end="2901", orientation="+", tsd="ACGTA",
+                tsd_offset="0,0")
+    row = [vals[c] for c in COLUMNS] + ["+", "merged_fam00001", ".", "."]
+    (tmp_path / "p_depth0_clean_ltr.tsv").write_text(
+        "#" + "\t".join(COLUMNS + tail) + "\n" + "\t".join(row) + "\n")
+    cluster = tmp_path / "merged_all_ltr.consensus_id0.75_cluster.tsv"
+    cluster.write_text(f"{old}\t{old}\n")
+    kw = dict(consensus_cluster=str(cluster), family_prefix="merged")
+    if with_map:
+        side = {c: "." for c in SIDECAR_COLUMNS}
+        side.update(old_seq_id=old, new_seq_id=new, decision="extended", ext5="50", ext3="0")
+        path = tmp_path / "p_reboundary.tsv"
+        path.write_text("#" + "\t".join(SIDECAR_COLUMNS) + "\n"
+                        + "\t".join(side[c] for c in SIDECAR_COLUMNS) + "\n")
+        kw["reboundary_map"] = str(path)
+    assert gff3_module.convert("p", str(tmp_path), **kw) == 0
+    text = (tmp_path / "p_all_depth_LTR_cleaned.gff3").read_text()
+    return [l for l in text.splitlines() if f"\t{gff3_module.LTR_TYPE}\t" in l][0]
+
+
+def test_reboundary_map_keeps_family_attributes_and_marks_the_shift(tmp_path):
+    line = _renamed_run(tmp_path, with_map=True)
+    assert "\t100\t3000\t" in line
+    assert "family_size=1" in line
+    assert "boundary_source=family_model" in line and "boundary_shift=50,0" in line
+
+
+def test_without_the_map_a_renamed_element_loses_its_cluster_attributes(tmp_path):
+    line = _renamed_run(tmp_path, with_map=False)
+    assert "family_size" not in line and "boundary_source" not in line

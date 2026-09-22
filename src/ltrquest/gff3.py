@@ -57,6 +57,7 @@ from .annotate import (
     resolve_strands,
     select_annotation_set,
 )
+from .reboundary_io import Rebound, read_map
 
 SOURCE = "LTRquest"
 
@@ -296,7 +297,8 @@ def order_block_lines(lines: Sequence[str]) -> List[str]:
 
 def build_element_blocks(prefix: str, tables, ranker: SeqidRanker,
                          provenance: Dict[str, Tuple[str, str]],
-                         families, verbose: bool = False
+                         families, verbose: bool = False,
+                         rebound: Optional[Dict[str, Rebound]] = None
                          ) -> Tuple[List[Block], int]:
     """One Block per element across all depth tables. Returns (blocks, skipped).
 
@@ -305,6 +307,9 @@ def build_element_blocks(prefix: str, tables, ranker: SeqidRanker,
     rather than failing.
     """
     family_by_name, family_by_coord = families
+    rebound = rebound or {}
+    alias_key = {k: element_key(r.old_name) for k, r in rebound.items()}
+    alias_name = {r.new_name: r.old_name for r in rebound.values()}
     blocks: List[Block] = []
     skipped = 0
     serial = 0
@@ -340,7 +345,9 @@ def build_element_blocks(prefix: str, tables, ranker: SeqidRanker,
             else:
                 source_label = "table"
 
-            family = lookup_family(name, key, family_by_name, family_by_coord)
+            family = lookup_family(alias_name.get(name, name), alias_key.get(key, key),
+                                   family_by_name, family_by_coord)
+            rb = rebound.get(key)
             # The table's own label is authoritative -- it is what the user
             # reads -- but fall back to the cluster lookup so a table that was
             # never annotated still gets a consistent set of family attributes.
@@ -380,6 +387,8 @@ def build_element_blocks(prefix: str, tables, ranker: SeqidRanker,
                 ("motif", _field(row, names, "motif")),
                 ("tsd", _field(row, names, "tsd")),
                 ("tsd_offset", list_value(_field(row, names, "tsd_offset"))),
+                ("boundary_source", "family_model" if rb else ""),
+                ("boundary_shift", list_value(f"{rb.ext5},{rb.ext3}") if rb else ""),
                 ("strand_source", source_label),
                 ("nest_status", list_value(_field(row, names, "nest_status"), ";")),
             ])
@@ -574,7 +583,8 @@ def write_gff3(path: str,
 # -----------------------------
 def strand_provenance(prefix: str, indir: str, tables, families,
                       verbose: bool = False,
-                      recovered_strands: Optional[str] = None
+                      recovered_strands: Optional[str] = None,
+                      alias: Optional[Dict[str, str]] = None
                       ) -> Dict[str, Tuple[str, str]]:
     """Recompute the strand cascade purely to label each call's origin.
 
@@ -586,6 +596,11 @@ def strand_provenance(prefix: str, indir: str, tables, families,
 
     """
     elements = collect_elements(load_unannotated(t.path) for t in tables)
+
+    # Re-bounded elements are named by their new span, but every tier below is
+    # keyed on the span the element was detected with.
+    if alias:
+        elements = {alias.get(k, k): v for k, v in elements.items()}
 
     # warn_missing is off: ltr_annotate already reported any missing input when
     # it wrote these tables, and this pass reads exactly the same files.
@@ -599,8 +614,12 @@ def strand_provenance(prefix: str, indir: str, tables, families,
                                            path=recovered_strands)
     strand, source = resolve_strands(elements, tesorter, target_of, orientation,
                                      verbose=False, recovered=recovered)
-    return {key: (strand[key], source[key]) for key in elements
-            if key in strand and key in source}
+    out = {key: (strand[key], source[key]) for key in elements
+           if key in strand and key in source}
+    if alias:
+        back = {old: new for new, old in alias.items()}
+        out = {back.get(k, k): v for k, v in out.items()}
+    return out
 
 
 # -----------------------------
@@ -610,7 +629,8 @@ def convert(prefix: str, indir: str = ".", genome: Optional[str] = None,
             miniprot_gff: Optional[str] = None, verbose: bool = False,
             consensus_cluster: Optional[str] = None,
             family_prefix: Optional[str] = None,
-            recovered_strands: Optional[str] = None) -> int:
+            recovered_strands: Optional[str] = None,
+            reboundary_map: Optional[str] = None) -> int:
     variant, tables = select_annotation_set(prefix, indir)
     if not tables:
         print(f"[ltr_tsv_to_gff3] ERROR: no {prefix}_depth<N>[_clean]_ltr.tsv "
@@ -636,10 +656,12 @@ def convert(prefix: str, indir: str = ".", genome: Optional[str] = None,
     families = load_families(prefix, indir, verbose=False, warn_missing=False,
                              consensus_cluster=consensus_cluster,
                              family_prefix=family_prefix)
+    rebound = read_map(reboundary_map) if reboundary_map else {}
+    alias = {k: element_key(r.old_name) for k, r in rebound.items()}
     provenance = strand_provenance(prefix, indir, tables, families, verbose,
-                                   recovered_strands)
+                                   recovered_strands, alias)
     element_blocks, skipped = build_element_blocks(prefix, tables, ranker,
-                                                   provenance, families, verbose)
+                                                   provenance, families, verbose, rebound)
     if skipped:
         warn(f"{skipped} row(s) had an unparseable element name and were skipped")
     if not element_blocks:
@@ -703,6 +725,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              "element's strand_source reads 'homology' or 'ppt' "
                              "rather than 'table'. Must match what "
                              "ltrquest-annotate was given.")
+    parser.add_argument("--reboundary-map", default=None,
+                        help="<prefix>_reboundary.tsv from ltrquest-reboundary: lets family "
+                             "and strand lookups find elements it renamed, and marks them "
+                             "boundary_source=family_model. Passed by path, never globbed.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Per-step progress and per-file counts")
     args = parser.parse_args(argv)
@@ -713,7 +739,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     return convert(args.prefix, args.indir, args.genome, args.miniprot_gff,
                    args.verbose, args.consensus_cluster, args.family_prefix,
-                   args.recovered_strands)
+                   args.recovered_strands, reboundary_map=args.reboundary_map)
 
 
 if __name__ == "__main__":
