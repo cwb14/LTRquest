@@ -170,7 +170,8 @@ class SpanIndex:
         k = (prefix, chrom)
         spans = self._by.get(k, [])
         out = []
-        for s, e, key in spans[bisect.bisect_left(self._starts.get(k, []), lo - self._longest.get(k, 0)):]:
+        i = bisect.bisect_left(self._starts.get(k, []), lo - self._longest.get(k, 0))
+        for s, e, key in spans[i:]:
             if s > hi:
                 break
             if e >= lo:
@@ -204,7 +205,8 @@ def conflict(index: SpanIndex, m: Member, left: int, right: int) -> Optional[str
 
 
 def mutual_conflicts(items: Sequence[Tuple[Member, int, int]]) -> Set[str]:
-    """uids whose added bases overlap an earlier candidate's added bases (genome, chrom, start order)."""
+    """uids whose added bases overlap an earlier candidate's added bases
+    (genome, chrom, start order)."""
     taken: Dict[Tuple[str, str], List[Tuple[int, int]]] = defaultdict(list)
     lost: Set[str] = set()
     for m, left, right in sorted(items, key=lambda t: (t[0].prefix, t[0].chrom, t[0].start)):
@@ -277,7 +279,10 @@ def rewrite(tables: Sequence[CleanTable], accepted: Dict[str, Accepted], letters
         for row in t.rows:
             k = element_key(row[0]) if row else None
             if k is not None:
-                start = accepted[k].left if k in accepted else int(k.rsplit(":", 1)[1].split("-")[0])
+                if k in accepted:
+                    start = accepted[k].left
+                else:
+                    start = int(k.rsplit(":", 1)[1].split("-")[0])
                 where[k] = (start, t.cols.get(row, "orientation", "+"))
     for t in tables:
         i_nest = t.cols.require("nest_status")

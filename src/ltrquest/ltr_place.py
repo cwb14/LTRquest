@@ -256,7 +256,8 @@ def obstacle(m: Member, prop: Proposal, g: Genomes) -> Tuple[str, str]:
 
 
 def tsd_at(api, g: Genomes, m: Member, left: int, right: int, shift: int = 0) -> str:
-    """Kmer2LTR's TSD call for an element spanning left..right; `shift` displaces the right flank."""
+    """Kmer2LTR's TSD call for an element spanning left..right; `shift` displaces
+    the right flank."""
     a, a0 = g.fetch(m.prefix, m.chrom, left - 10, left + 9)
     b, _ = g.fetch(m.prefix, m.chrom, right - 9 + shift, right + 10 + shift)
     if a0 != left - 10 or len(a) != 20 or len(b) != 20:
