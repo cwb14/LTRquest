@@ -9,7 +9,7 @@ process LTRQUEST_GFF3 {
     container 'ghcr.io/cwb14/ltrquest:1.0.1'
 
     input:
-    tuple val(meta), path(tables), path(workdirs), path(genome), path(consensus_cluster), path(recovered_strands)
+    tuple val(meta), path(tables), path(workdirs), path(genome), path(consensus_cluster), path(recovered_strands), path(reboundary_map)
 
     output:
     tuple val(meta), path("${prefix}_all_depth_LTR_cleaned.gff3")        , emit: gff3
@@ -24,6 +24,7 @@ process LTRQUEST_GFF3 {
     // Must match what LTRQUEST_ANNOTATE was given, or a recovered element's
     // strand_source falls back to 'table'.
     def recovered = recovered_strands ? "--recovered-strands ${recovered_strands}" : ''
+    def rbmap = reboundary_map ? "--reboundary-map ${reboundary_map}" : ''
     prefix   = task.ext.prefix ?: "${meta.id}"
 
     // A second GFF3 carrying the miniprot alignments is written too, but only
@@ -37,6 +38,7 @@ process LTRQUEST_GFF3 {
         --consensus-cluster ${consensus_cluster} \\
         --family-prefix ${params.family_prefix} \\
         ${recovered} \\
+        ${rbmap} \\
         ${args}
 
     cat <<-END_VERSIONS > versions.yml

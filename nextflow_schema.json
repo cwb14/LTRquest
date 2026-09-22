@@ -108,6 +108,13 @@
                     "help_text": "Covers loci homology cannot reach, at roughly 93% accuracy on real genomes, so it is off by default. No effect unless --strand_recovery is set.",
                     "fa_icon": "fas fa-compass"
                 },
+                "reboundary": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Extend LTR-RT calls that stop short of their true ends, using each family's LTR model.",
+                    "help_text": "Off unless set. LTRharvest and LTR_FINDER stop extending an LTR pair at the first indel or mutation-dense patch near an LTR end; each family's LTR model, built from its full-length copies across all samples, proposes the true ends and Kmer2LTR re-scores every changed element. Extends only, never trims. Writes <sample>_reboundary.tsv and marks changed elements boundary_source=family_model in the GFF3.",
+                    "fa_icon": "fas fa-arrows-alt-h"
+                },
                 "skip_plots": {
                     "type": "boolean",
                     "description": "Skip the structure PDFs, summary PDF and TEGV browser.",

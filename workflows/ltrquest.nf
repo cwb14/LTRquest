@@ -12,6 +12,7 @@ include { LTRQUEST_RECOVERSTRAND_ALIGN } from '../modules/local/ltrquest/recover
 include { LTRQUEST_RECOVERSTRAND_APPLY } from '../modules/local/ltrquest/recoverstrand/main'
 include { LTRQUEST_ANNOTATE      } from '../modules/local/ltrquest/annotate/main'
 include { LTRQUEST_GFF3          } from '../modules/local/ltrquest/gff3/main'
+include { LTRQUEST_REBOUNDARY   } from '../modules/local/ltrquest/reboundary/main'
 include { LTRQUEST_PLOTS         } from '../modules/local/ltrquest/plots/main'
 
 workflow LTRQUEST {
@@ -171,6 +172,39 @@ workflow LTRQUEST {
         ch_fastas = ch_bundle.map { meta, _t, fastas, _w, _g, _c -> [ meta, fastas ] }
     }
 
+    // Re-boundarying, when asked for: one pooled task over every sample, between
+    // the annotated tables and the GFF3. Off, an empty map flows in its place.
+    ch_meta_by_id = ch_bundle.map { meta, _t, _f, _w, _g, _c -> [ meta.id, meta ] }
+    if (params.reboundary) {
+        ch_rb_in = ch_tables
+            .join(ch_fastas)
+            .join(ch_bundle.map { meta, _t, _f, _w, genome, _c -> [ meta, genome ] })
+            .toSortedList { a, b -> a[0].id <=> b[0].id }
+        LTRQUEST_REBOUNDARY(
+            ch_rb_in.map { rows -> rows.collect { it[0].id } },
+            ch_rb_in.map { rows -> rows.collect { it[1] }.flatten() },
+            ch_rb_in.map { rows -> rows.collect { it[2] }.flatten() },
+            ch_rb_in.map { rows -> rows.collect { it[3] } }
+        )
+        ch_versions = ch_versions.mix(LTRQUEST_REBOUNDARY.out.versions)
+        ch_tables = LTRQUEST_REBOUNDARY.out.tsv.flatten()
+            .map { f -> [ f.name.replaceFirst(/_depth\d+_clean_ltr\.tsv$/, ''), f ] }
+            .groupTuple()
+            .join(ch_meta_by_id)
+            .map { _id, files, meta -> [ meta, files ] }
+        ch_fastas = LTRQUEST_REBOUNDARY.out.fasta.flatten()
+            .map { f -> [ f.name.replaceFirst(/_depth\d+_clean_ltr\.fa$/, ''), f ] }
+            .groupTuple()
+            .join(ch_meta_by_id)
+            .map { _id, files, meta -> [ meta, files ] }
+        ch_rbmap = LTRQUEST_REBOUNDARY.out.sidecar.flatten()
+            .map { f -> [ f.name.replaceFirst(/_reboundary\.tsv$/, ''), f ] }
+            .join(ch_meta_by_id)
+            .map { _id, f, meta -> [ meta, f ] }
+    } else {
+        ch_rbmap = ch_bundle.map { meta, _t, _f, _w, _g, _c -> [ meta, [] ] }
+    }
+
     // From here on the tables are the ANNOTATED ones, not the reconciler's.
     ch_annotated = ch_tables
         .join(ch_fastas)
@@ -181,7 +215,7 @@ workflow LTRQUEST {
     LTRQUEST_GFF3(
         ch_annotated.map { meta, tables, _fastas, workdirs, genome, cluster ->
             [ meta, tables, workdirs, genome, cluster ]
-        }.join(ch_recovery)
+        }.join(ch_recovery).join(ch_rbmap)
     )
     ch_versions = ch_versions.mix(LTRQUEST_GFF3.out.versions)
 
