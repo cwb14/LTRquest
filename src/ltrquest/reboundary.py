@@ -18,11 +18,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
 import os
 import pickle
 import shutil
+import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
@@ -443,6 +445,93 @@ def resolve_mutation_rate(indir: str, prefixes: Sequence[str], given: Optional[f
     return 3e-8
 
 
+BACKUP_SUFFIX = "_pre_reboundary"
+
+
+def _clean_files(directory: str, prefix: str) -> List[str]:
+    return sorted(glob.glob(os.path.join(directory, f"{prefix}_depth*_clean_ltr.tsv"))
+                  + glob.glob(os.path.join(directory, f"{prefix}_depth*_clean_ltr.fa")))
+
+
+def _derived(indir: str, prefix: str) -> List[str]:
+    names = (f"{prefix}_all_depth_LTR_cleaned.gff3", f"{prefix}_all_depth_protein_LTR_cleaned.gff3",
+             f"{prefix}_plots", prefix + SIDECAR_SUFFIX)
+    return [os.path.join(indir, n) for n in names if os.path.lexists(os.path.join(indir, n))]
+
+
+def _remove(path: str) -> None:
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    elif os.path.lexists(path):
+        os.remove(path)
+
+
+def prepare_posthoc(indir: str, prefix: str) -> str:
+    """Move the originals into <prefix>_pre_reboundary/ once; put fresh copies back to work on.
+
+    If the backup already exists this run starts again from it, so post-hoc
+    runs with different settings never stack on each other.
+    """
+    bdir = os.path.join(indir, prefix + BACKUP_SUFFIX)
+    if os.path.isdir(bdir + ".partial"):
+        raise SystemExit(f"reboundary: {bdir}.partial exists: an earlier backup was interrupted. "
+                         f"Move its files back into {indir}, delete it, then re-run.")
+    if not os.path.isdir(bdir):
+        tmp = bdir + ".partial"
+        os.makedirs(tmp)
+        for path in _clean_files(indir, prefix) + _derived(indir, prefix):
+            shutil.move(path, os.path.join(tmp, os.path.basename(path)))
+        os.rename(tmp, bdir)
+        log(f"{prefix}: originals moved to {os.path.basename(bdir)}/")
+    else:
+        for path in _clean_files(indir, prefix) + _derived(indir, prefix):
+            _remove(path)
+        log(f"{prefix}: starting again from {os.path.basename(bdir)}/")
+    originals = _clean_files(bdir, prefix)
+    if not originals:
+        raise SystemExit(f"reboundary: {bdir} holds no {prefix}_depth<N>_clean_ltr tables")
+    for path in originals:
+        shutil.copy2(path, os.path.join(indir, os.path.basename(path)))
+    return bdir
+
+
+def restore(indir: str, prefix: str) -> None:
+    bdir = os.path.join(indir, prefix + BACKUP_SUFFIX)
+    if not os.path.isdir(bdir):
+        raise SystemExit(f"reboundary: nothing to restore: no {bdir}")
+    for path in _clean_files(indir, prefix) + _derived(indir, prefix):
+        _remove(path)
+    for name in os.listdir(bdir):
+        shutil.move(os.path.join(bdir, name), os.path.join(indir, name))
+    os.rmdir(bdir)
+    log(f"{prefix}: originals restored from {os.path.basename(bdir)}/")
+
+
+def regenerate(indir: str, prefix: str, genome: str, plots: bool) -> None:
+    """Rewrite the GFF3s (through the key map) and, unless told not to, the plots."""
+    from . import gff3
+    cons = sorted(glob.glob(os.path.join(indir, "*_all_ltr.consensus_id*_cluster.tsv")))
+    if len(cons) > 1:
+        raise SystemExit(f"reboundary: {len(cons)} consensus cluster tables in {indir}; "
+                         f"expected at most one")
+    fam = {}
+    if cons:
+        fam = dict(consensus_cluster=cons[0],
+                   family_prefix=os.path.basename(cons[0]).split("_all_ltr.consensus_id")[0])
+    rec = os.path.join(indir, prefix + "_strand_recovery.tsv")
+    side = os.path.join(indir, prefix + SIDECAR_SUFFIX)
+    if gff3.convert(prefix, indir, genome, recovered_strands=rec if os.path.isfile(rec) else None,
+                    reboundary_map=side if os.path.isfile(side) else None, **fam) != 0:
+        raise SystemExit(f"reboundary: GFF3 regeneration failed for {prefix}")
+    if plots:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "plots.sh")
+        env = dict(os.environ, LTRQUEST_PYTHON=sys.executable)
+        done = subprocess.run(["bash", script, "--prefix", prefix, "--genome", genome,
+                               "--indir", indir], env=env)
+        if done.returncode != 0:
+            warn(f"plotting reported failures for {prefix}; the tables and GFF3 are unaffected")
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="ltrquest-reboundary",
@@ -488,6 +577,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cache", default=None,
                     help="pickle the family phase here; reuse it when the settings allow")
     ap.add_argument("-v", "--verbose", action="store_true", help="one line per family")
+    ap.add_argument("--posthoc", action="store_true",
+                    help="update a finished run in place: originals go to "
+                         "<prefix>_pre_reboundary/ (once; later runs start from it), then the "
+                         "GFF3s and plots are rewritten")
+    ap.add_argument("--no-plots", action="store_true", help="with --posthoc: skip the plots")
+    ap.add_argument("--restore", action="store_true",
+                    help="put <prefix>_pre_reboundary/ back in place and stop")
     return ap
 
 
@@ -510,11 +606,23 @@ def settings_from(args) -> Settings:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.restore:
+        for p in args.prefix:
+            restore(args.indir, p)
+        return 0
     s = settings_from(args)
     if not args.genome:
         raise SystemExit("reboundary: --genome is required")
+    if len(args.genome) != len(args.prefix):
+        raise SystemExit("reboundary: --prefix and --genome must pair up one to one")
+    if args.posthoc:
+        for p in args.prefix:
+            prepare_posthoc(args.indir, p)
     run(args.indir, args.prefix, args.genome, s, args.tools_dir, args.dump_proposals,
         args.cache, args.verbose)
+    if args.posthoc:
+        for p, gpath in zip(args.prefix, args.genome):
+            regenerate(args.indir, p, gpath, plots=not args.no_plots)
     return 0
 
 

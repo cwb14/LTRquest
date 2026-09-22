@@ -191,3 +191,43 @@ def test_a_second_run_extends_nothing_and_the_cli_works(tmp_path, k2l_api, mafft
     counts = rb.run(str(fx.indir), [fx.prefix], [str(fx.genome)],
                     rb.Settings(threads=2, mafft=mafft), TOOLS)
     assert counts.get("extended", 0) == 0
+
+
+def test_posthoc_backs_up_once_reruns_from_originals_and_restores(tmp_path, k2l_api, mafft):
+    fx = build(tmp_path / "syn_posthoc")
+    originals = {p.name: p.read_bytes() for p in fx.indir.glob(f"{fx.prefix}_depth*_clean_ltr.*")}
+    (fx.indir / f"{fx.prefix}_all_depth_LTR_cleaned.gff3").write_text("##gff-version 3\n#old\n")
+    (fx.indir / f"{fx.prefix}_plots").mkdir()
+    (fx.indir / f"{fx.prefix}_plots" / "x.pdf").write_text("old plot")
+    base = ["--indir", str(fx.indir), "--prefix", fx.prefix, "--genome", str(fx.genome),
+            "-t", "2", "--mafft", mafft, "--tools-dir", TOOLS, "--posthoc", "--no-plots"]
+
+    assert rb.main(base) == 0
+    backup = fx.indir / f"{fx.prefix}{rb.BACKUP_SUFFIX}"
+    assert {p.name for p in backup.iterdir()} >= set(originals) | {
+        f"{fx.prefix}_all_depth_LTR_cleaned.gff3", f"{fx.prefix}_plots"}
+    gff = (fx.indir / f"{fx.prefix}_all_depth_LTR_cleaned.gff3").read_text()
+    assert "boundary_source=family_model" in gff and "#old" not in gff
+    assert not (fx.indir / f"{fx.prefix}_plots").exists()
+
+    assert rb.main(base + ["--no-anchor"]) == 0      # starts again from the backup
+    e = fx.kind("del_left")
+    assert sidecar(fx)[e.key]["decision"] == "extended"
+
+    assert rb.main(["--indir", str(fx.indir), "--prefix", fx.prefix, "--restore"]) == 0
+    assert not backup.exists() and not (fx.indir / f"{fx.prefix}_reboundary.tsv").exists()
+    for name, data in originals.items():
+        assert (fx.indir / name).read_bytes() == data, name
+    assert "#old" in (fx.indir / f"{fx.prefix}_all_depth_LTR_cleaned.gff3").read_text()
+    assert (fx.indir / f"{fx.prefix}_plots" / "x.pdf").read_text() == "old plot"
+
+
+def test_restore_without_a_backup_says_so(tmp_path):
+    with pytest.raises(SystemExit, match="nothing to restore"):
+        rb.main(["--indir", str(tmp_path), "--prefix", "p", "--restore"])
+
+
+def test_an_interrupted_backup_stops_the_run(tmp_path):
+    (tmp_path / f"p{rb.BACKUP_SUFFIX}.partial").mkdir()
+    with pytest.raises(SystemExit, match="interrupted"):
+        rb.prepare_posthoc(str(tmp_path), "p")
