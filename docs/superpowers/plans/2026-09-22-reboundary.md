@@ -1700,7 +1700,10 @@ def obstacle(m: Member, prop: Proposal, g: Genomes) -> Tuple[str, str]:
 
 
 def tsd_at(api, g: Genomes, m: Member, left: int, right: int, shift: int = 0) -> str:
-    """Kmer2LTR's TSD call for an element spanning left..right; `shift` displaces the right flank."""
+    """Kmer2LTR's TSD call for an element spanning left..right.
+
+    `shift` displaces the right flank, which is how the null is measured.
+    """
     a, a0 = g.fetch(m.prefix, m.chrom, left - 10, left + 9)
     b, _ = g.fetch(m.prefix, m.chrom, right - 9 + shift, right + 10 + shift)
     if a0 != left - 10 or len(a) != 20 or len(b) != 20:
@@ -2091,7 +2094,8 @@ class SpanIndex:
         k = (prefix, chrom)
         spans = self._by.get(k, [])
         out = []
-        for s, e, key in spans[bisect.bisect_left(self._starts.get(k, []), lo - self._longest.get(k, 0)):]:
+        first = bisect.bisect_left(self._starts.get(k, []), lo - self._longest.get(k, 0))
+        for s, e, key in spans[first:]:
             if s > hi:
                 break
             if e >= lo:
@@ -2125,7 +2129,10 @@ def conflict(index: SpanIndex, m: Member, left: int, right: int) -> Optional[str
 
 
 def mutual_conflicts(items: Sequence[Tuple[Member, int, int]]) -> Set[str]:
-    """uids whose added bases overlap an earlier candidate's added bases (genome, chrom, start order)."""
+    """uids whose added bases overlap an earlier candidate's added bases.
+
+    Processed in (genome, chrom, start) order, so the later claimant loses.
+    """
     taken: Dict[Tuple[str, str], List[Tuple[int, int]]] = defaultdict(list)
     lost: Set[str] = set()
     for m, left, right in sorted(items, key=lambda t: (t[0].prefix, t[0].chrom, t[0].start)):
@@ -2198,7 +2205,8 @@ def rewrite(tables: Sequence[CleanTable], accepted: Dict[str, Accepted], letters
         for row in t.rows:
             k = element_key(row[0]) if row else None
             if k is not None:
-                start = accepted[k].left if k in accepted else int(k.rsplit(":", 1)[1].split("-")[0])
+                called = int(k.rsplit(":", 1)[1].split("-")[0])
+                start = accepted[k].left if k in accepted else called
                 where[k] = (start, t.cols.get(row, "orientation", "+"))
     for t in tables:
         i_nest = t.cols.require("nest_status")
