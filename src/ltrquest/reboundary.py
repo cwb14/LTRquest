@@ -91,6 +91,8 @@ def _init(paths: Dict[str, str], tools_dir: str) -> None:
 
 def build_models(family: str, members: Sequence[Member], g: Genomes, s: Settings,
                  exclude: FrozenSet[str] = frozenset()) -> Tuple[List[Model], Optional[float], str]:
+    if s.method not in METHODS:
+        raise ValueError(f"unknown method {s.method!r}")
     many = s.method == "subfamily"
     refs, modal = select_references(members, s.references, family, exclude,
                                     n_young=150 if many else 40, n_random=150 if many else 40)

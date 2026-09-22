@@ -251,6 +251,13 @@ def test_an_interrupted_backup_stops_the_run(tmp_path):
         rb.prepare_posthoc(str(tmp_path), "p")
 
 
+def test_build_models_rejects_an_unknown_method():
+    from ltrquest.ltr_model import Genomes
+    m = fake_member()
+    with pytest.raises(ValueError, match="unknown method"):
+        rb.build_models("f", [m], Genomes({}), rb.Settings(method="bogus"))
+
+
 @pytest.mark.parametrize("method", ["consensus", "subfamily", "nearest"])
 def test_every_method_recovers_the_deletion(tmp_path, mafft, method):
     from ltrquest.ltr_model import Genomes
