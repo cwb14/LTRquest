@@ -138,3 +138,10 @@ def test_tsd_enrichment_has_an_explicit_untested_branch():
     assert lm.tsd_enrichment(3, 3, 0.01, min_n=5) == "untested"
     assert lm.tsd_enrichment(6, 8, 0.01, min_n=5) == "pass"
     assert lm.tsd_enrichment(0, 8, 0.01, min_n=5) == "fail"
+
+
+def test_subfamily_models_on_a_one_type_family_give_the_family_ltr(fx, g, fam, mafft):
+    refs, modal = lm.select_references(fam, "modal", FAMILY, n_young=150, n_random=150)
+    models = lm.subfamily_models(FAMILY, refs, g, modal, 0.5, mafft)
+    assert models and all(abs(len(mo.seq) - 400) <= 2 for mo in models)
+    assert models[0].seq[:20] == fx.ltr[:20]

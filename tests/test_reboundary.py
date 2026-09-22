@@ -231,3 +231,25 @@ def test_an_interrupted_backup_stops_the_run(tmp_path):
     (tmp_path / f"p{rb.BACKUP_SUFFIX}.partial").mkdir()
     with pytest.raises(SystemExit, match="interrupted"):
         rb.prepare_posthoc(str(tmp_path), "p")
+
+
+@pytest.mark.parametrize("method", ["consensus", "subfamily", "nearest"])
+def test_every_method_recovers_the_deletion(tmp_path, mafft, method):
+    from ltrquest.ltr_model import Genomes
+    from ltrquest.ltr_place import propose
+    from reboundary_fixtures import FAMILY, members
+    fx = build(tmp_path / "syn_methods")
+    g = Genomes({fx.prefix: str(fx.genome)})
+    fam = [m for m in members(fx) if m.family == FAMILY]
+    s = rb.Settings(method=method, mafft=mafft)
+    models, _, status = rb.build_models(FAMILY, fam, g, s)
+    assert status == "ok" and models
+    e = fx.kind("del_left")
+    m = [x for x in fam if x.name == e.name][0]
+    p = propose(m, models, g, rb.place_params(s))
+    assert p.gate_ok and p.left == e.true_start
+
+
+def test_nearest_uses_median_combining():
+    assert rb.place_params(rb.Settings(method="nearest")).combine == "median"
+    assert rb.place_params(rb.Settings()).combine == "best"

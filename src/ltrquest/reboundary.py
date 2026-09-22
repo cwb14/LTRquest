@@ -28,21 +28,21 @@ import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from multiprocessing import Pool
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from . import kmer2ltr as k2l
 from .kmer2ltr import COLUMNS
 from .ltr_model import (Genomes, Member, Model, consensus_model, ratio_ok, select_references,
-                        tsd_enrichment)
-from .ltr_place import Params, Proposal, obstacle, propose, tsd_at
+                        subfamily_models, tsd_enrichment)
+from .ltr_place import Params, Proposal, nearest_templates, obstacle, propose, tsd_at
 from .reboundary_io import (SIDECAR_SUFFIX, Accepted, Commit, SpanIndex, conflict,
                             fetch_records, forward, load_clean_tables, members_from,
                             mutual_conflicts, rewrite, sanitize, sidecar_text, stored)
 from .reconcile import IUPAC_DEPTH_SEQ
 
-METHODS = ("consensus",)
+METHODS = ("consensus", "subfamily", "nearest")
 _I = {c: i for i, c in enumerate(COLUMNS)}
 
 
@@ -91,18 +91,25 @@ def _init(paths: Dict[str, str], tools_dir: str) -> None:
 
 def build_models(family: str, members: Sequence[Member], g: Genomes, s: Settings,
                  exclude: FrozenSet[str] = frozenset()) -> Tuple[List[Model], Optional[float], str]:
-    refs, modal = select_references(members, s.references, family, exclude)
+    many = s.method == "subfamily"
+    refs, modal = select_references(members, s.references, family, exclude,
+                                    n_young=150 if many else 40, n_random=150 if many else 40)
     if not refs:
         return [], modal, "too_few_references"
-    if s.method == "consensus":
-        model = consensus_model(family, refs, g, modal, s.mafft)
-        return ([model] if model else []), modal, ("ok" if model else "no_ltr_span")
-    raise ValueError(f"unknown method {s.method!r}")
+    if s.method == "subfamily":
+        models = subfamily_models(family, refs, g, modal, s.subfamily_jaccard, s.mafft)
+        return models, modal, ("ok" if models else "no_ltr_span")
+    model = consensus_model(family, refs, g, modal, s.mafft)
+    if model is None:
+        return [], modal, "no_ltr_span"
+    if s.method == "nearest":
+        return nearest_templates(model, refs, g), modal, "ok"
+    return [model], modal, "ok"
 
 
 def place_params(s: Settings) -> Params:
-    """Placement parameters for a run (the method may adjust them; see Task 10)."""
-    return s.place
+    """`nearest` takes the median of its top templates' placements (spec 5.1)."""
+    return replace(s.place, combine="median") if s.method == "nearest" else s.place
 
 
 @dataclass
@@ -552,6 +559,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="family model (default: consensus)")
     ap.add_argument("--references", choices=("modal", "tsd"), default="modal",
                     help="copies models are built from: modal-length (default) or TSD-bearing")
+    ap.add_argument("--subfamily-jaccard", type=float, default=0.5,
+                    help="with --method subfamily: LTR 11-mer Jaccard to join a cluster "
+                         "(default 0.5)")
     ap.add_argument("--min-copies", type=int, default=10,
                     help="families with fewer copies are left alone (default 10)")
     ap.add_argument("--min-identity", type=float, default=0.8,
@@ -602,7 +612,7 @@ def settings_from(args) -> Settings:
     return Settings(
         method=args.method, references=args.references, min_copies=args.min_copies,
         credit=args.credit, max_ratio=args.max_ratio, qc_min_n=args.qc_min_n,
-        untested=args.untested,
+        untested=args.untested, subfamily_jaccard=args.subfamily_jaccard,
         mutation_rate=resolve_mutation_rate(args.indir, args.prefix, args.mutation_rate),
         mafft=args.mafft, threads=args.threads,
         place=Params(min_identity=args.min_identity, anchor=not args.no_anchor,

@@ -102,3 +102,18 @@ def test_tsd_probe_reads_the_planted_duplication_and_not_the_null(fx, g, k2l_api
     found = lp.tsd_at(k2l_api, g, m, e.true_start, e.true_end)
     assert found not in (".", "NA") and len(found) >= 5
     assert lp.tsd_at(k2l_api, g, m, m.start, m.end) == "."
+
+
+def test_nearest_templates_are_references_whose_ends_the_consensus_confirms(fx, g, truth_model):
+    refs, _ = lm.select_references([m for m in members(fx) if m.family == FAMILY], "modal", FAMILY)
+    tpl = lp.nearest_templates(truth_model, refs, g)
+    assert len(tpl) >= 10 and all(t.model_id.startswith(f"{FAMILY}:tpl:") for t in tpl)
+    assert all(len(t.seq) == 400 for t in tpl)          # the truncated ref (ins_left) is not one
+
+
+def test_median_combining_agrees_with_best_on_a_clean_case(fx, g, truth_model):
+    refs, _ = lm.select_references([m for m in members(fx) if m.family == FAMILY], "modal", FAMILY)
+    tpl = lp.nearest_templates(truth_model, refs, g)
+    m, e = member(fx, "del_left")
+    p = lp.propose(m, tpl, g, lp.Params(combine="median"))
+    assert p.gate_ok and p.left == e.true_start

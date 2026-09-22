@@ -489,3 +489,41 @@ def tsd_enrichment(hits: int, n: int, p0: float, min_n: int,
     if n < min_n:
         return "untested"
     return "pass" if binom_sf(hits, n, max(p0, 0.005)) < alpha else "fail"
+
+
+def subfamily_models(family: str, refs: Sequence[Member], g: Genomes, modal: Optional[float],
+                     jaccard_min: float, mafft: str = "mafft") -> List[Model]:
+    """One consensus per cluster of similar reference LTRs (>= MIN_REFS copies), plus the rest.
+
+    Clusters grow greedily around centroids taken youngest-first (select_references
+    returns the youngest first), on canonical k-mer Jaccard of each reference's 5'
+    LTR. With no cluster big enough, this is the family consensus.
+    """
+    profiles = [canonical_kmers(oriented_ltrs(m, g)[0]) for m in refs]
+    centroids: List[int] = []
+    clusters: List[List[int]] = []
+    for i, prof in enumerate(profiles):
+        for c, members in zip(centroids, clusters):
+            if jaccard(prof, profiles[c]) >= jaccard_min:
+                members.append(i)
+                break
+        else:
+            centroids.append(i)
+            clusters.append([i])
+    models: List[Model] = []
+    big = [cl for cl in clusters if len(cl) >= MIN_REFS]
+    for n, cl in enumerate(big, start=1):
+        mo = consensus_model(family, [refs[i] for i in cl[:80]], g, modal, mafft,
+                             f"{family}:sub{n}")
+        if mo is not None:
+            models.append(mo)
+    rest = [refs[i] for cl in clusters if len(cl) < MIN_REFS for i in cl]
+    if big and len(rest) >= MIN_REFS:
+        mo = consensus_model(family, rest[:80], g, modal, mafft, f"{family}:rest")
+        if mo is not None:
+            models.append(mo)
+    if not models:
+        mo = consensus_model(family, list(refs)[:80], g, modal, mafft)
+        if mo is not None:
+            models.append(mo)
+    return models

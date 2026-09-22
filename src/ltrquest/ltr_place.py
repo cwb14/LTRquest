@@ -11,13 +11,15 @@ the caller put it: in the feasibility spike, trimming was wrong most of the time
 
 from __future__ import annotations
 
+import dataclasses
+import statistics
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import parasail
 
 from .ltr_model import (GAP_EXTEND, GAP_OPEN, Genomes, Member, Model, canonical_kmers, glocal,
-                        jaccard, matrix, rc)
+                        jaccard, matrix, oriented_ltrs, rc)
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,7 @@ class Params:
     anchor_len: int = 30
     max_indel: int = 5000
     n_models: int = 3               # models tried per element when a family has several
+    combine: str = "best"      # best | median of the top n_models placements
 
 
 @dataclass(frozen=True)
@@ -154,16 +157,23 @@ def candidate_models(m: Member, models: Sequence[Model], g: Genomes, n: int) -> 
 
 
 def propose(m: Member, models: Sequence[Model], g: Genomes, p: Params) -> Optional[Proposal]:
-    best = None
+    cands = []
     for model in candidate_models(m, models, g, p.n_models):
+        top = None
         for o in ((m.strand,) if m.stranded else ("+", "-")):
             fwd = model.seq if o == "+" else rc(model.seq)
             c = core(m, fwd, g)
-            if c is not None and (best is None or c.score > best[0].score):
-                best = (c, model, o, fwd)
-    if best is None:
+            if c is not None and (top is None or c.score > top[0].score):
+                top = (c, model, o, fwd)
+        if top is not None:
+            cands.append(top)
+    if not cands:
         return None
-    c, model, o, fwd = best
+    cands.sort(key=lambda t: -t[0].score)
+    c, model, o, fwd = cands[0]
+    if p.combine == "median" and len(cands) >= 3:
+        c = dataclasses.replace(c, left=int(statistics.median(x[0].left for x in cands)),
+                                right=int(statistics.median(x[0].right for x in cands)))
 
     left, left_id, left_src = c.left, c.id_left, "core"
     if p.anchor and c.id_left < p.min_identity:
@@ -264,3 +274,22 @@ def tsd_at(api, g: Genomes, m: Member, left: int, right: int, shift: int = 0) ->
         return "NA"
     hit = api.find_tsd(a + b, 10, 30, api.TSD_K, api.TSD_SHIFTS)
     return hit[0] if hit else "."
+
+
+def nearest_templates(consensus: Model, refs: Sequence[Member], g: Genomes,
+                      tol: int = 2) -> List[Model]:
+    """References whose called outer ends the family consensus confirms, as models of their own.
+
+    A template's termini are then checked by its family rather than taken on trust.
+    Falls back to the consensus itself when no reference qualifies.
+    """
+    out: List[Model] = []
+    for m in refs:
+        fwd = consensus.seq if m.strand != "-" else rc(consensus.seq)
+        c = core(m, fwd, g)
+        if c is None or abs(c.left - m.start) > tol or abs(c.right - m.end) > tol:
+            continue
+        five, _ = oriented_ltrs(m, g)
+        out.append(Model(f"{consensus.family}:tpl:{m.key}", consensus.family, five,
+                         consensus.modal_len, 1))
+    return out or [consensus]
