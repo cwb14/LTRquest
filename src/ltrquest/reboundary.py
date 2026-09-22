@@ -100,6 +100,11 @@ def build_models(family: str, members: Sequence[Member], g: Genomes, s: Settings
     raise ValueError(f"unknown method {s.method!r}")
 
 
+def place_params(s: Settings) -> Params:
+    """Placement parameters for a run (the method may adjust them; see Task 10)."""
+    return s.place
+
+
 @dataclass
 class FamilyResult:
     family: str
@@ -123,7 +128,7 @@ def family_job(args) -> FamilyResult:
     if not kept:
         fr.status = "ratio_failed"   # proposals still computed, so the sidecar says what failed
     for m in members:
-        p = propose(m, kept or models, _G, s.place)
+        p = propose(m, kept or models, _G, place_params(s))
         if p is None:
             continue
         fr.proposals.append(p)
