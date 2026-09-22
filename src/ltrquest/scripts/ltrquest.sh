@@ -155,6 +155,9 @@ RUN_PLOTS=true
 STRAND_RECOVERY=""
 STRAND_RECOVERY_PPT=false
 
+# Family-guided re-boundarying of truncated calls (opt-in post-processing)
+REBOUNDARY=false
+
 # FP-family correction (post-detection Kmer2LTR stage)
 FP_MASK_THRESHOLD="0.10"   # user-tunable: FP-element fraction above which the
                            # genome is hard-masked and the pipeline auto-re-runs
@@ -295,6 +298,15 @@ Optional:
                         Needs blast+, and minimap2 for balanced/sensitive.
   --strand-recovery-ppt Add the polypurine-tract fallback for loci homology
                         cannot reach. Measured at 93%, so off by default.
+  --reboundary          Extend LTR-RT calls that stop short of their true ends
+                        (an indel or a mutation-dense patch near an LTR end stops
+                        LTRharvest/LTR_FINDER early). Each family's LTR model,
+                        built from its full-length copies across all genomes,
+                        proposes the ends; Kmer2LTR re-scores every changed
+                        element. Extends only, never trims. Rewrites the _clean_
+                        tables and FASTAs and writes <out_prefix>_reboundary.tsv.
+                        Off by default. Needs mafft. For a finished run use
+                        ltrquest-reboundary --posthoc instead.
 
 Post-detection FP-family correction runs automatically: it clusters the detected
 LTR-RTs with Kmer2LTR, purges false-positive families into
@@ -535,6 +547,10 @@ promote_fp_outputs() {
     # produced one, if the stage failed. The promotion below moves this
     # attempt's own sidecar in afterwards when there is one.
     rm -f "${dst}/${p}_strand_recovery.tsv"
+    # Same for re-boundarying: a sidecar or post-hoc backup left by an earlier
+    # run describes that run's elements, not these.
+    rm -f "${dst}/${p}_reboundary.tsv"
+    rm -rf "${dst}/${p}_pre_reboundary"
   done
 
   shopt -s nullglob
@@ -766,6 +782,16 @@ run_annotation_stage() {
     "${ANNOTATE[@]}" --prefix "$p" --indir . "${fam_opts[@]}" "${rec_opts[@]}"
     set +x
 
+    if [[ "$REBOUNDARY" == true ]]; then
+      # Re-orient now, not after the GFF3: re-boundarying renames the elements
+      # the apply phase looks up by name, and the GFF3 reads neither the FASTAs
+      # nor the orientation column, so it can come after.
+      if (( ${#rec_opts[@]} > 0 )); then
+        reorient_recovered "$p"
+      fi
+      continue
+    fi
+
     echo ""
     echo "============================================================"
     echo "Writing LTR-RT GFF3 for ${p}..."
@@ -778,18 +804,84 @@ run_annotation_stage() {
     # annotator just wrote, so a recovered minus element is stored in coding
     # sense exactly like a TEsorter2-called one.
     if (( ${#rec_opts[@]} > 0 )); then
-      echo ""
-      echo "============================================================"
-      echo "Re-orienting ${p} depth FASTAs to the recovered strand..."
-      set -x
-      "${RECOVER[@]}" --phase apply --prefix "$p" --indir . || {
-        set +x
-        echo "WARNING: could not re-orient the depth FASTAs for ${p}; the tables" >&2
-        echo "and GFF3s still carry the recovered strand." >&2
-      }
-      set +x
+      reorient_recovered "$p"
     fi
   done
+
+  [[ "$REBOUNDARY" == true ]] || return 0
+  run_reboundary_stage
+  local -a rb_opts=()
+  for i in "${!OUT_PREFIXES[@]}"; do
+    p="${OUT_PREFIXES[$i]}"
+    depth_tables_for "$p" tsv annot_tsvs
+    (( ${#annot_tsvs[@]} > 0 )) || continue
+    rec_opts=()
+    if [[ -n "$STRAND_RECOVERY" && -s "${p}_strand_recovery.tsv" ]]; then
+      rec_opts=( --recovered-strands "${p}_strand_recovery.tsv" )
+    fi
+    rb_opts=()
+    if [[ -s "${p}_reboundary.tsv" ]]; then
+      rb_opts=( --reboundary-map "${p}_reboundary.tsv" )
+    fi
+    echo ""
+    echo "============================================================"
+    echo "Writing LTR-RT GFF3 for ${p}..."
+    set -x
+    "${GFF3[@]}" --prefix "$p" --indir . \
+      --genome "${p}.input_genome.fa" "${fam_opts[@]}" "${rec_opts[@]}" "${rb_opts[@]}"
+    set +x
+  done
+}
+
+reorient_recovered() {
+  local p="$1"
+  echo ""
+  echo "============================================================"
+  echo "Re-orienting ${p} depth FASTAs to the recovered strand..."
+  set -x
+  "${RECOVER[@]}" --phase apply --prefix "$p" --indir . || {
+    set +x
+    echo "WARNING: could not re-orient the depth FASTAs for ${p}; the tables" >&2
+    echo "and GFF3s still carry the recovered strand." >&2
+  }
+  set +x
+}
+
+# Pooled over every genome: a family's LTR model is built from all its copies,
+# whichever genome they sit in. After the annotator (it needs the family and
+# strand columns) and before the GFF3 (which must learn the names it changes).
+run_reboundary_stage() {
+  local i p
+  local -a prefixes=() genomes=() cleaned=()
+  for i in "${!OUT_PREFIXES[@]}"; do
+    p="${OUT_PREFIXES[$i]}"
+    shopt -s nullglob
+    cleaned=( "${p}"_depth*_clean_ltr.tsv )
+    shopt -u nullglob
+    (( ${#cleaned[@]} > 0 )) || continue
+    prefixes+=( "$p" )
+    # The ORIGINAL genome, as for strand recovery: from FP attempt 2 onward the
+    # staged input is the hard-masked FASTA.
+    genomes+=( "${abs_genomes[$i]:-${p}.input_genome.fa}" )
+  done
+  if (( ${#prefixes[@]} == 0 )); then
+    echo "WARNING: no _clean_ depth tables; skipping --reboundary." >&2
+    return 0
+  fi
+  resolve_merged_tools_dir
+  ensure_kmer2ltr_dir
+  echo ""
+  echo "============================================================"
+  echo "Re-boundarying truncated LTR-RT calls (${#prefixes[@]} genome(s), pooled)..."
+  set -x
+  if "${REBOUND[@]}" --indir . --prefix "${prefixes[@]}" --genome "${genomes[@]}" \
+       --threads "$THREADS" --mutation-rate "$MUTATION_RATE" --tools-dir "$TOOLS_DIR"; then
+    set +x
+  else
+    set +x
+    echo "WARNING: re-boundarying failed; the calls are kept as detected." >&2
+    for p in "${prefixes[@]}"; do rm -f "${p}_reboundary.tsv"; done
+  fi
 }
 
 # Pooled post-detection stage: concatenate every genome's depth FASTAs, cluster
@@ -926,6 +1018,8 @@ carry_forward_genome() {
       # killed run can leave behind and which ends in '.work' like the ones
       # above that ARE carried forward.
       *_strand_recovery.*) continue;;
+      # Re-boundarying's sidecar and a post-hoc backup belong to one attempt too.
+      *_reboundary.*|*_pre_reboundary) continue;;
     esac
     if [[ -d "$e" && ( "$name" == *.work || "$name" == *_tools ) ]]; then
       cp -al "$e" "${adir}/"
@@ -1255,6 +1349,7 @@ while [[ $# -gt 0 ]]; do
       [[ -n "$STRAND_RECOVERY" ]] || die "--strand-recovery needs a value: conservative, balanced or sensitive"
       shift 2;;
     --strand-recovery-ppt) STRAND_RECOVERY_PPT=true; shift;;
+    --reboundary) REBOUNDARY=true; shift;;
     --fp-mask-threshold) FP_MASK_THRESHOLD="${2:-}"; shift 2;;
     --no-plots) RUN_PLOTS=false; shift;;
     --redetect) REDETECT=true; shift;;
@@ -1317,6 +1412,12 @@ if [[ -n "$STRAND_RECOVERY" ]]; then
   fi
 elif [[ "$STRAND_RECOVERY_PPT" == true ]]; then
   die "--strand-recovery-ppt has no effect without --strand-recovery"
+fi
+
+# --reboundary builds family LTR models with mafft; fail now, not after detection.
+if [[ "$REBOUNDARY" == true ]]; then
+  command -v mafft >/dev/null 2>&1 \
+    || die "--reboundary needs mafft on PATH to build family LTR models; it is in environment.yml"
 fi
 
 # ----------------------------
@@ -1390,6 +1491,7 @@ GFF3=(      "$PY" -m ltrquest.gff3      )
 FLAG_FP=(   "$PY" -m ltrquest.flag_fp   )
 RECOVER=(   "$PY" -m ltrquest.recover_strand )
 RECORD=(    "$PY" -m ltrquest.record    )
+REBOUND=(   "$PY" -m ltrquest.reboundary )
 
 # ----------------------------
 # Config: IUPAC codes to use for successive rounds (exclude V)

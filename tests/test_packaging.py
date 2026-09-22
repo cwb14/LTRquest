@@ -17,10 +17,10 @@ import ltrquest
 from ltrquest import cli
 
 STAGES = ["detect", "mask", "reconcile", "annotate", "gff3", "recover_strand", "record",
-          "plot_struct", "plot_summary", "tegv"]
+          "plot_struct", "plot_summary", "tegv", "reboundary"]
 CONSOLE_SCRIPTS = ["ltrquest", "ltrquest-plots", "ltrquest-detect", "ltrquest-mask",
                    "ltrquest-reconcile", "ltrquest-annotate", "ltrquest-gff3",
-                   "ltrquest-flagfp", "ltrquest-recover-strand"]
+                   "ltrquest-flagfp", "ltrquest-recover-strand", "ltrquest-reboundary"]
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
