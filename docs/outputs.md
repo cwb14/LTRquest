@@ -366,11 +366,10 @@ it on every member. The model's ends come only from where the family's 5′ and 
 copies stop agreeing — never from a TSD or TG..CA (the `motif` column above records
 this as `tg...ca`). Ends move outward only. A family
 whose model is implausibly long, or whose proposed ends show no TSD enrichment over a
-displaced-flank null, is left alone. A genome with no `_depth<N>_clean_ltr.tsv`
-tables at all is warned about and skipped rather than aborting the run; such a genome
-contributes nothing to the pooled family models or the rewritten tables. Each widened
-element is re-scored by Kmer2LTR, which settles the final ends and every Kmer2LTR
-column (LTR coordinates, divergence, K2P, time, TSD, motif, CIGAR).
+displaced-flank null, is left alone. Each widened element is re-scored by Kmer2LTR,
+which settles the final ends and every Kmer2LTR column (LTR coordinates, divergence,
+K2P, time, TSD, motif, CIGAR). A genome with no `_depth<N>_clean_ltr.tsv` tables is
+warned about and skipped rather than aborting the run.
 
 What changes: the `_clean_` depth tables and FASTAs, the GFF3s and the plots. The raw
 `<prefix>_depth<N>_ltr.{tsv,fa}` tables keep the calls as detected. Family labels do

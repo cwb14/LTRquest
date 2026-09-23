@@ -326,8 +326,13 @@ Already have a finished run? Update it in place (originals are kept in
 ltrquest-reboundary --posthoc --indir my_run --prefix A_LTRs B_LTRs --genome A.fa B.fa --threads 32
 ```
 
+On four *Poa* genomes it extended 20,925 of 64,181 candidate calls; 56% of those landed
+on a target-site duplication, against 1% for a displaced-flank control, and TG..CA
+termini went from 32% to 61%. Adds ~25 min to a four-genome run.
+
 Every candidate, and why it was or was not extended, is in `<prefix>_reboundary.tsv`.
 Details: [docs/outputs.md §8](docs/outputs.md#8-re-boundarying---reboundary).
+Benchmarks: [benchmarks/reboundary/](benchmarks/reboundary/README.md).
 
 ## Nextflow
 
