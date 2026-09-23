@@ -338,6 +338,40 @@ def test_every_method_recovers_the_deletion(tmp_path, mafft, method):
     assert p.gate_ok and p.left == e.true_start
 
 
+@pytest.mark.parametrize("method", ["consensus", "subfamily", "nearest"])
+def test_no_element_is_re_boundaried_by_a_model_it_helped_build(tmp_path, mafft, method):
+    """Leave-one-out in the production path: `build_models` is called the way the
+    driver calls it, with no exclusion, and no element may still be placed by a model
+    its own sequence went into."""
+    from ltrquest.ltr_model import Genomes
+    from ltrquest.ltr_place import candidate_models, propose
+    from reboundary_fixtures import FAMILY, members
+    fx = build(tmp_path / "syn_loo")
+    g = Genomes({fx.prefix: str(fx.genome)})
+    fam = [m for m in members(fx) if m.family == FAMILY]
+    s = rb.Settings(method=method, mafft=mafft)
+    models, _, status = rb.build_models(FAMILY, fam, g, s)
+    assert status == "ok"
+    built = {u for mo in models for u in mo.refs}
+    assert len(built) >= 10                       # every model says who built it
+    for m in (x for x in fam if x.uid in built):
+        for mo in candidate_models(m, models, g, len(models)):
+            assert m.uid not in mo.refs
+        p = propose(m, models, g, rb.place_params(s))
+        assert p is None or m.key not in p.model_id
+
+
+def test_a_family_below_the_reference_floor_says_so_rather_than_failing(tmp_path):
+    from ltrquest.ltr_model import Genomes
+    from reboundary_fixtures import FAMILY, members
+    fx = build(tmp_path / "syn_floor")
+    g = Genomes({fx.prefix: str(fx.genome)})
+    fam = [m for m in members(fx) if m.family == FAMILY]
+    models, _, status = rb.build_models(FAMILY, fam, g, rb.Settings(), frozenset(
+        m.key for m in fam[:-5]))
+    assert (models, status) == ([], "too_few_references")
+
+
 def test_nearest_uses_median_combining():
     assert rb.place_params(rb.Settings(method="nearest")).combine == "median"
     assert rb.place_params(rb.Settings(method="consensus")).combine == "best"

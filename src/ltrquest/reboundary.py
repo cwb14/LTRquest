@@ -44,6 +44,10 @@ from .reconcile import IUPAC_DEPTH_SEQ
 
 METHODS = ("consensus", "subfamily", "nearest")
 _I = {c: i for i, c in enumerate(COLUMNS)}
+# Bump when a pickled FamilyResult changes shape, so `--cache` files written by an
+# older build are recomputed instead of being loaded into the new code.
+# 2: Model carries `refs` and no longer pickles its k-mer index.
+CACHE_FORMAT = 2
 
 
 def log(msg: str) -> None:
@@ -75,6 +79,7 @@ class Settings:
         # cached phase covering more families is reused for fewer (see _family_phase).
         keep = ("method", "references", "subfamily_jaccard", "max_ratio", "place")
         d = {k: v for k, v in asdict(self).items() if k in keep}
+        d["cache_format"] = CACHE_FORMAT
         return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
 
@@ -91,6 +96,16 @@ def _init(paths: Dict[str, str], tools_dir: str) -> None:
 
 def build_models(family: str, members: Sequence[Member], g: Genomes, s: Settings,
                  exclude: FrozenSet[str] = frozenset()) -> Tuple[List[Model], Optional[float], str]:
+    """The family's model(s), the modal called LTR length, and what stopped a model.
+
+    Leave-one-out does not depend on this call: every model records the copies whose
+    sequence went into it (`Model.refs`), and `ltr_place.candidate_models` refuses a
+    model for the element that built it. `exclude` is the stronger, caller-driven
+    form -- the copies named are kept out of the reference pool altogether, which the
+    benchmark uses to keep a planted element out of its family's model. It can drop a
+    family below MIN_REFS; that returns 'too_few_references' and no model, which
+    `family_job` and the sidecar already report.
+    """
     if s.method not in METHODS:
         raise ValueError(f"unknown method {s.method!r}")
     many = s.method == "subfamily"

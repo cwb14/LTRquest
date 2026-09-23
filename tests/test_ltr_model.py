@@ -110,6 +110,26 @@ def test_polish_ends_trims_overhangs(fx, g, fam):
     assert (ds, de) == (-3, -3) and seq[:10] == fx.ltr[:10] and seq[-10:] == fx.ltr[-10:]
 
 
+def test_a_model_does_not_carry_its_kmer_index_through_a_pickle():
+    """`nearest` makes up to 80 models per family; every one used to ship its k-mer
+    set back to the parent and into --cache."""
+    import pickle
+    rng = random.Random(11)
+    seq = "".join(rng.choice("ACGT") for _ in range(1600))
+    mo = lm.Model("f:consensus", "f", seq, 400.0, 12)
+    assert len(mo.kmers) > 1000                     # built on demand
+    blob = pickle.dumps(mo)
+    assert len(blob) < 2 * len(seq)
+    back = pickle.loads(blob)
+    assert back == mo and back.kmers == mo.kmers
+
+
+def test_a_model_records_the_copies_it_was_built_from(fx, g, fam, mafft):
+    refs, modal = lm.select_references(fam, "modal", FAMILY)
+    model = lm.consensus_model(FAMILY, refs, g, modal, mafft)
+    assert model.refs == {r.uid for r in refs}
+
+
 def test_ratio_ok():
     m = lm.Model("f:consensus", "f", "A" * 459, 400.0, 20)
     assert lm.ratio_ok(m, 1.15) and not lm.ratio_ok(m, 1.10)

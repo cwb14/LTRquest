@@ -117,3 +117,59 @@ def test_median_combining_agrees_with_best_on_a_clean_case(fx, g, truth_model):
     m, e = member(fx, "del_left")
     p = lp.propose(m, tpl, g, lp.Params(combine="median"))
     assert p.gate_ok and p.left == e.true_start
+
+
+def test_an_element_is_never_a_model_for_itself(fx, g, truth_model):
+    """Leave-one-out is carried by the model, not by a caller that must remember it."""
+    m, _ = member(fx, "del_left")
+    mine = dataclasses.replace(truth_model, model_id=f"{FAMILY}:mine",
+                               refs=frozenset({m.uid}))
+    assert lp.candidate_models(m, [mine, truth_model], g, 3) == [truth_model]
+    assert lp.propose(m, [mine], g, lp.Params()) is None
+    assert lp.propose(m, [mine, truth_model], g, lp.Params()).model_id == truth_model.model_id
+
+
+def test_the_gates_describe_the_coordinate_that_is_committed(fx, g, truth_model):
+    """Two models agree on an end 20 bp too far out; the third, best-scoring one does not.
+
+    The median end is the two's, so the identity that authorises it must be theirs
+    as well -- with the best model's 1.0 the element would be committed to an end
+    no model ever scored.
+    """
+    m, e = member(fx, "del_left")
+    junk = ("GATTACA" * 3)[:20]
+    over = [lm.Model(f"{FAMILY}:over{i}", FAMILY, junk + fx.ltr, 400.0, 5) for i in (1, 2)]
+    c_over = lp.core(m, over[0].seq, g)
+    assert c_over.left < lp.core(m, truth_model.seq, g).left == e.true_start
+    assert c_over.id_left < lp.Params().min_identity        # only the outer end is wrong
+    assert c_over.whole >= lp.Params().min_whole_identity   # the other gate does not save it
+    p = lp.propose(m, [truth_model] + over, g, lp.Params(combine="median"))
+    assert p.raw_left == c_over.left                      # the median end, as before
+    assert p.id_left == pytest.approx(c_over.id_left)     # scored where it was committed
+    assert not p.gate_ok and p.left == m.start
+
+
+def test_a_reference_whose_inner_end_is_over_called_is_not_a_template(fx, g, truth_model):
+    """An inner end nothing checked sets the target's opposite outer end (6 bp clears
+    the outer-30 gate and quietly destroys the TSD), so it is checked like the outer
+    ends: the consensus has to put it in the same place."""
+    fam = [x for x in members(fx) if x.family == FAMILY]
+    refs, _ = lm.select_references(fam, "modal", FAMILY)
+    over = [dataclasses.replace(r, l1=r.l1 + 6, r0=r.r0 - 6) for r in refs]
+    tpl = lp.nearest_templates(truth_model, over, g)
+    assert [t.model_id for t in tpl] == [truth_model.model_id]     # none qualifies
+    m, e = member(fx, "del_left")
+    p = lp.propose(m, tpl, g, lp.Params(combine="median"))
+    assert p.gate_ok and (p.left, p.right) == (e.true_start, e.end)
+
+
+def test_a_placement_that_misses_the_call_is_refused(fx, g, truth_model):
+    """The window is widened by either LTR's deficit, so it can reach a neighbouring
+    copy. A placement that does not overlap the element's own call is not a placement
+    of that element."""
+    n = [x for x in members(fx) if x.family == FAMILY and x.len_left == 400
+         and x.strand == "+"][0]
+    ghost = dataclasses.replace(n, start=n.end + 60, l1=n.end + 99,
+                                r0=n.end + 900, end=n.end + 1299)
+    assert lp.core(ghost, truth_model.seq, g) is None
+    assert lp.propose(ghost, [truth_model], g, lp.Params()) is None

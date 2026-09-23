@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import zlib
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -116,17 +116,37 @@ def jaccard(a: FrozenSet[str], b: FrozenSet[str]) -> float:
 
 @dataclass(frozen=True)
 class Model:
+    """A family LTR model, and the copies whose sequence went into it.
+
+    `refs` is what makes leave-one-out a property of the model rather than
+    something every caller has to remember: a copy listed here can never be
+    re-boundaried by this model (see `ltr_place.candidate_models`).
+    """
+
     model_id: str
     family: str
     seq: str            # biological 5'->3'
     modal_len: float    # the family's modal called LTR length
     n_refs: int
-    kmers: FrozenSet[str] = field(default=frozenset(), repr=False,
-                                   compare=False)
+    refs: FrozenSet[str] = frozenset()   # Member.uid of every copy that built it
 
-    def __post_init__(self):
-        if not self.kmers:
-            object.__setattr__(self, "kmers", canonical_kmers(self.seq))
+    @property
+    def kmers(self) -> FrozenSet[str]:
+        """The k-mer index, built on first use and never pickled.
+
+        `nearest` makes one model per reference copy, up to 80 per family, and
+        every one of them travels back from its worker and into `--cache`. The
+        index is ~120 kB per model and is wanted only while models are being
+        ranked, so it is cached on the instance and left out of `__getstate__`.
+        """
+        ks = self.__dict__.get("_kmers")
+        if ks is None:
+            ks = canonical_kmers(self.seq)
+            object.__setattr__(self, "_kmers", ks)
+        return ks
+
+    def __getstate__(self):
+        return {k: v for k, v in self.__dict__.items() if k != "_kmers"}
 
 
 class Genomes:
@@ -444,7 +464,7 @@ def consensus_model(family: str, refs: Sequence[Member], g: Genomes,
         return None
     seq, _ = polish_ends(seq, refs, g)
     return Model(model_id or f"{family}:consensus", family, seq, modal,
-                 len(refs))
+                 len(refs), frozenset(m.uid for m in refs))
 
 
 def ratio_ok(model: Model, max_ratio: float) -> bool:
@@ -499,16 +519,16 @@ def subfamily_models(family: str, refs: Sequence[Member], g: Genomes, modal: Opt
     returns the youngest first), on canonical k-mer Jaccard of each reference's 5'
     LTR. With no cluster big enough, this is the family consensus.
     """
-    profiles = [canonical_kmers(oriented_ltrs(m, g)[0]) for m in refs]
-    centroids: List[int] = []
-    clusters: List[List[int]] = []
-    for i, prof in enumerate(profiles):
-        for c, members in zip(centroids, clusters):
-            if jaccard(prof, profiles[c]) >= jaccard_min:
+    centroids: List[FrozenSet[str]] = []     # only the centroids' k-mers are kept:
+    clusters: List[List[int]] = []           # up to 300 references are profiled here
+    for i, m in enumerate(refs):
+        prof = canonical_kmers(oriented_ltrs(m, g)[0])
+        for cent, members in zip(centroids, clusters):
+            if jaccard(prof, cent) >= jaccard_min:
                 members.append(i)
                 break
         else:
-            centroids.append(i)
+            centroids.append(prof)
             clusters.append([i])
     models: List[Model] = []
     big = [cl for cl in clusters if len(cl) >= MIN_REFS]
