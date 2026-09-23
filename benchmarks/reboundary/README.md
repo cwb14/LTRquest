@@ -51,6 +51,18 @@ python $B collect --out reboundary_bench
 
 ## Results
 
+**The stage tables below (Stage 1 through Stage 4b) are the record of the sweep
+that chose the defaults, run on pre-fix code; their numbers are historical, not
+current.** The code was fixed twice afterward (production leave-one-out,
+per-end argmedian gates, inner-end validation, a placement-overlap
+requirement, and the host-key collision guard). Only "### At the chosen
+defaults" below carries post-fix numbers. The method choice itself
+(`method=nearest`) was re-verified post-fix at n=3000: `consensus_modal`
+exact/±1 0.3941 vs `nearest_modal` 0.4037 (z=+2.14, p=0.032), so `nearest`
+remains the default — and both methods improved markedly against their
+pre-fix values (0.3247 and 0.3350 respectively, from Stage 1's n=3000 table
+below).
+
 Data: 4 *Poa* genomes (annua, chaixii, infirma, supina), LTRquest run of 2026-09-19
 (208,018 elements). Kmer2LTR aa25f46. Tables are pasted from `bench.py collect` and
 from the four-stage tuning sweep (`tune.sh 1|2|3|4a|4b`, full ledger:
@@ -92,7 +104,7 @@ rule itself never moved):
 | nearest_tsd     | 0.3413 | 0.0192 | 0.0165 | 0.0187 | 56/3000 |
 
 The B1-false ordering *reversed* between n=500 and n=3000 and all three pairs are
-statistically indistinguishable there (two-proportion z, p = 0.65, 0.65, 0.87) —
+statistically indistinguishable there (two-proportion z, p = 0.78, 0.65, 0.87) —
 direct evidence the n=500 ranking was noise. Falling through to exact/±1:
 nearest_tsd and nearest_modal both beat consensus_modal (p = 0.0001, p = 0.017) but
 tie with each other (p = 0.14); the plan's stated preference order (modal before
@@ -241,42 +253,59 @@ them, so it is kept.
 
 ### At the chosen defaults
 
-Real run, 4 Poa genomes, 208,018 elements
-(`reboundary_bench/tune4b/b2_n5_accept/summary.json`):
+Real run, 4 Poa genomes, 208,018 elements. **Post-fix** — measured after both
+rounds of fixes described in the note at the top of Results, from
+`/data2/chris/poa_LTR/ltrquest_run/reboundary_bench/verify/b2_final/summary.json`.
+These numbers supersede the pre-fix figures this subsection carried before;
+Stage 1 through Stage 4b above remain pre-fix, unchanged:
 
-candidates 65,712 -> extended 21,505; TSD at the new boundary 0.5534 vs the
-displaced-flank null 0.0100; cross-validated 0.5259 vs null 0.0096 (n=13,507);
-TG..CA 0.3191 -> 0.6242; extension median 316 bp, q90 1,273 bp; dK2P median
-0.0018; 79 s, 4.07 GB.
+candidates 64,181 -> extended 20,925; TSD at the new boundary 0.5648 vs the
+displaced-flank null 0.0102; cross-validated 0.5352 vs null 0.0094 (n=13,170);
+TG..CA 0.3170 -> 0.6104; extension median 323 bp, q90 1,269 bp; dK2P median
+0.00182; already-TSD-bearing calls changed 0.0143; peak RSS 3.98 GB; runtime
+~26 min end-to-end including the family phase, ~80 s when the family phase is
+cached.
 
-| element age (K2P) | candidates | extended | TSD recovery |
-|---|---|---|---|
-| < 0.005 | 6,937 | 1,935 | 0.6475 |
-| 0.005-0.02 | 19,215 | 6,950 | 0.6627 |
-| 0.02-0.05 | 23,029 | 8,215 | 0.5585 |
-| >= 0.05 | 16,531 | 4,405 | 0.3341 |
+The post-fix run extends about 2.7% fewer elements than the pre-fix
+measurement (20,925 vs 21,505) but scores better on every quality axis: TSD
+0.5534 -> 0.5648, cross-validated 0.5259 -> 0.5352, already-TSD-bearing calls
+touched 0.0154 -> 0.0143. The fixes removed bad extensions, not good ones.
+`duplicates_host 6` in the rejections below is the host-key collision guard
+actually firing, six times, on real data — that defect was reachable, not
+theoretical.
 
-Rejections (of 65,712 candidates):
+| element age (K2P) | TSD recovery |
+|---|---|
+| < 0.005 | 0.6659 |
+| 0.005-0.02 | 0.6761 |
+| 0.02-0.05 | 0.5686 |
+| >= 0.05 | 0.3377 |
+
+Rejections (of 64,181 candidates; sums to 64,181 - 20,925 = 43,256):
 
 | reason | n |
 |---|---|
-| gate_identity | 31,618 |
-| family_qc_failed | 4,634 |
-| overlaps_element | 3,923 |
-| kmer2ltr_not_pass | 3,475 |
-| host_exceeded | 269 |
-| engulfs_element | 154 |
-| kmer2ltr_reverted | 105 |
+| gate_identity | 31,816 |
+| family_qc_failed | 3,804 |
+| overlaps_element | 3,741 |
+| kmer2ltr_not_pass | 3,339 |
+| host_exceeded | 274 |
+| engulfs_element | 149 |
+| kmer2ltr_reverted | 98 |
 | length_filter | 29 |
+| duplicates_host | 6 |
 
 For comparison, the plan's original defaults (`method=consensus, credit=200`, all
 else the same) gave 18,555 extended with cv TSD 0.5102 (Stage 1's
-`consensus_modal` row) — the tuned defaults extend 15.9% more elements at
-slightly better specificity.
+`consensus_modal` row, pre-fix) — the tuned, pre-fix defaults extended 15.9%
+more elements at slightly better specificity than that untuned pre-fix
+baseline. Both sides of that particular comparison predate the fixes; it is
+kept as the sweep's original justification for tuning at all, not as a claim
+about the post-fix numbers above.
 
 ### What the benchmark could not measure
 
-These four points matter more than which cell won, because they bound how much
+These five points matter more than which cell won, because they bound how much
 confidence the numbers above deserve:
 
 - **The plan's gates were unreachable on real data.** The plan called for B2
@@ -313,3 +342,23 @@ confidence the numbers above deserve:
   `max_ratio=1.15` and `max_ratio=1.25` are likewise identical: the length-ratio
   QC gate only binds below 1.15. Neither knob needs tuning again inside these
   ranges.
+- **The reported TG..CA improvement is contaminated at its own 2 bp
+  resolution.** `nearest_templates` (`ltr_place.py`), the `method=nearest`
+  path re-boundarying defaults to, accepts a reference member as a template
+  when the family consensus confirms the reference's called ends within
+  `tol=2` bp, then cuts the template's sequence from that reference's own
+  CALLED span (`m.start..m.l1`) — not from any independently known true
+  boundary, since none exists on real data. A reference whose original
+  LTRharvest / LTR_FINDER call already happened to land on TG..CA supplies a
+  template that already carries that motif at its terminus, and a target
+  placed against it within the same ~2 bp window inherits it regardless of
+  whether the target's own true end is really TG..CA. So `TG..CA new`
+  (0.3170 -> 0.6104) is a real number but partly self-fulfilling at the 2 bp
+  scale templates are matched to, not independent confirmation. The TSD
+  criterion — the module's headline evidence — is NOT affected by this: a
+  call's TSD is read from the host genome's own flanking sequence at that
+  element's own locus (`tsd_at`, `ltr_place.py`), a different genomic
+  location, and a different insertion event, than any of the reference
+  elements that built the family model or its templates. A reference's
+  sequence has no path into another element's flanking host DNA, so TSD
+  recovery is independent confirmation in a way `TG..CA new` is not.

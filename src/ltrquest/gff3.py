@@ -295,6 +295,27 @@ def order_block_lines(lines: Sequence[str]) -> List[str]:
     return [lines[0]] + sorted(lines[1:], key=_line_sort_key)
 
 
+def build_alias_key(rebound: Dict[str, Rebound]) -> Dict[str, str]:
+    """old element key -> its re-boundaried coordinate key, old_name-parseable only.
+
+    element_key(r.old_name) is None when old_name cannot be parsed. That should
+    never happen -- the reboundary map is written from names this same parser
+    already accepted -- but a caller doing alias_key.get(key, key) relies on a
+    missing key falling back to `key`; inserting a None value instead would
+    return None and silently degrade or corrupt whatever reads it. Skip it
+    instead, so an unparseable entry loses only its alias, not the fallback.
+    """
+    alias_key = {}
+    for old_key, r in rebound.items():
+        parsed = element_key(r.old_name)
+        if parsed is None:
+            warn(f"reboundary map old_name is unparseable, skipping alias: "
+                 f"{r.old_name!r}")
+            continue
+        alias_key[old_key] = parsed
+    return alias_key
+
+
 def build_element_blocks(prefix: str, tables, ranker: SeqidRanker,
                          provenance: Dict[str, Tuple[str, str]],
                          families, verbose: bool = False,
@@ -308,7 +329,7 @@ def build_element_blocks(prefix: str, tables, ranker: SeqidRanker,
     """
     family_by_name, family_by_coord = families
     rebound = rebound or {}
-    alias_key = {k: element_key(r.old_name) for k, r in rebound.items()}
+    alias_key = build_alias_key(rebound)
     alias_name = {r.new_name: r.old_name for r in rebound.values()}
     blocks: List[Block] = []
     skipped = 0
@@ -657,7 +678,7 @@ def convert(prefix: str, indir: str = ".", genome: Optional[str] = None,
                              consensus_cluster=consensus_cluster,
                              family_prefix=family_prefix)
     rebound = read_map(reboundary_map) if reboundary_map else {}
-    alias = {k: element_key(r.old_name) for k, r in rebound.items()}
+    alias = build_alias_key(rebound)
     provenance = strand_provenance(prefix, indir, tables, families, verbose,
                                    recovered_strands, alias)
     element_blocks, skipped = build_element_blocks(prefix, tables, ranker,

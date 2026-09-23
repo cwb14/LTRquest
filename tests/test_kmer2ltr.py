@@ -159,7 +159,7 @@ import sys
 
 
 def test_api_refuses_without_a_checkout_when_cloning_is_off(tmp_path, monkeypatch):
-    monkeypatch.setattr(kmer2ltr, "_API", None)
+    monkeypatch.setattr(kmer2ltr, "_API", {})
     monkeypatch.setitem(sys.modules, "kmer2ltr", None)   # make `import kmer2ltr` fail
     with pytest.raises(RuntimeError, match="not importable"):
         kmer2ltr.api(tmp_path, clone=False)

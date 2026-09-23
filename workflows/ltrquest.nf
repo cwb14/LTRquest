@@ -176,6 +176,15 @@ workflow LTRQUEST {
     // the annotated tables and the GFF3. Off, an empty map flows in its place.
     ch_meta_by_id = ch_bundle.map { meta, _t, _f, _w, _g, _c -> [ meta.id, meta ] }
     if (params.reboundary) {
+        // Kept so a sample the pooled process returns nothing for can fall
+        // through unchanged below: every one of its _clean_ tables was purged
+        // as a false positive, so it had nothing to re-boundary. This mirrors
+        // ltrquest.sh's second GFF3 loop, which writes that genome's GFF3
+        // straight from these same pre-reboundary annotated tables when
+        // ${p}_reboundary.tsv does not exist for it.
+        ch_tables_prerb = ch_tables
+        ch_fastas_prerb = ch_fastas
+
         ch_rb_in = ch_tables
             .join(ch_fastas)
             .join(ch_bundle.map { meta, _t, _f, _w, genome, _c -> [ meta, genome ] })
@@ -187,20 +196,31 @@ workflow LTRQUEST {
             ch_rb_in.map { rows -> rows.collect { it[3] } }
         )
         ch_versions = ch_versions.mix(LTRQUEST_REBOUNDARY.out.versions)
-        ch_tables = LTRQUEST_REBOUNDARY.out.tsv.flatten()
+
+        // Ids REBOUNDARY actually wrote files for: those with a surviving
+        // _clean_ table to begin with. Any other id that entered this stage is
+        // simply absent from these outputs -- there was nothing to pool for it
+        // -- and is filled back in below from ch_*_prerb, unchanged.
+        ch_rb_tables = LTRQUEST_REBOUNDARY.out.tsv.flatten()
             .map { f -> [ f.name.replaceFirst(/_depth\d+_clean_ltr\.tsv$/, ''), f ] }
             .groupTuple()
-            .join(ch_meta_by_id)
-            .map { _id, files, meta -> [ meta, files ] }
-        ch_fastas = LTRQUEST_REBOUNDARY.out.fasta.flatten()
+        ch_rb_fastas = LTRQUEST_REBOUNDARY.out.fasta.flatten()
             .map { f -> [ f.name.replaceFirst(/_depth\d+_clean_ltr\.fa$/, ''), f ] }
             .groupTuple()
-            .join(ch_meta_by_id)
-            .map { _id, files, meta -> [ meta, files ] }
-        ch_rbmap = LTRQUEST_REBOUNDARY.out.sidecar.flatten()
+        ch_rb_sidecar = LTRQUEST_REBOUNDARY.out.sidecar.flatten()
             .map { f -> [ f.name.replaceFirst(/_reboundary\.tsv$/, ''), f ] }
-            .join(ch_meta_by_id)
-            .map { _id, f, meta -> [ meta, f ] }
+
+        // remainder: true so an id with no reboundary output still passes
+        // through the join instead of being dropped; ch_meta_by_id covers
+        // every id that entered this stage, so it is always the left side.
+        ch_tables = ch_meta_by_id.join(ch_rb_tables, remainder: true)
+            .join(ch_tables_prerb.map { meta, files -> [ meta.id, files ] })
+            .map { _id, meta, rb, orig -> [ meta, rb ?: orig ] }
+        ch_fastas = ch_meta_by_id.join(ch_rb_fastas, remainder: true)
+            .join(ch_fastas_prerb.map { meta, files -> [ meta.id, files ] })
+            .map { _id, meta, rb, orig -> [ meta, rb ?: orig ] }
+        ch_rbmap = ch_meta_by_id.join(ch_rb_sidecar, remainder: true)
+            .map { _id, meta, f -> [ meta, f ?: [] ] }
     } else {
         ch_rbmap = ch_bundle.map { meta, _t, _f, _w, _g, _c -> [ meta, [] ] }
     }

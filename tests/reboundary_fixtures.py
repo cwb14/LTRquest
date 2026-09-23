@@ -159,6 +159,15 @@ def build(root: Path, prefix: str = "syn_LTRs",
     a, b, internal = copy_pair()
     place("decayed", a, internal, b, "+", broken_tsd=True, k2p=0.02)
 
+    # Every truncated kind below shifts BOTH called boundaries (l1 and r0,
+    # i.e. both Member.len_left and Member.len_right) inward by the same
+    # total amount, even though the obstacle it models sits in only one
+    # LTR. That is deliberate, not an oversight: a real detector calls LTR
+    # length from a pairwise alignment of the two LTRs against each other,
+    # so an obstacle in one LTR shortens the alignment -- and so the called
+    # length -- on BOTH sides, not just the side the obstacle is in.
+    # len_left == len_right holds for every kind here; see
+    # test_truncated_calls_keep_len_left_and_len_right_equal, which pins it.
     g.add(g.rand(SPACER))
     a, b, internal = copy_pair()
     e = place("del_left", a[:50] + a[110:], internal, b, "+", k2p=0.03)

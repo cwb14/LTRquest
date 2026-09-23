@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Iterator, NamedTuple, Optional, Sequence
+from typing import Any, Dict, Iterator, NamedTuple, Optional, Sequence
 
 from .table import parse_header
 
@@ -213,7 +213,10 @@ class Api(NamedTuple):
     TSD_SHIFTS: tuple
 
 
-_API: Optional[Api] = None
+# Keyed on tools_dir: a second call with a DIFFERENT tools_dir must not be
+# handed back the first call's API. Only one tools_dir is ever used in
+# practice today, but the cache should not silently assume that.
+_API: Dict[str, Api] = {}
 
 
 def api(tools_dir, clone: bool = True) -> Api:
@@ -224,8 +227,9 @@ def api(tools_dir, clone: bool = True) -> Api:
     to the CLI's output, moved to where the skew would enter.
     """
     global _API
-    if _API is not None:
-        return _API
+    key = os.fspath(tools_dir)
+    if key in _API:
+        return _API[key]
     try:
         importlib.import_module("kmer2ltr")
     except ImportError:
@@ -248,7 +252,7 @@ def api(tools_dir, clone: bool = True) -> Api:
             "the Kmer2LTR found does not match this LTRquest "
             f"(classify lacks {missing or 'nothing'}; columns match: "
             f"{list(runner.COLUMNS) == COLUMNS}). Use the commit the Dockerfile pins.")
-    _API = Api(align.classify, runner.format_row, genome.Window, genome.Options,
-               genome.orient, genome.annotate, genome.find_tsd, genome.PAD, genome.PROBE,
-               genome.TSD_K, genome.TSD_SHIFTS)
-    return _API
+    _API[key] = Api(align.classify, runner.format_row, genome.Window, genome.Options,
+                    genome.orient, genome.annotate, genome.find_tsd, genome.PAD,
+                    genome.PROBE, genome.TSD_K, genome.TSD_SHIFTS)
+    return _API[key]
