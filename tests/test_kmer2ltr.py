@@ -1,4 +1,6 @@
+import random
 import subprocess
+import sys
 import textwrap
 
 import pytest
@@ -152,10 +154,6 @@ def test_assert_schema_rejects_a_headerless_table(tmp_path):
     p.write_text("chr1:100-200#LTR/Gypsy\t101\tpass\n")
     with pytest.raises(RuntimeError, match="out of step"):
         kmer2ltr.assert_schema(p)
-
-
-import random
-import sys
 
 
 def test_api_refuses_without_a_checkout_when_cloning_is_off(tmp_path, monkeypatch):

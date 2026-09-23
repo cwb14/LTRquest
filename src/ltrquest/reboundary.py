@@ -34,13 +34,36 @@ from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from . import kmer2ltr as k2l
 from .kmer2ltr import COLUMNS
-from .ltr_model import (Genomes, Member, Model, consensus_model, ratio_ok, select_references,
-                        subfamily_models, tsd_enrichment)
+from .ltr_model import (
+    Genomes,
+    Member,
+    Model,
+    consensus_model,
+    ratio_ok,
+    select_references,
+    subfamily_models,
+    tsd_enrichment,
+)
 from .ltr_place import Params, Proposal, nearest_templates, obstacle, propose, tsd_at
-from .reboundary_io import (SIDECAR_SUFFIX, Accepted, Commit, SpanIndex, conflict,
-                            fetch_records, forward, leftover_message, leftover_staging,
-                            load_clean_tables, members_from, mutual_conflicts, rewrite,
-                            sanitize, sidecar_text, stored, sync_dir)
+from .reboundary_io import (
+    SIDECAR_SUFFIX,
+    Accepted,
+    Commit,
+    SpanIndex,
+    conflict,
+    fetch_records,
+    forward,
+    leftover_message,
+    leftover_staging,
+    load_clean_tables,
+    members_from,
+    mutual_conflicts,
+    rewrite,
+    sanitize,
+    sidecar_text,
+    stored,
+    sync_dir,
+)
 from .reconcile import IUPAC_DEPTH_SEQ
 
 METHODS = ("consensus", "subfamily", "nearest")
@@ -654,8 +677,8 @@ def regenerate(indir: str, prefix: str, genome: str, plots: bool) -> None:
                          f"expected at most one")
     fam = {}
     if cons:
-        fam = dict(consensus_cluster=cons[0],
-                   family_prefix=os.path.basename(cons[0]).split("_all_ltr.consensus_id")[0])
+        fam = {"consensus_cluster": cons[0],
+               "family_prefix": os.path.basename(cons[0]).split("_all_ltr.consensus_id")[0]}
     rec = os.path.join(indir, prefix + "_strand_recovery.tsv")
     side = os.path.join(indir, prefix + SIDECAR_SUFFIX)
     if gff3.convert(prefix, indir, genome, recovered_strands=rec if os.path.isfile(rec) else None,
@@ -734,7 +757,7 @@ def settings_from(args) -> Settings:
             float(args.credit)
         except ValueError:
             raise SystemExit(f"reboundary: --credit must be a number or 'model' "
-                             f"(got {args.credit!r})")
+                             f"(got {args.credit!r})") from None
     return Settings(
         method=args.method, references=args.references, min_copies=args.min_copies,
         credit=args.credit, max_ratio=args.max_ratio, qc_min_n=args.qc_min_n,

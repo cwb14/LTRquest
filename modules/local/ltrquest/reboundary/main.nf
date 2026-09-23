@@ -18,10 +18,12 @@ process LTRQUEST_REBOUNDARY {
     path(genomes, stageAs: 'genomes/g??/*')
 
     output:
-    path("*_depth*_clean_ltr.tsv", arity: '1..*'), emit: tsv
-    path("*_depth*_clean_ltr.fa" , arity: '1..*'), emit: fasta
-    path("*_reboundary.tsv"      , arity: '1..*'), emit: sidecar
-    path "versions.yml"                          , emit: versions
+    // No tuple to wrap them, so no parentheses: a bare `path(...), emit:` parses
+    // only under the strict syntax parser, and Nextflow 24.x does not have it.
+    path "*_depth*_clean_ltr.tsv", arity: '1..*', emit: tsv
+    path "*_depth*_clean_ltr.fa" , arity: '1..*', emit: fasta
+    path "*_reboundary.tsv"      , arity: '1..*', emit: sidecar
+    path "versions.yml"                         , emit: versions
 
     when:
     task.ext.when == null || task.ext.when

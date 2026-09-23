@@ -10,7 +10,9 @@ streaming and parsing checks.
 from __future__ import annotations
 
 import gzip
+import os
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -83,10 +85,6 @@ def toy_genome(tmp_path: Path) -> Path:
     path = tmp_path / "toy.fa"
     path.write_text(">chr1\n" + "A" * 300 + "\n>chr2\n" + "C" * 120 + "\n")
     return path
-
-
-import os
-import shutil
 
 
 @pytest.fixture(scope="session")

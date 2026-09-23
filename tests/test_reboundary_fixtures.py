@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from ltrquest.detect import revcomp as revcomp_record
-
 from reboundary_fixtures import CHROM, FAMILY, build
 
 

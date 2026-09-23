@@ -16,8 +16,19 @@ from typing import List, Optional, Sequence, Tuple
 
 import parasail
 
-from .ltr_model import (GAP_EXTEND, GAP_OPEN, Genomes, Member, Model, canonical_kmers, glocal,
-                        jaccard, matrix, oriented_ltrs, rc)
+from .ltr_model import (
+    GAP_EXTEND,
+    GAP_OPEN,
+    Genomes,
+    Member,
+    Model,
+    canonical_kmers,
+    glocal,
+    jaccard,
+    matrix,
+    oriented_ltrs,
+    rc,
+)
 
 
 @dataclass(frozen=True)

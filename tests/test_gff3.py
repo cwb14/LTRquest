@@ -317,7 +317,7 @@ def _renamed_run(tmp_path, with_map: bool):
     from ltrquest.reboundary_io import SIDECAR_COLUMNS
     tail = ["strand", "family", "domains", "nest_status"]
     old, new = "chr1:150-3000#LTR/Gypsy/Tekay", "chr1:100-3000#LTR/Gypsy/Tekay"
-    vals = {c: "NA" for c in COLUMNS}
+    vals = dict.fromkeys(COLUMNS, "NA")
     vals.update(seq_id=new, seq_len="2901", status="pass", ltr5_start="1", ltr5_end="450",
                 ltr3_start="2551", ltr3_end="2901", orientation="+", tsd="ACGTA",
                 tsd_offset="0,0")
@@ -326,9 +326,9 @@ def _renamed_run(tmp_path, with_map: bool):
         "#" + "\t".join(COLUMNS + tail) + "\n" + "\t".join(row) + "\n")
     cluster = tmp_path / "merged_all_ltr.consensus_id0.75_cluster.tsv"
     cluster.write_text(f"{old}\t{old}\n")
-    kw = dict(consensus_cluster=str(cluster), family_prefix="merged")
+    kw = {"consensus_cluster": str(cluster), "family_prefix": "merged"}
     if with_map:
-        side = {c: "." for c in SIDECAR_COLUMNS}
+        side = dict.fromkeys(SIDECAR_COLUMNS, ".")
         side.update(old_seq_id=old, new_seq_id=new, decision="extended", ext5="50", ext3="0")
         path = tmp_path / "p_reboundary.tsv"
         path.write_text("#" + "\t".join(SIDECAR_COLUMNS) + "\n"

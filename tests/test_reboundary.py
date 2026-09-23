@@ -14,7 +14,6 @@ from ltrquest.kmer2ltr import COLUMNS
 from ltrquest.ltr_model import Member, Model
 from ltrquest.ltr_place import Proposal
 from ltrquest.reboundary_io import NEW_SUFFIX, OLD_SUFFIX, fetch_records
-
 from reboundary_fixtures import build
 
 TOOLS = os.environ.get("LTRQUEST_TOOLS_DIR", ".")

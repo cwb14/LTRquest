@@ -11,7 +11,6 @@ from ltrquest import reboundary_io as rio
 from ltrquest.detect import revcomp as revcomp_record
 from ltrquest.kmer2ltr import COLUMNS
 from ltrquest.reconcile import IUPAC_DEPTH_SEQ
-
 from reboundary_fixtures import build, members
 
 
@@ -98,7 +97,7 @@ def test_mutual_conflicts_keep_the_first_claim(fx):
 
 
 def test_sidecar_round_trips_through_read_map(tmp_path):
-    row = {c: "." for c in rio.SIDECAR_COLUMNS}
+    row = dict.fromkeys(rio.SIDECAR_COLUMNS, ".")
     row.update(old_seq_id="c:150-900#LTR/Gypsy/X", new_seq_id="c:100-900#LTR/Gypsy/X",
                decision="extended", ext5="50", ext3="0")
     rejected = dict(row, new_seq_id=".", decision="rejected", reason="gate_identity",

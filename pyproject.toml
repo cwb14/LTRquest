@@ -25,16 +25,20 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 
-# Detection, masking, reconciliation, annotation and GFF3 need nothing beyond the
+# Detection, masking, reconciliation and annotation need nothing beyond the
 # standard library. numpy and matplotlib are here because the plotting stage runs
 # by default; disable it with --no-plots and they go unused. pyfaidx is what
 # ltrquest-flagfp pulls the flagged LTRs out of --ltr-fasta with, and that write
 # is unconditional -- no flag turns it off -- so it is a hard dependency of the
-# entry point, not an extra. The conda environment.yml files have always carried
-# it; this keeps a pip install honest.
+# entry point, not an extra. parasail is hard for the same reason: ltrquest-gff3
+# imports the re-boundarying modules (to follow renamed elements), and they import
+# it. The conda environment.yml files have always carried both -- parasail as
+# `parasail-python`, which installs this same `parasail` distribution -- so this
+# only keeps a pip install honest.
 dependencies = [
     "matplotlib>=3.5",
     "numpy>=1.21",
+    "parasail>=1.3",
     "pyfaidx>=0.7.2",
 ]
 

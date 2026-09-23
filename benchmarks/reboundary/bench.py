@@ -236,10 +236,10 @@ def summarize_b1(rows: List[Dict]) -> Dict:
     obst = Counter(r["outcome"] for r in rows if r["kind"] != "control")
     n_obst = sum(obst.values())
     ctrl = Counter(r["outcome"] for r in rows if r["kind"] == "control")
-    return dict(exact_or_1=frac(obst["exact"] + obst["within1"], n_obst),
-                exact=frac(obst["exact"], n_obst), over=frac(obst["over"], n_obst),
-                wrong=frac(obst["wrong"], n_obst), unchanged=frac(obst["unchanged"], n_obst),
-                false_change=frac(ctrl["false_change"], sum(ctrl.values())), table=table)
+    return {"exact_or_1": frac(obst["exact"] + obst["within1"], n_obst),
+            "exact": frac(obst["exact"], n_obst), "over": frac(obst["over"], n_obst),
+            "wrong": frac(obst["wrong"], n_obst), "unchanged": frac(obst["unchanged"], n_obst),
+            "false_change": frac(ctrl["false_change"], sum(ctrl.values())), "table": table}
 
 
 def b1(args) -> None:
@@ -299,12 +299,12 @@ def b1(args) -> None:
         prop, status = placed.get(m.uid, (None, "no_model"))
         v = verdicts.get(m.uid)
         left, right = (v.accepted.left, v.accepted.right) if v and v.accepted else (m.start, m.end)
-        rows.append(dict(kind=kind, size=size, delta=delta, end=end, copy=copy, family=t.family,
-                         model=status,
-                         proposal="none" if prop is None else ("ok" if prop.gate_ok else "gated"),
-                         verdict=v.status if v else ".", truth_left=tr[0], truth_right=tr[1],
-                         called_left=m.start, called_right=m.end, final_left=left,
-                         final_right=right, outcome=outcome(m, tr, left, right, kind)))
+        rows.append({"kind": kind, "size": size, "delta": delta, "end": end, "copy": copy,
+                     "family": t.family, "model": status,
+                     "proposal": "none" if prop is None else ("ok" if prop.gate_ok else "gated"),
+                     "verdict": v.status if v else ".", "truth_left": tr[0], "truth_right": tr[1],
+                     "called_left": m.start, "called_right": m.end, "final_left": left,
+                     "final_right": right, "outcome": outcome(m, tr, left, right, kind)})
     write_tsv(os.path.join(args.out, "b1.tsv"), rows)
     summary = summarize_b1(rows)
     summary.update(settings=recorded(s), n_truth=len(truth), n_contigs=len(synth),
@@ -336,7 +336,7 @@ def cross_validated(props: List[Dict[str, str]], s: rb.Settings) -> Dict:
             n += len(b)
             hits += sum(found(x["tsd_new"]) for x in b)
             null += sum(found(x["tsd_null"]) for x in b)
-    return dict(cv_n=n, cv_tsd=frac(hits, n), cv_null=frac(null, n), cv_p0=round(p0, 4))
+    return {"cv_n": n, "cv_tsd": frac(hits, n), "cv_null": frac(null, n), "cv_p0": round(p0, 4)}
 
 
 def b2(args) -> None:
@@ -364,15 +364,15 @@ def b2(args) -> None:
     dk = sorted(float(r["k2p_new"]) - float(r["k2p_called"]) for r in ext
                 if r["k2p_new"] not in NOT_FOUND and r["k2p_called"] not in NOT_FOUND)
     q = lambda xs, f: xs[min(len(xs) - 1, int(f * len(xs)))] if xs else None  # noqa: E731
-    summary = dict(settings=recorded(s), candidates=len(side), extended=len(ext), counts=counts,
-                   n_fresh=len(fresh),
-                   tsd_gain=frac(sum(found(r["tsd_new"]) for r in fresh), len(fresh)),
-                   tsd_null=frac(sum(found(r["tsd_null"]) for r in fresh), len(fresh)),
-                   b3_real_changed=frac(len(had), tsd_calls),
-                   b3_real_tsd_kept=frac(sum(found(r["tsd_new"]) for r in had), len(had)),
-                   ext_median=q(exts, 0.5), ext_q90=q(exts, 0.9),
-                   dk2p_median=q(dk, 0.5), dk2p_q90=q(dk, 0.9),
-                   wall_s=round(wall), peak_rss_gb=round(rss_kb / 1e6, 2))
+    summary = {"settings": recorded(s), "candidates": len(side), "extended": len(ext),
+               "counts": counts, "n_fresh": len(fresh),
+               "tsd_gain": frac(sum(found(r["tsd_new"]) for r in fresh), len(fresh)),
+               "tsd_null": frac(sum(found(r["tsd_null"]) for r in fresh), len(fresh)),
+               "b3_real_changed": frac(len(had), tsd_calls),
+               "b3_real_tsd_kept": frac(sum(found(r["tsd_new"]) for r in had), len(had)),
+               "ext_median": q(exts, 0.5), "ext_q90": q(exts, 0.9),
+               "dk2p_median": q(dk, 0.5), "dk2p_q90": q(dk, 0.9),
+               "wall_s": round(wall), "peak_rss_gb": round(rss_kb / 1e6, 2)}
     summary.update(cross_validated(read_tsv(dump), s))
     motif_called = {r[0]: t.cols.get(r, "motif") for p in args.prefix
                     for t in load_clean_tables(args.run, p) for r in t.rows}
@@ -391,8 +391,8 @@ def b2(args) -> None:
         for k, rs in sorted(groups.items()):
             e = [r for r in rs if r["decision"] == "extended"]
             f = [r for r in e if not found(r["tsd_called"])]
-            out[k] = dict(candidates=len(rs), extended=len(e),
-                          tsd_gain=frac(sum(found(r["tsd_new"]) for r in f), len(f)))
+            out[k] = {"candidates": len(rs), "extended": len(e),
+                      "tsd_gain": frac(sum(found(r["tsd_new"]) for r in f), len(f))}
         return out
 
     def age(r):

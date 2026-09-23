@@ -380,6 +380,8 @@ def polish_ends(seq: str, refs: Sequence[Member], g: Genomes, k: int = 8,
         if len(placed) < MIN_REFS:
             break
 
+        # B023 below: these closures read `placed` but are only ever called in
+        # the iteration that defines them, so late binding cannot bite.
         def vote(pairs) -> Tuple[float, str]:
             votes: Counter = Counter()
             hits = 0
@@ -387,14 +389,14 @@ def polish_ends(seq: str, refs: Sequence[Member], g: Genomes, k: int = 8,
                 if pair is not None and pair[0] == pair[1] and pair[0] != "N":
                     hits += 1
                     votes[pair[0]] += 1
-            return hits / len(placed), (votes.most_common(1)[0][0]
+            return hits / len(placed), (votes.most_common(1)[0][0]  # noqa: B023
                                         if votes else "N")
 
         def inside(i: int, at_start: bool) -> Tuple[float, str]:
             """Agreement at model base i counted from that end (0 = the
             outermost)."""
             pairs = []
-            for s5, s3, g5, g3 in placed:
+            for s5, s3, g5, g3 in placed:  # noqa: B023
                 a = (g5.head if at_start else g5.tail)[i]
                 b = (g3.head if at_start else g3.tail)[i]
                 pairs.append((s5[a], s3[b]) if a >= 0 and b >= 0 else None)
@@ -404,7 +406,7 @@ def polish_ends(seq: str, refs: Sequence[Member], g: Genomes, k: int = 8,
             """Agreement j bases beyond that end of the model (1 = adjacent).
             """
             pairs = []
-            for s5, s3, g5, g3 in placed:
+            for s5, s3, g5, g3 in placed:  # noqa: B023
                 i5 = g5.start - j if at_start else g5.end + j
                 i3 = g3.start - j if at_start else g3.end + j
                 ok = 0 <= i5 < len(s5) and 0 <= i3 < len(s3)

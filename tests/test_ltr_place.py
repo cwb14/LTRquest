@@ -8,7 +8,6 @@ import pytest
 
 from ltrquest import ltr_model as lm
 from ltrquest import ltr_place as lp
-
 from reboundary_fixtures import FAMILY, build, members
 
 

@@ -232,14 +232,14 @@ def api(tools_dir, clone: bool = True) -> Api:
         return _API[key]
     try:
         importlib.import_module("kmer2ltr")
-    except ImportError:
+    except ImportError as err:
         src_dir = Path(tools_dir) / "Kmer2LTR" / "src"
         if not _importable(src_dir) and clone:
             _clone(Path(tools_dir))
         if not _importable(src_dir):
             raise RuntimeError(
                 f"Kmer2LTR is not importable and {src_dir} holds no checkout. Install "
-                f"it (pip install kmer2ltr) or point --tools-dir at a Kmer2LTR clone.")
+                f"it (pip install kmer2ltr) or point --tools-dir at a Kmer2LTR clone.") from err
         sys.path.insert(0, str(src_dir))
         sys.modules.pop("kmer2ltr", None)
     align = importlib.import_module("kmer2ltr.align")
