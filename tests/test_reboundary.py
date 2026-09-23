@@ -20,9 +20,9 @@ TOOLS = os.environ.get("LTRQUEST_TOOLS_DIR", ".")
 
 
 def fake_member(**kw):
-    base = dict(prefix="p", name="c:100-900#LTR/Gypsy/X", chrom="c", start=100, end=900,
-                l1=199, r0=801, strand="+", orientation="+", family="f", depth=0, k2p=0.01,
-                tsd=".")
+    base = {"prefix": "p", "name": "c:100-900#LTR/Gypsy/X", "chrom": "c", "start": 100,
+            "end": 900, "l1": 199, "r0": 801, "strand": "+", "orientation": "+",
+            "family": "f", "depth": 0, "k2p": 0.01, "tsd": "."}
     base.update(kw)
     return Member(**base)
 
