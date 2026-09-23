@@ -363,7 +363,8 @@ at its called ends.
 `--reboundary` (or `ltrquest-reboundary --posthoc` on a finished run) builds each
 family's LTR model from its full-length copies, pooled over every genome, and places
 it on every member. The model's ends come only from where the family's 5′ and 3′ LTR
-copies stop agreeing — never from a TSD or TG..CA. Ends move outward only. A family
+copies stop agreeing — never from a TSD or TG..CA (the `motif` column above records
+this as `tg...ca`). Ends move outward only. A family
 whose model is implausibly long, or whose proposed ends show no TSD enrichment over a
 displaced-flank null, is left alone. A genome with no `_depth<N>_clean_ltr.tsv`
 tables at all is warned about and skipped rather than aborting the run; such a genome

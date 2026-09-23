@@ -277,4 +277,4 @@ def test_every_method_recovers_the_deletion(tmp_path, mafft, method):
 
 def test_nearest_uses_median_combining():
     assert rb.place_params(rb.Settings(method="nearest")).combine == "median"
-    assert rb.place_params(rb.Settings()).combine == "best"
+    assert rb.place_params(rb.Settings(method="consensus")).combine == "best"

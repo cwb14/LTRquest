@@ -56,10 +56,10 @@ def warn(msg: str) -> None:
 
 @dataclass(frozen=True)
 class Settings:
-    method: str = "consensus"
+    method: str = "nearest"
     references: str = "modal"
     min_copies: int = 10
-    credit: str = "200"
+    credit: str = "5000"
     max_ratio: float = 1.15
     qc_min_n: int = 5
     untested: str = "accept"
@@ -562,8 +562,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="genome prefix(es); all are pooled, since families span genomes")
     ap.add_argument("--genome", nargs="+",
                     help="original (unmasked) genome FASTA per prefix, in the same order")
-    ap.add_argument("--method", choices=METHODS, default="consensus",
-                    help="family model (default: consensus)")
+    ap.add_argument("--method", choices=METHODS, default="nearest",
+                    help="family model (default: nearest)")
     ap.add_argument("--references", choices=("modal", "tsd"), default="modal",
                     help="copies models are built from: modal-length (default) or TSD-bearing")
     ap.add_argument("--subfamily-jaccard", type=float, default=0.5,
@@ -578,9 +578,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-anchor", action="store_true", help="do not search past large indels")
     ap.add_argument("--max-indel", type=int, default=5000,
                     help="how far past the call the anchor looks, bp (default 5000)")
-    ap.add_argument("--credit", default="200",
+    ap.add_argument("--credit", default="5000",
                     help="bits of family evidence given to Kmer2LTR: a number, or 'model' "
-                         "(default 200)")
+                         "(default 5000)")
     ap.add_argument("--max-ratio", type=float, default=1.15,
                     help="family QC: model length / modal called LTR length ceiling (default 1.15)")
     ap.add_argument("--qc-min-n", type=int, default=5,
