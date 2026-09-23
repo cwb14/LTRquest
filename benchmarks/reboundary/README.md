@@ -239,7 +239,7 @@ them, so it is kept.
 
 | knob | value | stage | deciding numbers |
 |---|---|---|---|
-| method | nearest | 1 | n=3000: exact/±1 0.3350 vs consensus 0.3247 (p=0.017); consensus is now significantly worse |
+| method | nearest | 1 | n=3000 pre-fix: exact/±1 0.3350 vs consensus 0.3247 (p=0.017). Re-verified post-fix: 0.4037 vs 0.3941 (p=0.032) — still ahead, both methods improved |
 | references | modal | 1 | ties with `tsd` on every axis (p=0.14 on exact/±1); plan's stated preference order (modal before tsd) |
 | min_identity | 0.8 | 2 | 0.7 doubles the wrong rate (0.047-0.050 vs 0.021-0.023), paired sign test 9/9, p~0.004 |
 | anchor_len | 30 | 2 | spread 0.3944-0.4037 exact/±1 across all 0.8 cells — inside noise; plan default kept |
