@@ -66,6 +66,16 @@ def settings(pairs: Sequence[str], threads: int, mafft: str) -> rb.Settings:
     return replace(s, place=replace(s.place, **place))
 
 
+def recorded(s: rb.Settings) -> Dict:
+    """The settings as they actually ran: `place_params` overrides `combine` for `nearest`.
+
+    `asdict(s)` records the placement parameters before that override, so a
+    `nearest` run used to be published as `combine: "best"` when every
+    placement was combined by median.
+    """
+    return asdict(replace(s, place=rb.place_params(s)))
+
+
 def frac(a: int, n: int) -> Optional[float]:
     return round(a / n, 4) if n else None
 
@@ -297,7 +307,7 @@ def b1(args) -> None:
                          final_right=right, outcome=outcome(m, tr, left, right, kind)))
     write_tsv(os.path.join(args.out, "b1.tsv"), rows)
     summary = summarize_b1(rows)
-    summary.update(settings=asdict(s), n_truth=len(truth), n_contigs=len(synth),
+    summary.update(settings=recorded(s), n_truth=len(truth), n_contigs=len(synth),
                    wall_s=round(time.time() - t0))
     with open(os.path.join(args.out, "summary.json"), "w") as fh:
         json.dump(summary, fh, indent=1)
@@ -354,7 +364,7 @@ def b2(args) -> None:
     dk = sorted(float(r["k2p_new"]) - float(r["k2p_called"]) for r in ext
                 if r["k2p_new"] not in NOT_FOUND and r["k2p_called"] not in NOT_FOUND)
     q = lambda xs, f: xs[min(len(xs) - 1, int(f * len(xs)))] if xs else None  # noqa: E731
-    summary = dict(settings=asdict(s), candidates=len(side), extended=len(ext), counts=counts,
+    summary = dict(settings=recorded(s), candidates=len(side), extended=len(ext), counts=counts,
                    n_fresh=len(fresh),
                    tsd_gain=frac(sum(found(r["tsd_new"]) for r in fresh), len(fresh)),
                    tsd_null=frac(sum(found(r["tsd_null"]) for r in fresh), len(fresh)),

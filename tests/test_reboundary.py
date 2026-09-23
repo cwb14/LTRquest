@@ -13,7 +13,7 @@ from ltrquest.detect import revcomp as revcomp_record
 from ltrquest.kmer2ltr import COLUMNS
 from ltrquest.ltr_model import Member, Model
 from ltrquest.ltr_place import Proposal
-from ltrquest.reboundary_io import fetch_records
+from ltrquest.reboundary_io import NEW_SUFFIX, OLD_SUFFIX, fetch_records
 
 from reboundary_fixtures import build
 
@@ -312,6 +312,66 @@ def test_an_interrupted_restore_can_be_re_run(tmp_path, monkeypatch):
     assert "#old" in (fx.indir / f"{fx.prefix}_all_depth_LTR_cleaned.gff3").read_text()
     assert (fx.indir / f"{fx.prefix}_plots" / "x.pdf").read_text() == "old plot"
     assert not (fx.indir / f"{fx.prefix}{rb.SIDECAR_SUFFIX}").exists()
+
+
+def test_a_repeated_prefix_is_refused_before_anything_is_written(tmp_path, mafft):
+    """One prefix twice would stage every one of its files twice and lose the originals."""
+    fx = build(tmp_path / "syn_dupe")
+    before = clean_bytes(fx)
+    with pytest.raises(SystemExit, match="more than once") as got:
+        rb.run(str(fx.indir), [fx.prefix, fx.prefix], [str(fx.genome)] * 2,
+               rb.Settings(threads=1, mafft=mafft), TOOLS)
+    assert fx.prefix in str(got.value)
+    assert clean_bytes(fx) == before
+    assert not (fx.indir / f"{fx.prefix}{rb.SIDECAR_SUFFIX}").exists()
+
+
+def test_a_repeated_prefix_is_refused_by_the_cli_before_the_backup(tmp_path):
+    fx = build(tmp_path / "syn_dupe_cli")
+    before = clean_bytes(fx)
+    with pytest.raises(SystemExit, match="more than once"):
+        rb.main(["--indir", str(fx.indir), "--prefix", fx.prefix, fx.prefix,
+                 "--genome", str(fx.genome), str(fx.genome), "--posthoc"])
+    assert clean_bytes(fx) == before
+    assert not (fx.indir / f"{fx.prefix}{rb.BACKUP_SUFFIX}").exists()
+
+
+def test_a_leftover_from_an_interrupted_swap_stops_the_next_run(tmp_path, mafft):
+    """The killed swap took the target away, so only the directory itself can reveal it."""
+    fx = build(tmp_path / "syn_leftover")
+    target = fx.indir / f"{fx.prefix}_depth0_clean_ltr.tsv"
+    (fx.indir / (target.name + OLD_SUFFIX)).write_bytes(target.read_bytes())
+    target.unlink()                                  # killed between the two renames
+    with pytest.raises(SystemExit, match="interrupted") as got:
+        rb.run(str(fx.indir), [fx.prefix], [str(fx.genome)],
+               rb.Settings(threads=1, mafft=mafft), TOOLS)
+    assert target.name + OLD_SUFFIX in str(got.value)
+
+
+def test_a_leftover_new_file_stops_the_cli_before_it_backs_anything_up(tmp_path):
+    fx = build(tmp_path / "syn_leftover_new")
+    left = fx.indir / f"{fx.prefix}_depth0_clean_ltr.fa{NEW_SUFFIX}"
+    left.write_text(">x\nACGT\n")
+    before = clean_bytes(fx)
+    with pytest.raises(SystemExit, match="interrupted") as got:
+        rb.main(["--indir", str(fx.indir), "--prefix", fx.prefix, "--genome", str(fx.genome),
+                 "--posthoc"])
+    assert left.name in str(got.value)
+    assert clean_bytes(fx) == before
+    assert not (fx.indir / f"{fx.prefix}{rb.BACKUP_SUFFIX}").exists()
+
+
+def test_restore_names_the_derived_output_it_cannot_replace(tmp_path, capsys):
+    """A GFF3 built from extended coordinates must not sit silently beside restored tables."""
+    fx = build(tmp_path / "syn_restore_warn")
+    rb.prepare_posthoc(str(fx.indir), fx.prefix)          # no GFF3 yet, so none is backed up
+    gff = fx.indir / f"{fx.prefix}_all_depth_LTR_cleaned.gff3"
+    gff.write_text("##gff-version 3\n")                   # as regenerate() would leave it
+    capsys.readouterr()
+    rb.restore(str(fx.indir), fx.prefix)
+    err = capsys.readouterr().err
+    assert gff.exists()                                   # the backup cannot replace it
+    assert gff.name in err and "WARNING" in err
 
 
 def test_build_models_rejects_an_unknown_method():

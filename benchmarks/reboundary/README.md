@@ -257,7 +257,11 @@ Real run, 4 Poa genomes, 208,018 elements. **Post-fix** — measured after both
 rounds of fixes described in the note at the top of Results, from
 `/data2/chris/poa_LTR/ltrquest_run/reboundary_bench/verify/b2_final/summary.json`.
 These numbers supersede the pre-fix figures this subsection carried before;
-Stage 1 through Stage 4b above remain pre-fix, unchanged:
+Stage 1 through Stage 4b above remain pre-fix, unchanged. (One caveat on that
+file: its `settings.place.combine` reads `best`, because `bench.py` recorded
+`Settings.place` before `place_params` overrides it for `method=nearest`. The
+run combined by median, as every `nearest` run does. The recorder is fixed; the
+numbers are unaffected.)
 
 candidates 64,181 -> extended 20,925; TSD at the new boundary 0.5648 vs the
 displaced-flank null 0.0102; cross-validated 0.5352 vs null 0.0094 (n=13,170);

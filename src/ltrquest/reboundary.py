@@ -38,8 +38,9 @@ from .ltr_model import (Genomes, Member, Model, consensus_model, ratio_ok, selec
                         subfamily_models, tsd_enrichment)
 from .ltr_place import Params, Proposal, nearest_templates, obstacle, propose, tsd_at
 from .reboundary_io import (SIDECAR_SUFFIX, Accepted, Commit, SpanIndex, conflict,
-                            fetch_records, forward, load_clean_tables, members_from,
-                            mutual_conflicts, rewrite, sanitize, sidecar_text, stored)
+                            fetch_records, forward, leftover_message, leftover_staging,
+                            load_clean_tables, members_from, mutual_conflicts, rewrite,
+                            sanitize, sidecar_text, stored, sync_dir)
 from .reconcile import IUPAC_DEPTH_SEQ
 
 METHODS = ("consensus", "subfamily", "nearest")
@@ -343,10 +344,34 @@ def _dump(path: str, results, status, rows) -> None:
                                     r["decision"], r["reason"]]) + "\n")
 
 
+def check_prefixes(prefixes: Sequence[str]) -> None:
+    """One prefix may be named once: twice would stage every one of its files twice.
+
+    Each file's staging name is derived from the file, so a second rewrite of
+    the same path swaps that path's first rewrite into the `.old` file holding
+    its original. `Commit.open` refuses that too; this is the boundary where the
+    user finds out, before a post-hoc backup has moved anything.
+    """
+    repeated = sorted(p for p, n in Counter(prefixes).items() if n > 1)
+    if repeated:
+        raise SystemExit(f"reboundary: --prefix {', '.join(repeated)} given more than once; "
+                         f"name each genome once (they are pooled anyway). Nothing has "
+                         f"been changed.")
+
+
+def check_indir(indir: str) -> None:
+    """Refuse to start while an interrupted rewrite's `.new`/`.old` files are in `indir`."""
+    leftovers = leftover_staging(indir)
+    if leftovers:
+        raise SystemExit(leftover_message(indir, leftovers))
+
+
 def run(indir: str, prefixes: Sequence[str], genomes: Sequence[str], s: Settings,
         tools_dir: str, dump: Optional[str] = None, cache: Optional[str] = None,
         verbose: bool = False) -> Dict[str, int]:
     t0 = time.time()
+    check_prefixes(prefixes)
+    check_indir(indir)
     if len(prefixes) != len(genomes):
         raise SystemExit("reboundary: --prefix and --genome must pair up one to one")
     if s.method not in METHODS:
@@ -552,17 +577,40 @@ def prepare_posthoc(indir: str, prefix: str) -> str:
     return bdir
 
 
+def _fsync(path: str) -> None:
+    """One copied file's bytes on disk before it is renamed into place, as `Commit` does."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _put_back(src: str, dst: str) -> None:
-    """Copy one backed-up entry over its place in the run, leaving the backup untouched."""
+    """Copy one backed-up entry over its place in the run, leaving the backup untouched.
+
+    Durable the way the commit path is: every byte is fsynced before the rename
+    and the directory after it, so a power loss cannot leave a truncated
+    original behind once the backup has been deleted.
+    """
     tmp = dst + ".partial"
+    here = os.path.dirname(os.path.abspath(dst))
     if os.path.isdir(src) and not os.path.islink(src):
         _remove(tmp)
         shutil.copytree(src, tmp, symlinks=True)
+        for root, _dirs, names in os.walk(tmp):
+            for name in names:
+                path = os.path.join(root, name)
+                if not os.path.islink(path):
+                    _fsync(path)
         _remove(dst)
         os.rename(tmp, dst)
+        sync_dir(here)
         return
     shutil.copy2(src, tmp)
+    _fsync(tmp)
     os.replace(tmp, dst)
+    sync_dir(here)
 
 
 def restore(indir: str, prefix: str) -> None:
@@ -572,6 +620,11 @@ def restore(indir: str, prefix: str) -> None:
     interrupted restore loses nothing and re-running it finishes the job. A
     moving restore could split the originals between the two directories, and
     the next attempt would then delete the half it had already put back.
+
+    A derived output the backup has no counterpart for -- a GFF3 or a plots
+    directory `regenerate()` wrote where the run had none -- is kept, because
+    nothing here can rebuild it, and named in a warning, because it describes
+    the extended coordinates the restored tables no longer carry.
     """
     bdir = os.path.join(indir, prefix + BACKUP_SUFFIX)
     if not os.path.isdir(bdir):
@@ -581,8 +634,15 @@ def restore(indir: str, prefix: str) -> None:
         _put_back(os.path.join(bdir, name), os.path.join(indir, name))
     if prefix + SIDECAR_SUFFIX not in held:
         _remove(os.path.join(indir, prefix + SIDECAR_SUFFIX))   # this run's own output
+    orphans = [os.path.basename(p) for p in _derived(indir, prefix)
+               if os.path.basename(p) not in held]
     shutil.rmtree(bdir)
     log(f"{prefix}: originals restored from {os.path.basename(bdir)}/")
+    if orphans:
+        warn(f"{prefix}: left in place and now disagreeing with the restored tables: "
+             f"{', '.join(orphans)}. Written from the re-boundaried coordinates, with no "
+             f"earlier copy in the backup to put back; rebuild from the restored tables "
+             f"with ltrquest.gff3 (and the plots).")
 
 
 def regenerate(indir: str, prefix: str, genome: str, plots: bool) -> None:
@@ -687,10 +747,12 @@ def settings_from(args) -> Settings:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    check_prefixes(args.prefix)
     if args.restore:
         for p in args.prefix:
             restore(args.indir, p)
         return 0
+    check_indir(args.indir)        # before --posthoc moves a single original
     s = settings_from(args)
     if not args.genome:
         raise SystemExit("reboundary: --genome is required")

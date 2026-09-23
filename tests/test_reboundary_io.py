@@ -202,6 +202,32 @@ def test_an_original_left_by_a_killed_swap_is_never_overwritten(tmp_path):
     assert a.read_text() == "half-committed"
 
 
+def test_staging_one_path_twice_is_refused(tmp_path):
+    """The second swap would move the first swap's rewrite into the '.old' holding the original."""
+    a = tmp_path / "a.txt"
+    a.write_text("the original")
+    commit = rio.Commit()
+    with commit.open(str(a)) as fh:
+        fh.write("rewrite-1")
+    with pytest.raises(ValueError, match="staged twice"):
+        commit.open(str(a))
+    commit.abort()
+    assert a.read_text() == "the original" and not _leftovers(tmp_path)
+
+
+def test_a_leftover_is_found_even_when_its_target_is_gone(tmp_path):
+    """A kill between the two renames leaves no target to discover, only the '.old'."""
+    (tmp_path / ("p_depth0_clean_ltr.tsv" + rio.OLD_SUFFIX)).write_text("the original")
+    (tmp_path / ("p_depth1_clean_ltr.fa" + rio.NEW_SUFFIX)).write_text(">x\nACGT\n")
+    (tmp_path / ("p" + rio.SIDECAR_SUFFIX + rio.NEW_SUFFIX)).write_text("#\n")
+    (tmp_path / "genome.fa.old").write_text("not ours")
+    got = [os.path.basename(p) for p in rio.leftover_staging(str(tmp_path))]
+    assert got == ["p_depth0_clean_ltr.tsv" + rio.OLD_SUFFIX,
+                   "p_depth1_clean_ltr.fa" + rio.NEW_SUFFIX,
+                   "p" + rio.SIDECAR_SUFFIX + rio.NEW_SUFFIX]
+    assert rio.leftover_staging(str(tmp_path / "gone")) == []
+
+
 def test_a_proposal_that_fills_its_host_exactly_is_rejected(fx):
     """Extending to the host's own span would re-key the inner onto the host's key."""
     ms = {m.name: m for m in members(fx)}

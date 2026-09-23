@@ -11,8 +11,10 @@ The swap phase then moves each target aside to `<path>.old` and its replacement
 into place, one path at a time, and deletes the `.old` files only once every
 swap has succeeded; a failure part-way through puts every original back. What a
 crash during the swap phase itself can leave behind is `.new`/`.old` files
-beside their targets: `commit()` reports them by name if it cannot clean them up
-itself, and the originals are always recoverable from them by hand.
+beside their targets, and the originals are always recoverable from them by
+hand. A kill between the two renames of one swap takes the target away
+altogether, so nothing a later run loads can reveal it: `leftover_staging` looks
+at the directory itself, and the driver calls it before any work begins.
 """
 
 from __future__ import annotations
@@ -240,10 +242,39 @@ class Accepted:
 
 NEW_SUFFIX = ".new"
 OLD_SUFFIX = ".old"
+# What this stage ever stages, so an unrelated `genome.fa.old` is not mistaken for ours.
+STAGED_RE = re.compile(r"(_depth\d+_clean_ltr\.(tsv|fa)|" + re.escape(SIDECAR_SUFFIX) + r")$")
 
 
 class CommitError(RuntimeError):
     """A swap failed and the originals could not all be put back automatically."""
+
+
+def leftover_staging(directory: str) -> List[str]:
+    """`.new`/`.old` files a rewrite killed mid-swap left in `directory`, sorted.
+
+    A kill between `os.replace(path, path.old)` and `os.replace(path.new, path)`
+    leaves no `path` at all, so the next run never discovers it, never stages it
+    and would annotate that depth short without a word. Only the directory
+    listing shows it, which is why this runs before any work.
+    """
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    return [os.path.join(directory, n) for n in names
+            for suffix in (NEW_SUFFIX, OLD_SUFFIX)
+            if n.endswith(suffix) and STAGED_RE.search(n[:-len(suffix)])]
+
+
+def leftover_message(directory: str, leftovers: Sequence[str]) -> str:
+    """What is on disk and what to do with it, for a refusal that names every file."""
+    return (f"reboundary: {directory} holds files left by a rewrite that was interrupted "
+            f"mid-swap: " + ", ".join(os.path.basename(p) for p in leftovers)
+            + f". A '{OLD_SUFFIX}' file is the original of the path it is named after and a "
+            f"'{NEW_SUFFIX}' file is a rewrite that never went in. Move each '{OLD_SUFFIX}' "
+            f"file back over that path, delete the '{NEW_SUFFIX}' files, then re-run. "
+            f"Nothing has been changed.")
 
 
 def _unlink(path: str) -> bool:
@@ -254,7 +285,7 @@ def _unlink(path: str) -> bool:
     return True
 
 
-def _sync_dir(path: str) -> None:
+def sync_dir(path: str) -> None:
     """Make the renames themselves durable; best effort, some filesystems refuse."""
     try:
         fd = os.open(path, os.O_RDONLY)
@@ -304,14 +335,25 @@ class Commit:
     a restore itself fails, nothing is deleted and `CommitError` names every
     file left behind and what to do with it. A leftover `.old` from a swap that
     a kill cut short stops the next `commit()` rather than being overwritten.
+
+    The staging names are derived from the target, so one path may be staged
+    only once: a second swap of the same path would move the first swap's
+    rewrite into the `.old` that holds the original, and the original would be
+    gone with nothing left to roll back from. `open` refuses it.
     """
 
     def __init__(self):
         self._staged: List[Tuple[str, str]] = []
+        self._paths: Set[str] = set()
 
     def open(self, path: str):
+        if path in self._paths:
+            raise ValueError(f"reboundary: {path} was staged twice in one commit; a path may "
+                             f"be staged once, and its original would be lost on the second "
+                             f"swap. Nothing has been written.")
         tmp = path + NEW_SUFFIX
         self._staged.append((tmp, path))
+        self._paths.add(path)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         return _Staged(os.fdopen(fd, "w"))
 
@@ -323,7 +365,7 @@ class Commit:
                 + ", ".join(stale) + ". Each one holds the original of the path it is named "
                 "after: move it back over that path, delete any '" + NEW_SUFFIX
                 + "' file beside it, then re-run.")
-        staged, self._staged = self._staged, []
+        staged, self._staged, self._paths = self._staged, [], set()
         done: List[Tuple[str, str]] = []      # (target, its .old, or "" if it was absent)
         try:
             for tmp, path in staged:
@@ -338,7 +380,7 @@ class Commit:
             _roll_back(done, staged, exc)
             raise
         for directory in sorted({os.path.dirname(os.path.abspath(p)) for _, p in staged}):
-            _sync_dir(directory)
+            sync_dir(directory)
         for _, old in done:
             if old:
                 _unlink(old)
@@ -346,13 +388,20 @@ class Commit:
     def abort(self) -> None:
         for tmp, _ in self._staged:
             _unlink(tmp)
-        self._staged = []
+        self._staged, self._paths = [], set()
 
 
 def _roll_back(done: Sequence[Tuple[str, str]], staged: Sequence[Tuple[str, str]],
                exc: BaseException) -> None:
-    """Undo the swaps already made. Raise CommitError rather than hide a failed undo."""
-    stuck: List[str] = []
+    """Undo the swaps already made. Raise CommitError rather than hide a failed undo.
+
+    The message describes only the files this commit made, by name: every
+    `.old` named here was moved aside from its own path moments ago and holds
+    that path's original, and every path named under `delete` had no file at all
+    before this commit. Nothing is said about `.old` files in general.
+    """
+    move_back: List[str] = []                 # <path>.old, still holding <path>'s original
+    delete: List[str] = []                    # a path this commit created and could not remove
     for path, old in reversed(list(done)):
         try:
             if old:
@@ -360,16 +409,20 @@ def _roll_back(done: Sequence[Tuple[str, str]], staged: Sequence[Tuple[str, str]
             elif os.path.lexists(path):
                 os.unlink(path)               # nothing was there before this commit
         except OSError as e:
-            stuck.append(f"{old or path} ({e.strerror})")
-    if stuck:
+            (move_back if old else delete).append(f"{old or path} ({e.strerror})")
+    if move_back or delete:
         left = [t for t, _ in staged if os.path.lexists(t)]
         raise CommitError(
             "reboundary: a file swap failed and the originals could not all be put back. "
-            "Nothing has been deleted. Each '" + OLD_SUFFIX + "' file is an original and "
-            "each '" + NEW_SUFFIX + "' file is a rewrite: move every '" + OLD_SUFFIX +
-            "' file back over the path it is named after, delete the '" + NEW_SUFFIX +
-            "' files, then re-run. Could not put back: " + ", ".join(stuck)
-            + (". Rewrites still on disk: " + ", ".join(left) if left else "")) from exc
+            "Nothing has been deleted; every file involved is named below, with what to do. "
+            + ("Move back over the path it is named after, which now holds a rewrite (the '"
+               + OLD_SUFFIX + "' file is that path's original): " + ", ".join(move_back) + ". "
+               if move_back else "")
+            + ("Delete; this run created it and there was no file there before: "
+               + ", ".join(delete) + ". " if delete else "")
+            + ("Rewrites still staged, to delete as well: " + ", ".join(left) + ". "
+               if left else "")
+            + "Then re-run.") from exc
     for tmp, _ in staged:
         _unlink(tmp)
 
