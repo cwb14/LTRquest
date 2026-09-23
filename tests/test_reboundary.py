@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 
 import pytest
 
@@ -249,6 +250,68 @@ def test_an_interrupted_backup_stops_the_run(tmp_path):
     (tmp_path / f"p{rb.BACKUP_SUFFIX}.partial").mkdir()
     with pytest.raises(SystemExit, match="interrupted"):
         rb.prepare_posthoc(str(tmp_path), "p")
+
+
+def clean_bytes(fx):
+    return {p.name: p.read_bytes() for p in fx.indir.glob(f"{fx.prefix}_depth*_clean_ltr.*")}
+
+
+def test_posthoc_with_an_empty_backup_keeps_the_live_files(tmp_path):
+    fx = build(tmp_path / "syn_empty_backup")
+    before = clean_bytes(fx)
+    (fx.indir / f"{fx.prefix}{rb.BACKUP_SUFFIX}").mkdir()
+    with pytest.raises(SystemExit, match=rb.BACKUP_SUFFIX):
+        rb.prepare_posthoc(str(fx.indir), fx.prefix)
+    assert clean_bytes(fx) == before
+
+
+def test_posthoc_with_a_partial_backup_refuses_before_removing_anything(tmp_path):
+    fx = build(tmp_path / "syn_partial_backup")
+    before = clean_bytes(fx)
+    bdir = fx.indir / f"{fx.prefix}{rb.BACKUP_SUFFIX}"
+    bdir.mkdir()
+    for p in fx.indir.glob(f"{fx.prefix}_depth*_clean_ltr.*"):
+        shutil.copy2(p, bdir / p.name)
+    (bdir / f"{fx.prefix}_depth1_clean_ltr.fa").unlink()      # a table with no FASTA beside it
+    with pytest.raises(SystemExit, match="depth1_clean_ltr"):
+        rb.prepare_posthoc(str(fx.indir), fx.prefix)
+    assert clean_bytes(fx) == before
+
+
+def test_an_interrupted_restore_can_be_re_run(tmp_path, monkeypatch):
+    fx = build(tmp_path / "syn_restore")
+    originals = clean_bytes(fx)
+    (fx.indir / f"{fx.prefix}_all_depth_LTR_cleaned.gff3").write_text("##gff-version 3\n#old\n")
+    (fx.indir / f"{fx.prefix}_plots").mkdir()
+    (fx.indir / f"{fx.prefix}_plots" / "x.pdf").write_text("old plot")
+    rb.prepare_posthoc(str(fx.indir), fx.prefix)
+    bdir = fx.indir / f"{fx.prefix}{rb.BACKUP_SUFFIX}"
+    held = {p.name for p in bdir.iterdir()}
+    for name in originals:                                   # as a finished run leaves them
+        (fx.indir / name).write_text("rewritten\n")
+    (fx.indir / f"{fx.prefix}{rb.SIDECAR_SUFFIX}").write_text("#rewritten\n")
+
+    real, seen = shutil.copy2, []
+
+    def flaky(src, dst, **kw):
+        seen.append(src)
+        if len(seen) == 2:
+            raise KeyboardInterrupt                          # killed part way through
+        return real(src, dst, **kw)
+
+    monkeypatch.setattr(rb.shutil, "copy2", flaky)
+    with pytest.raises(KeyboardInterrupt):
+        rb.restore(str(fx.indir), fx.prefix)
+    monkeypatch.undo()
+    assert {p.name for p in bdir.iterdir()} == held           # the backup is still whole
+
+    rb.restore(str(fx.indir), fx.prefix)                      # the re-run finishes the job
+    assert not bdir.exists()
+    for name, data in originals.items():
+        assert (fx.indir / name).read_bytes() == data, name
+    assert "#old" in (fx.indir / f"{fx.prefix}_all_depth_LTR_cleaned.gff3").read_text()
+    assert (fx.indir / f"{fx.prefix}_plots" / "x.pdf").read_text() == "old plot"
+    assert not (fx.indir / f"{fx.prefix}{rb.SIDECAR_SUFFIX}").exists()
 
 
 def test_build_models_rejects_an_unknown_method():

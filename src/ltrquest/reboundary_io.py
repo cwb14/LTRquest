@@ -2,9 +2,17 @@
 
 Only the `_clean_` depth tables and FASTAs are ever rewritten. The raw
 `_depth<N>_ltr.*` files are detection outputs that ltrquest.record hands to a
-later run, so they keep the calls as detected. Every rewritten file is staged
-beside its target and renamed only once every file has been written, so a
-failure leaves the run exactly as it was.
+later run, so they keep the calls as detected.
+
+Rewriting is a two-phase commit (`Commit`). Every new file is written to
+`<path>.new` and fsynced before any file is swapped in, so a failure while the
+files are being written -- the long phase -- leaves the run exactly as it was.
+The swap phase then moves each target aside to `<path>.old` and its replacement
+into place, one path at a time, and deletes the `.old` files only once every
+swap has succeeded; a failure part-way through puts every original back. What a
+crash during the swap phase itself can leave behind is `.new`/`.old` files
+beside their targets: `commit()` reports them by name if it cannot clean them up
+itself, and the originals are always recoverable from them by hand.
 """
 
 from __future__ import annotations
@@ -12,7 +20,6 @@ from __future__ import annotations
 import bisect
 import os
 import re
-import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, Iterable, Iterator, List, NamedTuple, Optional, Sequence, Set, Tuple
@@ -193,6 +200,8 @@ def conflict(index: SpanIndex, m: Member, left: int, right: int) -> Optional[str
         if s <= m.start and e >= m.end:           # a host of the call as it stands
             if not (s <= left and e >= right):
                 return "host_exceeded"
+            if s == left and e == right:          # the new key would be the host's own
+                return "duplicates_host"
             continue
         if s >= m.start and e <= m.end:           # nested inside the call already
             continue
@@ -229,32 +238,140 @@ class Accepted:
     right: int
 
 
+NEW_SUFFIX = ".new"
+OLD_SUFFIX = ".old"
+
+
+class CommitError(RuntimeError):
+    """A swap failed and the originals could not all be put back automatically."""
+
+
+def _unlink(path: str) -> bool:
+    try:
+        os.unlink(path)
+    except OSError:
+        return False
+    return True
+
+
+def _sync_dir(path: str) -> None:
+    """Make the renames themselves durable; best effort, some filesystems refuse."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+class _Staged:
+    """A handle on a staged file whose bytes reach the disk before it closes."""
+
+    def __init__(self, fh):
+        self._fh = fh
+
+    def write(self, text: str) -> int:
+        return self._fh.write(text)
+
+    def close(self) -> None:
+        if self._fh.closed:
+            return
+        self._fh.flush()
+        os.fsync(self._fh.fileno())
+        self._fh.close()
+
+    def __enter__(self) -> "_Staged":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.close()
+        return False
+
+
 class Commit:
-    """Stage each rewritten file beside its target; rename them all only at the end."""
+    """Write every rewritten file beside its target, then swap them all in.
+
+    `open` hands back a handle on `<path>.new`, fsynced when it closes, so a
+    failure during writing changes nothing: `abort()` just deletes the `.new`
+    files. `commit()` then swaps, per path in staging order, `<path>` out to
+    `<path>.old` and `<path>.new` in, deleting the `.old` files only once every
+    path has been swapped. A failure mid-swap restores every `.old` in reverse
+    order and deletes the `.new` files, so the run is left exactly as it was; if
+    a restore itself fails, nothing is deleted and `CommitError` names every
+    file left behind and what to do with it. A leftover `.old` from a swap that
+    a kill cut short stops the next `commit()` rather than being overwritten.
+    """
 
     def __init__(self):
         self._staged: List[Tuple[str, str]] = []
 
     def open(self, path: str):
-        directory = os.path.dirname(os.path.abspath(path))
-        fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".rb.tmp",
-                                   dir=directory)
+        tmp = path + NEW_SUFFIX
         self._staged.append((tmp, path))
-        return os.fdopen(fd, "w")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        return _Staged(os.fdopen(fd, "w"))
 
     def commit(self) -> None:
-        for tmp, path in self._staged:
-            os.chmod(tmp, target_mode(path))
-            os.replace(tmp, path)
-        self._staged = []
+        stale = [p + OLD_SUFFIX for _, p in self._staged if os.path.lexists(p + OLD_SUFFIX)]
+        if stale:                             # an earlier swap was killed and never recovered
+            raise CommitError(
+                "reboundary: an earlier rewrite was interrupted mid-swap and left "
+                + ", ".join(stale) + ". Each one holds the original of the path it is named "
+                "after: move it back over that path, delete any '" + NEW_SUFFIX
+                + "' file beside it, then re-run.")
+        staged, self._staged = self._staged, []
+        done: List[Tuple[str, str]] = []      # (target, its .old, or "" if it was absent)
+        try:
+            for tmp, path in staged:
+                os.chmod(tmp, target_mode(path))
+            for tmp, path in staged:
+                old = path + OLD_SUFFIX if os.path.lexists(path) else ""
+                if old:
+                    os.replace(path, old)
+                done.append((path, old))
+                os.replace(tmp, path)
+        except BaseException as exc:
+            _roll_back(done, staged, exc)
+            raise
+        for directory in sorted({os.path.dirname(os.path.abspath(p)) for _, p in staged}):
+            _sync_dir(directory)
+        for _, old in done:
+            if old:
+                _unlink(old)
 
     def abort(self) -> None:
         for tmp, _ in self._staged:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            _unlink(tmp)
         self._staged = []
+
+
+def _roll_back(done: Sequence[Tuple[str, str]], staged: Sequence[Tuple[str, str]],
+               exc: BaseException) -> None:
+    """Undo the swaps already made. Raise CommitError rather than hide a failed undo."""
+    stuck: List[str] = []
+    for path, old in reversed(list(done)):
+        try:
+            if old:
+                os.replace(old, path)
+            elif os.path.lexists(path):
+                os.unlink(path)               # nothing was there before this commit
+        except OSError as e:
+            stuck.append(f"{old or path} ({e.strerror})")
+    if stuck:
+        left = [t for t, _ in staged if os.path.lexists(t)]
+        raise CommitError(
+            "reboundary: a file swap failed and the originals could not all be put back. "
+            "Nothing has been deleted. Each '" + OLD_SUFFIX + "' file is an original and "
+            "each '" + NEW_SUFFIX + "' file is a rewrite: move every '" + OLD_SUFFIX +
+            "' file back over the path it is named after, delete the '" + NEW_SUFFIX +
+            "' files, then re-run. Could not put back: " + ", ".join(stuck)
+            + (". Rewrites still on disk: " + ", ".join(left) if left else "")) from exc
+    for tmp, _ in staged:
+        _unlink(tmp)
 
 
 def atomic_write_text(path: str, text: str) -> None:
@@ -264,10 +381,32 @@ def atomic_write_text(path: str, text: str) -> None:
     c.commit()
 
 
+def check_keys_stay_unique(tables: Sequence[CleanTable], old2new: Dict[str, str]) -> None:
+    """Refuse a re-key that would give two elements one key, before anything is written.
+
+    A row and a FASTA record are found by their element key, so two rows sharing
+    one would make every consumer keyed on it drop an element without a word.
+    `conflict` already refuses every proposal that could produce this; the check
+    is here so that no other route to it can ever land on disk.
+    """
+    claimed: Dict[str, str] = {}
+    for t in tables:
+        for row in t.rows:
+            k = element_key(row[0]) if row else None
+            if k is None:
+                continue
+            new = old2new.get(k, k)
+            if new in claimed:
+                raise ValueError(f"reboundary: {row[0]} and {claimed[new]} would both be "
+                                 f"written with the same key {new}; nothing was written")
+            claimed[new] = row[0]
+
+
 def rewrite(tables: Sequence[CleanTable], accepted: Dict[str, Accepted], letters: Sequence[str],
             commit: Commit, wrap: int = 60) -> None:
     """Stage one genome's clean tables and FASTAs with `accepted` (old key -> result) applied."""
     old2new = {k: element_key(a.new_name) for k, a in accepted.items()}
+    check_keys_stay_unique(tables, old2new)
     jobs: Dict[str, List[Tuple[List[Tuple[int, int]], str]]] = defaultdict(list)
     for a in accepted.values():
         m = a.member

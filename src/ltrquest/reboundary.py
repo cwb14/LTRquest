@@ -485,44 +485,88 @@ def _remove(path: str) -> None:
         os.remove(path)
 
 
+def _check_clean_set(directory: str, prefix: str) -> List[str]:
+    """`directory`'s clean tables and FASTAs, refusing an incomplete set.
+
+    Called before anything is deleted, so that a backup which lost files (an
+    interrupted restore, a failed rmdir on NFS, a pruned directory) stops the
+    run while the working copies are still the ones on disk. An incomplete
+    backup that was merely non-empty used to go unnoticed and take a whole depth
+    out of the annotation.
+    """
+    tables = sorted(glob.glob(os.path.join(directory, f"{prefix}_depth*_clean_ltr.tsv")))
+    if not tables:
+        raise SystemExit(f"reboundary: {directory} holds no {prefix}_depth<N>_clean_ltr.tsv "
+                         f"tables; nothing has been removed")
+    orphans = [t for t in tables if not os.path.isfile(t[:-len(".tsv")] + ".fa")]
+    if orphans:
+        names = ", ".join(os.path.basename(p) for p in orphans)
+        raise SystemExit(f"reboundary: {directory} is incomplete: no .fa beside {names}; "
+                         f"nothing has been removed")
+    return _clean_files(directory, prefix)
+
+
 def prepare_posthoc(indir: str, prefix: str) -> str:
     """Move the originals into <prefix>_pre_reboundary/ once; put fresh copies back to work on.
 
     If the backup already exists this run starts again from it, so post-hoc
-    runs with different settings never stack on each other.
+    runs with different settings never stack on each other. The backup is
+    checked for a complete set of clean tables before any working copy is
+    removed, so a run that cannot be restarted from it removes nothing.
     """
     bdir = os.path.join(indir, prefix + BACKUP_SUFFIX)
     if os.path.isdir(bdir + ".partial"):
         raise SystemExit(f"reboundary: {bdir}.partial exists: an earlier backup was interrupted. "
                          f"Move its files back into {indir}, delete it, then re-run.")
     if not os.path.isdir(bdir):
+        _check_clean_set(indir, prefix)
         tmp = bdir + ".partial"
         os.makedirs(tmp)
         for path in _clean_files(indir, prefix) + _derived(indir, prefix):
             shutil.move(path, os.path.join(tmp, os.path.basename(path)))
         os.rename(tmp, bdir)
+        originals = _clean_files(bdir, prefix)
         log(f"{prefix}: originals moved to {os.path.basename(bdir)}/")
     else:
+        originals = _check_clean_set(bdir, prefix)     # before a single working copy goes
         for path in _clean_files(indir, prefix) + _derived(indir, prefix):
             _remove(path)
         log(f"{prefix}: starting again from {os.path.basename(bdir)}/")
-    originals = _clean_files(bdir, prefix)
-    if not originals:
-        raise SystemExit(f"reboundary: {bdir} holds no {prefix}_depth<N>_clean_ltr tables")
     for path in originals:
         shutil.copy2(path, os.path.join(indir, os.path.basename(path)))
     return bdir
 
 
+def _put_back(src: str, dst: str) -> None:
+    """Copy one backed-up entry over its place in the run, leaving the backup untouched."""
+    tmp = dst + ".partial"
+    if os.path.isdir(src) and not os.path.islink(src):
+        _remove(tmp)
+        shutil.copytree(src, tmp, symlinks=True)
+        _remove(dst)
+        os.rename(tmp, dst)
+        return
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
+
+
 def restore(indir: str, prefix: str) -> None:
+    """Put <prefix>_pre_reboundary/ back in place, copying before it deletes anything.
+
+    The backup stays whole until every one of its entries is in place, so an
+    interrupted restore loses nothing and re-running it finishes the job. A
+    moving restore could split the originals between the two directories, and
+    the next attempt would then delete the half it had already put back.
+    """
     bdir = os.path.join(indir, prefix + BACKUP_SUFFIX)
     if not os.path.isdir(bdir):
         raise SystemExit(f"reboundary: nothing to restore: no {bdir}")
-    for path in _clean_files(indir, prefix) + _derived(indir, prefix):
-        _remove(path)
-    for name in os.listdir(bdir):
-        shutil.move(os.path.join(bdir, name), os.path.join(indir, name))
-    os.rmdir(bdir)
+    held = sorted(os.listdir(bdir))
+    for name in held:
+        _put_back(os.path.join(bdir, name), os.path.join(indir, name))
+    if prefix + SIDECAR_SUFFIX not in held:
+        _remove(os.path.join(indir, prefix + SIDECAR_SUFFIX))   # this run's own output
+    shutil.rmtree(bdir)
     log(f"{prefix}: originals restored from {os.path.basename(bdir)}/")
 
 

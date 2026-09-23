@@ -110,6 +110,11 @@ def test_sidecar_round_trips_through_read_map(tmp_path):
     assert got["c:100-900"] == rio.Rebound("c:150-900#LTR/Gypsy/X", "c:100-900#LTR/Gypsy/X", 50, 0)
 
 
+def _leftovers(tmp_path):
+    return sorted(p.name for p in tmp_path.iterdir()
+                  if p.name.endswith(rio.NEW_SUFFIX) or p.name.endswith(rio.OLD_SUFFIX))
+
+
 def test_commit_is_all_or_nothing(tmp_path):
     a, b = tmp_path / "a.txt", tmp_path / "b.txt"
     a.write_text("old-a")
@@ -120,12 +125,110 @@ def test_commit_is_all_or_nothing(tmp_path):
         fh.write("new-b")
     assert a.read_text() == "old-a" and not b.exists()
     c.abort()
-    assert a.read_text() == "old-a" and not b.exists() and not list(tmp_path.glob("*.rb.tmp"))
+    assert a.read_text() == "old-a" and not b.exists() and not _leftovers(tmp_path)
     c2 = rio.Commit()
     with c2.open(str(a)) as fh:
         fh.write("new-a")
     c2.commit()
-    assert a.read_text() == "new-a"
+    assert a.read_text() == "new-a" and not _leftovers(tmp_path)
+
+
+def test_a_commit_that_fails_part_way_puts_every_original_back(tmp_path, monkeypatch):
+    """A kill between two renames must not leave a table rewritten and its FASTA not."""
+    a, b, c = tmp_path / "a.txt", tmp_path / "b.txt", tmp_path / "c.txt"
+    a.write_text("old-a")
+    c.write_text("old-c")                      # b does not exist yet
+    commit = rio.Commit()
+    for path, text in ((a, "new-a"), (b, "new-b"), (c, "new-c")):
+        with commit.open(str(path)) as fh:
+            fh.write(text)
+
+    real, seen = os.replace, []
+
+    def flaky(src, dst):
+        seen.append(src)
+        if len(seen) == 4:                     # part way through the rename phase
+            raise OSError(28, "No space left on device")
+        return real(src, dst)
+
+    monkeypatch.setattr(rio.os, "replace", flaky)
+    with pytest.raises(OSError):
+        commit.commit()
+    monkeypatch.undo()
+
+    assert a.read_text() == "old-a"
+    assert not b.exists()                      # created by the commit, so taken away again
+    assert c.read_text() == "old-c"
+    assert not _leftovers(tmp_path)
+
+
+def test_a_rollback_that_cannot_finish_says_exactly_what_is_where(tmp_path, monkeypatch):
+    a, b = tmp_path / "a.txt", tmp_path / "b.txt"
+    a.write_text("old-a")
+    b.write_text("old-b")
+    commit = rio.Commit()
+    for path, text in ((a, "new-a"), (b, "new-b")):
+        with commit.open(str(path)) as fh:
+            fh.write(text)
+
+    real, seen = os.replace, []
+
+    def flaky(src, dst):
+        seen.append(src)
+        if len(seen) >= 3:                     # the swap fails and so does putting it back
+            raise OSError(5, "Input/output error")
+        return real(src, dst)
+
+    monkeypatch.setattr(rio.os, "replace", flaky)
+    with pytest.raises(rio.CommitError) as got:
+        commit.commit()
+    monkeypatch.undo()
+    assert str(a) + rio.OLD_SUFFIX in str(got.value)
+    assert os.path.isfile(str(a) + rio.OLD_SUFFIX)     # nothing was thrown away
+    assert (tmp_path / "b.txt").read_text() == "old-b"
+
+
+def test_an_original_left_by_a_killed_swap_is_never_overwritten(tmp_path):
+    a = tmp_path / "a.txt"
+    a.write_text("half-committed")
+    (tmp_path / ("a.txt" + rio.OLD_SUFFIX)).write_text("the original")
+    commit = rio.Commit()
+    with commit.open(str(a)) as fh:
+        fh.write("newer still")
+    with pytest.raises(rio.CommitError, match="interrupted mid-swap"):
+        commit.commit()
+    commit.abort()
+    assert (tmp_path / ("a.txt" + rio.OLD_SUFFIX)).read_text() == "the original"
+    assert a.read_text() == "half-committed"
+
+
+def test_a_proposal_that_fills_its_host_exactly_is_rejected(fx):
+    """Extending to the host's own span would re-key the inner onto the host's key."""
+    ms = {m.name: m for m in members(fx)}
+    index = rio.SpanIndex(ms.values())
+    inner = ms[fx.kind("nested_del_left").name]
+    host = ms[fx.kind("host").name]
+    assert rio.conflict(index, inner, host.start, host.end) == "duplicates_host"
+    assert rio.conflict(index, inner, host.start + 1, host.end) is None
+
+
+def test_rewrite_refuses_two_records_that_would_share_a_key(fx):
+    tables = rio.load_clean_tables(str(fx.indir), fx.prefix)
+    ms = {m.name: m for m in rio.members_from(fx.prefix, tables)}
+    e, host = fx.kind("nested_del_left"), fx.kind("host")
+    m = ms[e.name]
+    new_name = f"chrS:{host.start}-{host.end}#LTR/Gypsy/Synth"      # the host's own key
+    old_row = [r for r in tables[0].rows if r[0] == e.name][0]
+    fields = [new_name] + old_row[1:len(COLUMNS)]
+    acc = rio.Accepted(m, new_name, fields, "A" * (host.end - host.start + 1),
+                       host.start, host.end)
+    before = {p.name: p.read_bytes() for p in fx.indir.glob(f"{fx.prefix}_depth*_clean_ltr.*")}
+    c = rio.Commit()
+    with pytest.raises(ValueError, match="same key"):
+        rio.rewrite(tables, {m.key: acc}, IUPAC_DEPTH_SEQ, c)
+    c.abort()
+    for name, data in before.items():
+        assert (fx.indir / name).read_bytes() == data, name
 
 
 def test_rewrite_renames_rekeys_and_paints_the_host(fx):
