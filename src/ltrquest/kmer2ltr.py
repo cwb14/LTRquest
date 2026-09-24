@@ -213,6 +213,10 @@ class Api(NamedTuple):
     TSD_SHIFTS: tuple
 
 
+class IncompatibleKmer2LTR(RuntimeError):
+    """The Kmer2LTR found cannot do what re-boundarying needs of it."""
+
+
 # Keyed on tools_dir: a second call with a DIFFERENT tools_dir must not be
 # handed back the first call's API. Only one tools_dir is ever used in
 # practice today, but the cache should not silently assume that.
@@ -251,7 +255,18 @@ def api(tools_dir, clone: bool = True) -> Api:
         raise RuntimeError(
             "the Kmer2LTR found does not match this LTRquest "
             f"(classify lacks {missing or 'nothing'}; columns match: "
-            f"{list(runner.COLUMNS) == COLUMNS}). Use the commit the Dockerfile pins.")
+            f"{list(runner.COLUMNS) == COLUMNS}; found at "
+            f"{os.path.dirname(getattr(align, '__file__', '') or '?')}). Use a Kmer2LTR with "
+            f"the homology-paired credit (see LTRquest's CHANGELOG).")
+    # Re-boundarying hands Kmer2LTR the pair it already called (`spans`) and the
+    # templates' ends as credit. An older Kmer2LTR re-discovers a pair of its own and
+    # force-aligns credited flanks onto the internal region, inflating K2P: refuse it.
+    if "spans" not in params or not getattr(align, "CREDIT_PAIRS_BY_HOMOLOGY", False):
+        raise IncompatibleKmer2LTR(
+            f"this Kmer2LTR ({os.path.dirname(getattr(align, '__file__', '') or '?')}) "
+            f"force-pairs credited flanks and cannot take a known pair (no `spans`, no "
+            f"CREDIT_PAIRS_BY_HOMOLOGY): use a Kmer2LTR with the homology-paired credit "
+            f"(2c7e7f8 or later). An installed kmer2ltr package is used before --tools-dir.")
     _API[key] = Api(align.classify, runner.format_row, genome.Window, genome.Options,
                     genome.orient, genome.annotate, genome.find_tsd, genome.PAD,
                     genome.PROBE, genome.TSD_K, genome.TSD_SHIFTS)

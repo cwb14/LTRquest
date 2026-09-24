@@ -343,7 +343,7 @@ def test_reboundary_map_keeps_family_attributes_and_marks_the_shift(tmp_path):
     line = _renamed_run(tmp_path, with_map=True)
     assert "\t100\t3000\t" in line
     assert "family_size=1" in line
-    assert "boundary_source=family_model" in line and "boundary_shift=50,0" in line
+    assert "boundary_source=templates" in line and "boundary_shift=50,0" in line
 
 
 def test_without_the_map_a_renamed_element_loses_its_cluster_attributes(tmp_path):

@@ -298,15 +298,18 @@ Optional:
                         Needs blast+, and minimap2 for balanced/sensitive.
   --strand-recovery-ppt Add the polypurine-tract fallback for loci homology
                         cannot reach. Measured at 93%, so off by default.
-  --reboundary          Extend LTR-RT calls that stop short of their true ends
-                        (an indel or a mutation-dense patch near an LTR end stops
-                        LTRharvest/LTR_FINDER early). Each family's LTR model,
-                        built from its full-length copies across all genomes,
-                        proposes the ends; Kmer2LTR re-scores every changed
-                        element. Extends only, never trims. Rewrites the _clean_
-                        tables and FASTAs and writes <out_prefix>_reboundary.tsv.
-                        Off by default. Needs mafft. For a finished run use
-                        ltrquest-reboundary --posthoc instead.
+  --reboundary          Re-bound LTR-RT calls whose ends carry no TSD (an indel
+                        or a mutation-dense patch near an LTR end stops
+                        LTRharvest/LTR_FINDER early; a few calls run a few bases
+                        long). Calls whose ends carry an exact TSD, from every
+                        genome and family, are the templates: where at least two
+                        agree, an end moves out, or in by up to 10 bp, and a
+                        second call of the same element is merged away. Kmer2LTR
+                        re-measures every changed element; bases with no partner
+                        in the other LTR are gaps, so K2P is not inflated.
+                        Rewrites the _clean_ tables and FASTAs and writes
+                        <out_prefix>_reboundary.tsv. Off by default. Needs blastn.
+                        For a finished run use ltrquest-reboundary --posthoc.
 
 Post-detection FP-family correction runs automatically: it clusters the detected
 LTR-RTs with Kmer2LTR, purges false-positive families into
@@ -847,9 +850,9 @@ reorient_recovered() {
   set +x
 }
 
-# Pooled over every genome: a family's LTR model is built from all its copies,
-# whichever genome they sit in. After the annotator (it needs the family and
-# strand columns) and before the GFF3 (which must learn the names it changes).
+# Pooled over every genome: the templates (calls whose ends carry an exact TSD)
+# come from all of them. After the annotator (it needs the strand, family and
+# nesting columns) and before the GFF3 (which must learn the names it changes).
 run_reboundary_stage() {
   local i p
   local -a prefixes=() genomes=() cleaned=()
@@ -873,12 +876,15 @@ run_reboundary_stage() {
   echo ""
   echo "============================================================"
   echo "Re-boundarying truncated LTR-RT calls (${#prefixes[@]} genome(s), pooled)..."
+  local rc=0
   set -x
-  if "${REBOUND[@]}" --indir . --prefix "${prefixes[@]}" --genome "${genomes[@]}" \
-       --threads "$THREADS" --mutation-rate "$MUTATION_RATE" --tools-dir "$TOOLS_DIR"; then
-    set +x
-  else
-    set +x
+  "${REBOUND[@]}" --indir . --prefix "${prefixes[@]}" --genome "${genomes[@]}" \
+    --threads "$THREADS" --mutation-rate "$MUTATION_RATE" --tools-dir "$TOOLS_DIR" || rc=$?
+  set +x
+  if (( rc == 3 )); then
+    # an incompatible Kmer2LTR: loud, not a quiet fallback to the calls as detected
+    die "--reboundary cannot run with the Kmer2LTR in ${TOOLS_DIR} (see the error above)."
+  elif (( rc != 0 )); then
     echo "WARNING: re-boundarying failed; the calls are kept as detected." >&2
     for p in "${prefixes[@]}"; do rm -f "${p}_reboundary.tsv"; done
   fi
@@ -1414,10 +1420,10 @@ elif [[ "$STRAND_RECOVERY_PPT" == true ]]; then
   die "--strand-recovery-ppt has no effect without --strand-recovery"
 fi
 
-# --reboundary builds family LTR models with mafft; fail now, not after detection.
+# --reboundary finds each call's templates with BLAST; fail now, not after detection.
 if [[ "$REBOUNDARY" == true ]]; then
-  command -v mafft >/dev/null 2>&1 \
-    || die "--reboundary needs mafft on PATH to build family LTR models; it is in environment.yml"
+  { command -v blastn && command -v makeblastdb; } >/dev/null 2>&1 \
+    || die "--reboundary needs blastn and makeblastdb on PATH; they are in environment.yml"
 fi
 
 # ----------------------------
@@ -1492,6 +1498,24 @@ FLAG_FP=(   "$PY" -m ltrquest.flag_fp   )
 RECOVER=(   "$PY" -m ltrquest.recover_strand )
 RECORD=(    "$PY" -m ltrquest.record    )
 REBOUND=(   "$PY" -m ltrquest.reboundary )
+
+# --reboundary hands Kmer2LTR the pair each element was called with and credits the
+# templates' ends; a Kmer2LTR without that support would inflate every re-bounded
+# K2P. Checked now (cloning it if it must), not hours later in the annotation stage.
+if [[ "$REBOUNDARY" == true ]]; then
+  rb_rc=0
+  "$PY" -c 'import sys
+from ltrquest import kmer2ltr
+try:
+    kmer2ltr.api(sys.argv[1])
+except kmer2ltr.IncompatibleKmer2LTR as exc:
+    print(f"ERROR: --reboundary: {exc}", file=sys.stderr)
+    sys.exit(3)
+except RuntimeError:
+    pass                                    # not there yet: the rounds clone it' "$TOOLS_DIR" \
+    || rb_rc=$?
+  (( rb_rc == 3 )) && exit 3
+fi
 
 # ----------------------------
 # Config: IUPAC codes to use for successive rounds (exclude V)

@@ -21,13 +21,31 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Added
 
-- `--reboundary` / `ltrquest-reboundary`: extend LTR-RT calls that stop short of
-  their true ends. Each family's LTR model (termini from 5′/3′-LTR agreement across
-  its full-length copies, pooled over genomes) proposes outward-only ends; family QC,
-  conflict rules and Kmer2LTR re-scoring decide. Rewrites the `_clean_` tables and
-  FASTAs, marks changed elements `boundary_source=family_model` in the GFF3, and
-  writes `<prefix>_reboundary.tsv`. `--posthoc` updates a finished run in place with
-  a backup. Defaults set by `benchmarks/reboundary/`.
+- `--reboundary` / `ltrquest-reboundary`: move the ends of LTR-RT calls that have
+  no TSD at their called ends, typically calls a detector stopped short at an indel
+  or a mutation-dense patch. The templates are calls with an exact TSD, pooled over
+  genomes, families, strands and nesting depths; one BLASTN finds each call's 5
+  nearest (`--templates`). Where at least 2 agree (`--min-support`), an end moves
+  out, or in by up to 10 bp (`--max-trim`). Calls with a TSD are never moved, and a
+  second, staggered call of the same element is merged away. Kmer2LTR re-measures
+  every changed element on its called LTR pair; bases with no partner in the other
+  LTR count as gaps, so K2P and age are not inflated. Rewrites the `_clean_` tables
+  and FASTAs, writes `<prefix>_reboundary.tsv`, and marks changed elements
+  `boundary_source=templates` and `boundary_shift=<ext5>,<ext3>` in the GFF3.
+  `--posthoc` updates a finished run in place with a one-time backup (`--restore`
+  undoes it). Needs BLAST+. On rice (6,709 elements) it moved 1,705 calls and
+  merged 21 in 35 s, and a curated rice LTR library agrees with 99.5% of the new
+  ends. Benchmarks: `benchmarks/reboundary/`.
+
+  Needs a Kmer2LTR with the homology-paired credit (`align.CREDIT_PAIRS_BY_HOMOLOGY`
+  and `classify(..., spans=)`). An older one is refused: `ltrquest-reboundary` exits
+  3 and the pipeline stops. The Docker image now pins Kmer2LTR `2c7e7f8`, the
+  commit that adds it.
+
+  Development builds only: the pre-release design's flags `--method`,
+  `--references`, `--subfamily-jaccard`, `--min-copies`, `--max-ratio`,
+  `--qc-min-n`, `--untested`, `--credit`, `--mafft` and `--cache` are gone, and its
+  sidecars (decision `extended`) still load.
 - Add a genome to an earlier multi-genome run without re-detecting the others:
   re-run in the same directory with the longer `--genome` list. Each detected
   genome leaves a `<prefix>.detect.json` (input checksums, detection settings);

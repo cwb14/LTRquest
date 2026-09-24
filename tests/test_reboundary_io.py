@@ -32,7 +32,7 @@ def test_load_refuses_a_table_that_was_never_annotated(fx):
     cut = head.index("family")
     path.write_text("\n".join("\t".join(l.split("\t")[:cut] + l.split("\t")[cut + 1:])
                               for l in lines) + "\n")
-    with pytest.raises(ValueError, match="family"):
+    with pytest.raises(ValueError, match="no family column.*needs the strand, family, nesting"):
         rio.load_clean_tables(str(fx.indir), fx.prefix)
 
 
@@ -283,3 +283,216 @@ def test_rewrite_renames_rekeys_and_paints_the_host(fx):
     painted = fa1[host.name][e.true_start - host.start:e.end - host.start + 1]
     assert set(painted) == {"N"}
     assert (fx.indir / f"{fx.prefix}_depth0_ltr.tsv").read_bytes() == raw_before
+
+
+# ---------------------------------------------------------------- trims, merges (v2)
+
+def _mini_chain(tmp_path):
+    """A 3-level nest written as the pipeline writes it: H2 (depth 2, stored +) holds
+    H1 (depth 1, stored -), which holds E (depth 0, stored +)."""
+    import random
+    from reboundary_fixtures import TAIL, Element, _row
+    r = random.Random(5)
+    seq = "".join(r.choice("ACGT") for _ in range(6000))
+    (tmp_path / "g.fa").write_text(">chrS\n" + seq + "\n")
+    h2 = Element("h2", "fam_a", "+", 101, 5900, 101, 5900, 400, 5601, depth=2)
+    h1 = Element("h1", "fam_b", "-", 1001, 4900, 1001, 4900, 1300, 4601, depth=1)
+    e = Element("e", "fam_c", "+", 2001, 3900, 2001, 3900, 2300, 3601, depth=0)
+    h2.nest_status = f"nest-outer:{h1.key};nest-outer:{e.key}"
+    h1.nest_status = f"nest-outer:{e.key};nest-inner:{h2.key}"
+    e.nest_status = f"nest-inner:{h1.key};nest-inner:{h2.key}"
+
+    def painted(x, kids):
+        rec = list(seq[x.start - 1:x.end])
+        for k in kids:                                     # parent first, deeper after
+            for p in range(k.start, k.end + 1):
+                rec[p - x.start] = IUPAC_DEPTH_SEQ[k.depth]
+        rec = "".join(rec)
+        return revcomp_record(rec) if x.strand == "-" else rec
+
+    records = {e.key: painted(e, []), h1.key: painted(h1, [e]), h2.key: painted(h2, [h1, e])}
+    header = "#" + "\t".join(COLUMNS + TAIL)
+    for x in (e, h1, h2):
+        base = tmp_path / f"p_depth{x.depth}_clean_ltr"
+        (base.with_suffix(".tsv")).write_text(header + "\n" + "\t".join(_row(x)) + "\n")
+        (base.with_suffix(".fa")).write_text(f">{x.name}\n{records[x.key]}\n")
+    return seq, e, h1, h2
+
+
+def test_a_trim_gives_each_host_back_what_reconcile_would_have_painted(tmp_path):
+    seq, e, h1, h2 = _mini_chain(tmp_path)
+    tables = rio.load_clean_tables(str(tmp_path), "p")
+    ms = {m.uid: m for m in rio.members_from("p", tables)}
+    m = next(x for x in ms.values() if x.key == e.key)
+    restore = rio.trim_restore(m, [(3898, 3900)], ms, IUPAC_DEPTH_SEQ,
+                               lambda prefix, chrom, a, b: seq[a - 1:b])
+    new_name = f"chrS:2001-3897#LTR/Gypsy/Synth"
+    old_row = tables[0].rows[0]
+    acc = rio.Accepted(m, new_name, [new_name] + old_row[1:len(COLUMNS)], seq[2000:3897],
+                       2001, 3897, restore=restore)
+    c = rio.Commit()
+    rio.rewrite(tables, {m.key: acc}, IUPAC_DEPTH_SEQ, c)
+    c.commit()
+    fa1 = rio.fetch_records([str(tmp_path / "p_depth1_clean_ltr.fa")], {h1.name})[h1.name]
+    fa2 = rio.fetch_records([str(tmp_path / "p_depth2_clean_ltr.fa")], {h2.name})[h2.name]
+    fwd1 = rio.forward(fa1, "-")
+    assert fwd1[3898 - 1001:3900 - 1001 + 1] == seq[3897:3900]         # parent: the genome
+    assert set(fwd1[2001 - 1001:3897 - 1001 + 1]) == {"N"}              # the call itself: still N
+    assert fa2[3898 - 101:3900 - 101 + 1] == "RRR"                       # grandparent: H1's R
+    assert set(fa2[2001 - 101:3897 - 101 + 1]) == {"N"}
+
+
+def test_a_prebuilt_host_index_restores_exactly_what_a_member_scan_does(tmp_path):
+    """At 10^5 members a scan of every member per trimmed nested element and host costs
+    minutes; the index built once must give the same restore."""
+    seq, e, h1, h2 = _mini_chain(tmp_path)
+    tables = rio.load_clean_tables(str(tmp_path), "p")
+    ms = {m.uid: m for m in rio.members_from("p", tables)}
+    m = next(x for x in ms.values() if x.key == e.key)
+
+    def fetch(prefix, chrom, a, b):
+        return seq[a - 1:b]
+    scan = rio.trim_restore(m, [(3898, 3900)], ms, IUPAC_DEPTH_SEQ, fetch)
+    index = rio.nested_index(ms.values())
+    assert rio.trim_restore(m, [(3898, 3900)], ms, IUPAC_DEPTH_SEQ, fetch, nested=index) == scan
+
+
+def _split(fx):
+    ms = {m.uid: m for m in members(fx)}
+    by_name = {m.name: m for m in ms.values()}
+    a, b = by_name[fx.kind("split_short").name], by_name[fx.kind("split_part").name]
+    return ms, rio.SpanIndex(ms.values()), a, b, fx.kind("split_short")
+
+
+def test_the_second_call_of_one_element_is_found_as_its_merge_partner(fx):
+    ms, index, a, b, e = _split(fx)
+    assert rio.merge_partner(index, ms, a, a.start, e.true_end) == b.key
+    assert rio.merge_partner(index, ms, a, a.start, e.true_end - 20) is None    # end not shared
+
+
+@pytest.mark.parametrize("change", [
+    {"strand": "-"}, {"depth": 1},
+    {"nest_status": "nest-inner:chrS:1-99999999"},
+    {"nest_status": "nest-outer:chrS:1-2"}, {"tsd": "ACGTA", "tsd_offset": "0,0"},
+])
+def test_a_second_call_that_is_not_the_same_element_is_no_merge_partner(fx, change):
+    ms, _, a, b, e = _split(fx)
+    other = dataclasses.replace(b, **change)
+    ms = dict(ms)
+    ms[b.uid] = other
+    assert rio.merge_partner(rio.SpanIndex(ms.values()), ms, a, a.start, e.true_end) is None
+
+
+def test_a_second_call_in_another_family_is_still_a_merge_partner(fx):
+    """A split call's family is clustered from its own, partly wrong, LTR pair, so it
+    says nothing about which element the call belongs to."""
+    ms, _, a, b, e = _split(fx)
+    ms = dict(ms)
+    ms[b.uid] = dataclasses.replace(b, family="other_fam")
+    assert rio.merge_partner(rio.SpanIndex(ms.values()), ms, a, a.start, e.true_end) == b.key
+
+
+def test_a_split_pair_inside_a_common_host_is_still_a_merge_partner():
+    """The host spans the added bases too; it is the element's host, not a second
+    call."""
+    from ltrquest.ltr_model import Member
+
+    def mm(s, e, name, nest, depth):
+        return Member(prefix="p", name=f"c:{s}-{e}#{name}", chrom="c", start=s, end=e,
+                      l1=s + 399, r0=e - 399, strand="+", orientation="+", family="f",
+                      depth=depth, k2p=0.01, tsd=".", nest_status=nest)
+    host = mm(1, 30000, "h", "nest-outer:c:5000-15000;nest-outer:c:8000-18000", 0)
+    a = mm(5000, 15000, "a", "nest-inner:c:1-30000", 1)
+    b = mm(8000, 18000, "b", "nest-inner:c:1-30000", 1)
+    ms = {m.uid: m for m in (host, a, b)}
+    assert rio.merge_partner(rio.SpanIndex(ms.values()), ms, a, 5000, 18000) == b.key
+
+
+def test_a_retired_call_leaves_no_row_record_or_reference(fx):
+    tables = rio.load_clean_tables(str(fx.indir), fx.prefix)
+    ms = {m.name: m for m in rio.members_from(fx.prefix, tables)}
+    e, x = fx.kind("split_short"), fx.kind("split_part")
+    m = ms[e.name]
+    new_name = f"chrS:{e.start}-{e.true_end}#LTR/Gypsy/Synth"
+    old_row = [r for r in tables[0].rows if r[0] == e.name][0]
+    genome = "".join(fx.genome.read_text().splitlines()[1:])
+    acc = rio.Accepted(m, new_name, [new_name] + old_row[1:len(COLUMNS)],
+                       genome[e.start - 1:e.true_end], e.start, e.true_end)
+    c = rio.Commit()
+    rio.rewrite(tables, {m.key: acc}, IUPAC_DEPTH_SEQ, c, retired=frozenset({ms[x.name].key}))
+    c.commit()
+    t0 = (fx.indir / f"{fx.prefix}_depth0_clean_ltr.tsv").read_text()
+    assert new_name in t0 and x.name not in t0 and e.name not in t0
+    fa0 = rio.fetch_records([str(fx.indir / f"{fx.prefix}_depth0_clean_ltr.fa")],
+                            {x.name, new_name})
+    assert set(fa0) == {new_name}
+
+
+def test_a_retired_calls_nest_tokens_are_dropped_not_rekeyed():
+    value = "nest-outer:c:1-9;nest-outer:c:5-20;nest-inner:c:1-900"
+    got = rio.rekey_nest(rio.drop_nest(value, frozenset({"c:5-20"})), {"c:1-9": "c:1-20"})
+    assert got == "nest-outer:c:1-20;nest-inner:c:1-900"
+    assert rio.drop_nest("nest-outer:c:5-20", frozenset({"c:5-20"})) == "."
+
+
+def test_a_survivor_may_take_its_retired_partners_key(fx):
+    """The whole element can be one of the two calls: the survivor then takes that key,
+    which is only legal because the partner leaves."""
+    tables = rio.load_clean_tables(str(fx.indir), fx.prefix)
+    ms = {m.name: m for m in rio.members_from(fx.prefix, tables)}
+    e, x = fx.kind("split_short"), fx.kind("split_part")
+    m, xm = ms[e.name], ms[x.name]
+    new_name = x.name                                         # the partner's own key
+    old_row = [r for r in tables[0].rows if r[0] == e.name][0]
+    acc = rio.Accepted(m, new_name, [new_name] + old_row[1:len(COLUMNS)], "A" * 10,
+                       xm.start, xm.end)
+    c = rio.Commit()
+    with pytest.raises(ValueError, match="same key"):
+        rio.rewrite(tables, {m.key: acc}, IUPAC_DEPTH_SEQ, c)
+    c.abort()
+    c = rio.Commit()
+    rio.rewrite(tables, {m.key: acc}, IUPAC_DEPTH_SEQ, c, retired=frozenset({xm.key}))
+    c.abort()
+
+
+def test_mutual_conflicts_do_not_depend_on_input_order_when_starts_tie():
+    """Workers finish in any order; two calls sharing a start must not let that order
+    pick which one keeps the bases both claim."""
+    from ltrquest.ltr_model import Member
+
+    def mm(s, e):
+        return Member(prefix="p", name=f"c:{s}-{e}#x", chrom="c", start=s, end=e, l1=s + 99,
+                      r0=e - 99, strand="+", orientation="+", family="f", depth=0, k2p=0.01,
+                      tsd=".")
+    items = [(mm(1000, 5000), 900, 5000), (mm(1000, 6000), 900, 6000)]
+    assert rio.mutual_conflicts(items) == rio.mutual_conflicts(items[::-1])
+
+
+def test_a_trim_that_would_leave_a_nested_element_outside_is_refused():
+    from ltrquest.ltr_model import Member
+
+    def mm(s, e, name):
+        return Member(prefix="p", name=f"c:{s}-{e}#{name}", chrom="c", start=s, end=e,
+                      l1=s + 99, r0=e - 99, strand="+", orientation="+", family="f", depth=0,
+                      k2p=0.01, tsd=".")
+    host, inner = mm(100, 5000, "h"), mm(4995, 5000, "i")
+    index = rio.SpanIndex([host, inner])
+    assert rio.conflict(index, host, 100, 4997) == "nest_broken"
+    assert rio.conflict(index, host, 100, 5000) is None
+
+
+def test_sidecar_v2_round_trips_and_legacy_extended_rows_still_map(tmp_path):
+    row = dict.fromkeys(rio.SIDECAR_COLUMNS, ".")
+    row.update(old_seq_id="c:150-900#LTR/Gypsy/X", new_seq_id="c:100-897#LTR/Gypsy/X",
+               decision="moved", ext5="50", ext3="-3")
+    merged = dict(row, old_seq_id="c:600-897#LTR/Gypsy/X", new_seq_id="c:100-897#LTR/Gypsy/X",
+                  decision="merged", reason="split_call", merged_into="c:100-897#LTR/Gypsy/X")
+    path = tmp_path / "p_reboundary.tsv"
+    path.write_text(rio.sidecar_text([row, merged]))
+    got = rio.read_map(str(path))
+    assert got == {"c:100-897": rio.Rebound("c:150-900#LTR/Gypsy/X",
+                                             "c:100-897#LTR/Gypsy/X", 50, -3)}
+    legacy = tmp_path / "old_reboundary.tsv"
+    legacy.write_text("#old_seq_id\tnew_seq_id\tdecision\text5\text3\n"
+                      "c:150-900#X\tc:100-900#X\textended\t50\t0\n")
+    assert set(rio.read_map(str(legacy))) == {"c:100-900"}

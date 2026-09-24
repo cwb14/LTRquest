@@ -23,8 +23,9 @@ import bisect
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Dict, Iterable, Iterator, List, NamedTuple, Optional, Sequence, Set, Tuple
+from dataclasses import dataclass, field
+from typing import (Callable, Dict, FrozenSet, Iterable, Iterator, List, NamedTuple, Optional,
+                    Sequence, Set, Tuple)
 
 from .annotate import discover_depth_tables, element_key, header_names, read_table, target_mode
 from .detect import revcomp as revcomp_record
@@ -34,11 +35,14 @@ from .table import Columns, as_float, as_int
 
 SIDECAR_SUFFIX = "_reboundary.tsv"
 SIDECAR_COLUMNS = [
-    "old_seq_id", "new_seq_id", "family", "method", "model_id", "decision", "reason",
-    "ext5", "ext3", "end_source5", "end_source3", "id_outer5", "id_outer3", "credit_bits",
-    "k2l_status", "tsd_called", "tsd_new", "tsd_null", "k2p_called", "k2p_new",
-    "obstacle5", "obstacle3",
+    "old_seq_id", "new_seq_id", "family", "method", "templates", "decision", "reason",
+    "ext5", "ext3", "end_source5", "end_source3", "id_outer5", "id_outer3", "support5",
+    "support3", "k2l_status", "tsd_called", "tsd_new", "tsd_null", "k2p_called", "k2p_new",
+    "unpaired5", "unpaired3", "obstacle5", "obstacle3", "merged_into",
 ]
+# Decisions whose row names a re-bounded element ("extended": sidecars written before
+# trims and merges existed).
+MOVED = ("moved", "extended")
 NEST_RE = re.compile(r"^(nest-outer|nest-inner):(.+)$")
 
 
@@ -65,7 +69,8 @@ def load_clean_tables(indir: str, prefix: str) -> List[CleanTable]:
         missing = [c for c in ("strand", "family", "nest_status", "orientation") if c not in cols]
         if missing:
             raise ValueError(f"{t.path}: no {', '.join(missing)} column; run ltrquest.annotate "
-                             f"first (re-boundarying models families)")
+                             f"first (re-boundarying needs the strand, family, nesting and "
+                             f"orientation columns)")
         out.append(CleanTable(t.path, t.path[:-len(".tsv")] + ".fa", t.depth, header, rows, cols))
     return out
 
@@ -88,7 +93,8 @@ def members_from(prefix: str, tables: Sequence[CleanTable]) -> List[Member]:
                 strand=t.cols.get(row, "strand"), orientation=t.cols.get(row, "orientation", "+"),
                 family=t.cols.get(row, "family"), depth=t.depth,
                 k2p=as_float(t.cols.get(row, "k2p")), tsd=t.cols.get(row, "tsd"),
-                nest_status=t.cols.get(row, "nest_status")))
+                nest_status=t.cols.get(row, "nest_status"),
+                tsd_offset=t.cols.get(row, "tsd_offset", "")))
     return out
 
 
@@ -158,6 +164,19 @@ def rekey_nest(value: str, old2new: Dict[str, str]) -> str:
     return ";".join(out)
 
 
+def drop_nest(value: str, keys: FrozenSet[str]) -> str:
+    """`value` without the tokens that name any of `keys` (calls that no longer exist).
+
+    Dropped rather than re-keyed onto the call that absorbed them: that call's own
+    token is already there, and `rekey_nest` does not deduplicate.
+    """
+    if value in ("", ".") or not keys:
+        return value
+    out = [tok for tok in value.split(";")
+           if not ((m := NEST_RE.match(tok)) and m.group(2) in keys)]
+    return ";".join(out) if out else "."
+
+
 def hosts_of(nest_status: str) -> List[str]:
     """Keys of the elements this one is nested inside."""
     return [m.group(2) for m in (NEST_RE.match(t) for t in nest_status.split(";"))
@@ -193,11 +212,16 @@ def _added(m: Member, left: int, right: int) -> List[Tuple[int, int]]:
             + ([(m.end + 1, right)] if right > m.end else []))
 
 
-def conflict(index: SpanIndex, m: Member, left: int, right: int) -> Optional[str]:
-    """Why extending `m` to left..right would clash with another element, or None."""
+def conflict(index: SpanIndex, m: Member, left: int, right: int,
+             ignore: FrozenSet[str] = frozenset()) -> Optional[str]:
+    """Why moving `m` to left..right would clash with another element, or None.
+
+    `ignore` holds keys of calls that are leaving (a merge partner).
+    """
     added = _added(m, left, right)
-    for s, e, key in index.overlapping(m.prefix, m.chrom, left, right):
-        if key == m.key:
+    for s, e, key in index.overlapping(m.prefix, m.chrom, min(left, m.start),
+                                       max(right, m.end)):
+        if key == m.key or key in ignore:
             continue
         if s <= m.start and e >= m.end:           # a host of the call as it stands
             if not (s <= left and e >= right):
@@ -206,6 +230,8 @@ def conflict(index: SpanIndex, m: Member, left: int, right: int) -> Optional[str
                 return "duplicates_host"
             continue
         if s >= m.start and e <= m.end:           # nested inside the call already
+            if s < left or e > right:             # ...and a trim would leave it outside
+                return "nest_broken"
             continue
         for a, b in added:
             if s >= a and e <= b:
@@ -215,12 +241,110 @@ def conflict(index: SpanIndex, m: Member, left: int, right: int) -> Optional[str
     return None
 
 
+def merge_partner(index: SpanIndex, by_uid: Dict[str, Member], m: Member, left: int,
+                  right: int, tol: int = 5) -> Optional[str]:
+    """Key of the one call that is `m`'s own element called a second time, or None.
+
+    A detector can call one element twice, staggered: each call has one of the
+    element's true outer ends. Moving `m` to its true ends then reaches the other
+    call's outer end, and the other call -- not the move -- is what is wrong. It is
+    the same element when it has the same strand, depth and nesting, hosts nothing,
+    carries no TSD of its own (whose ends a TSD confirms is a different insertion),
+    lies inside the new span, and its outer end on the side it overlaps is the new
+    outer end within `tol` bp. Family is not compared: a split call's family is
+    clustered from its own, partly wrong, LTR pair. Anything short of exactly one
+    such call is no merge.
+    """
+    added = _added(m, left, right)
+    found: List[str] = []
+    for s, e, key in index.overlapping(m.prefix, m.chrom, left, right):
+        if key == m.key or not any(s <= b and e >= a for a, b in added):
+            continue
+        if s <= m.start and e >= m.end:            # a host, not a second call
+            continue
+        x = by_uid.get(f"{m.prefix}\t{key}")
+        if x is None or not (left <= s and e <= right):
+            return None
+        same = (x.strand == m.strand and x.depth == m.depth
+                and sorted(hosts_of(x.nest_status)) == sorted(hosts_of(m.nest_status))
+                and "nest-outer:" not in (x.nest_status or "")
+                and x.tsd in ("", ".", "NA"))
+        ends = ((s < m.start and abs(s - left) <= tol)
+                or (e > m.end and abs(e - right) <= tol))
+        if not (same and ends):
+            return None
+        found.append(key)
+    return found[0] if len(found) == 1 else None
+
+
+def nested_index(members: Iterable[Member]) -> Dict[Tuple[str, str], List[Member]]:
+    """(prefix, host key) -> every element nested anywhere inside that host. Built once,
+    it spares `trim_restore` a scan of every member per trimmed element and host."""
+    out: Dict[Tuple[str, str], List[Member]] = defaultdict(list)
+    for x in members:
+        for hk in hosts_of(x.nest_status):
+            out[(x.prefix, hk)].append(x)
+    return out
+
+
+def trim_restore(m: Member, trimmed: Sequence[Tuple[int, int]], by_uid: Dict[str, Member],
+                 letters: Sequence[str], fetch: Callable[[str, str, int, int], str],
+                 nested: Optional[Dict[Tuple[str, str], List[Member]]] = None
+                 ) -> Dict[str, Tuple[Tuple[int, str], ...]]:
+    """host key -> ((genomic start, forward-frame characters), ...) for `m`'s trimmed bases.
+
+    Every ancestor's record masked those bases with `m`'s depth letter. Once they
+    are no longer `m`'s, each shows what reconcile paints there without `m`: the
+    letter of the innermost other element of that host still covering it (an
+    intermediate host, in a grandparent), else the genomic base.
+    """
+    out: Dict[str, Tuple[Tuple[int, str], ...]] = {}
+    if nested is None:
+        nested = nested_index(x for x in by_uid.values() if x.prefix == m.prefix)
+    for hk in hosts_of(m.nest_status):
+        within = [x for x in nested.get((m.prefix, hk), ()) if x.key != m.key]
+        segs = []
+        for a, b in trimmed:
+            chars = list(fetch(m.prefix, m.chrom, a, b))
+            for i, pos in enumerate(range(a, b + 1)):
+                cover = [x for x in within if x.start <= pos <= x.end]
+                if cover:
+                    d = min(x.depth for x in cover)
+                    chars[i] = letters[d] if d < len(letters) else "X"
+            segs.append((a, "".join(chars)))
+        out[hk] = tuple(segs)
+    return out
+
+
+def overwrite(record: str, orientation: str, rec_start: int,
+              segments: Sequence[Tuple[int, str]]) -> str:
+    """Write forward-frame `segments` (genomic start, characters) into a stored record,
+    mirrored and reverse-complemented when the record is stored `-` (depth letters are
+    written as they are, as `paint` and reconcile do)."""
+    chars, n = list(record), len(record)
+    for start, text in segments:
+        if orientation == "-":
+            first, text = n - (start - rec_start) - len(text), revcomp_record(text)
+        else:
+            first = start - rec_start
+        for i, ch in enumerate(text):
+            if 0 <= first + i < n:
+                chars[first + i] = ch
+    return "".join(chars)
+
+
+def genome_order(m: Member) -> Tuple[str, str, int, int, str]:
+    """Genome, chrom, start order, ties broken by end and name: whatever the order in
+    which workers return, the first claim is always the same call's."""
+    return m.prefix, m.chrom, m.start, m.end, m.name
+
+
 def mutual_conflicts(items: Sequence[Tuple[Member, int, int]]) -> Set[str]:
     """uids whose added bases overlap an earlier candidate's added bases
-    (genome, chrom, start order)."""
+    (`genome_order`)."""
     taken: Dict[Tuple[str, str], List[Tuple[int, int]]] = defaultdict(list)
     lost: Set[str] = set()
-    for m, left, right in sorted(items, key=lambda t: (t[0].prefix, t[0].chrom, t[0].start)):
+    for m, left, right in sorted(items, key=lambda t: genome_order(t[0])):
         added = _added(m, left, right)
         k = (m.prefix, m.chrom)
         if any(a <= d and b >= c for a, b in added for c, d in taken[k]):
@@ -238,6 +362,8 @@ class Accepted:
     record: str             # stored-orientation FASTA record
     left: int
     right: int
+    # host key -> ((genomic start, forward characters), ...) over trimmed bases
+    restore: Dict[str, Tuple[Tuple[int, str], ...]] = field(default_factory=dict)
 
 
 NEW_SUFFIX = ".new"
@@ -427,14 +553,8 @@ def _roll_back(done: Sequence[Tuple[str, str]], staged: Sequence[Tuple[str, str]
         _unlink(tmp)
 
 
-def atomic_write_text(path: str, text: str) -> None:
-    c = Commit()
-    with c.open(path) as fh:
-        fh.write(text)
-    c.commit()
-
-
-def check_keys_stay_unique(tables: Sequence[CleanTable], old2new: Dict[str, str]) -> None:
+def check_keys_stay_unique(tables: Sequence[CleanTable], old2new: Dict[str, str],
+                           retired: FrozenSet[str] = frozenset()) -> None:
     """Refuse a re-key that would give two elements one key, before anything is written.
 
     A row and a FASTA record are found by their element key, so two rows sharing
@@ -446,7 +566,7 @@ def check_keys_stay_unique(tables: Sequence[CleanTable], old2new: Dict[str, str]
     for t in tables:
         for row in t.rows:
             k = element_key(row[0]) if row else None
-            if k is None:
+            if k is None or k in retired:
                 continue
             new = old2new.get(k, k)
             if new in claimed:
@@ -456,16 +576,20 @@ def check_keys_stay_unique(tables: Sequence[CleanTable], old2new: Dict[str, str]
 
 
 def rewrite(tables: Sequence[CleanTable], accepted: Dict[str, Accepted], letters: Sequence[str],
-            commit: Commit, wrap: int = 60) -> None:
-    """Stage one genome's clean tables and FASTAs with `accepted` (old key -> result) applied."""
+            commit: Commit, wrap: int = 60, retired: FrozenSet[str] = frozenset()) -> None:
+    """Stage one genome's clean tables and FASTAs with `accepted` (old key -> result)
+    applied and the `retired` calls (merged into another) removed."""
     old2new = {k: element_key(a.new_name) for k, a in accepted.items()}
-    check_keys_stay_unique(tables, old2new)
+    check_keys_stay_unique(tables, old2new, retired)
     jobs: Dict[str, List[Tuple[List[Tuple[int, int]], str]]] = defaultdict(list)
+    restores: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
     for a in accepted.values():
         m = a.member
         letter = letters[m.depth] if m.depth < len(letters) else "X"
         for host in hosts_of(m.nest_status):
             jobs[host].append((_added(m, a.left, a.right), letter))
+        for host, segs in a.restore.items():
+            restores[host].extend(segs)
     where: Dict[str, Tuple[int, str]] = {}
     for t in tables:
         for row in t.rows:
@@ -481,21 +605,28 @@ def rewrite(tables: Sequence[CleanTable], accepted: Dict[str, Accepted], letters
         rows = []
         for row in t.rows:
             k = element_key(row[0]) if row else None
+            if k in retired:
+                continue
             if k in accepted:
                 row = list(accepted[k].fields) + row[len(COLUMNS):]
             else:
                 row = list(row)
-            row[i_nest] = rekey_nest(row[i_nest], old2new)
+            row[i_nest] = rekey_nest(drop_nest(row[i_nest], retired), old2new)
             rows.append(row)
         if os.path.isfile(t.fasta):
             with commit.open(t.fasta) as out:
                 for name, seq in iter_fasta(t.fasta):
                     k = element_key(name)
+                    if k in retired:
+                        continue
                     if k in accepted:
                         name, seq = accepted[k].new_name, accepted[k].record
                     for spans, letter in jobs.get(k, ()):
                         start, orientation = where[k]
                         seq = paint(seq, orientation, start, spans, letter)
+                    if k in restores:
+                        start, orientation = where[k]
+                        seq = overwrite(seq, orientation, start, restores[k])
                     out.write(f">{name}\n")
                     for i in range(0, len(seq), wrap):
                         out.write(seq[i:i + wrap] + "\n")
@@ -524,7 +655,7 @@ def read_map(path: str) -> Dict[str, Rebound]:
     cols = Columns.of(header_names(header))
     out: Dict[str, Rebound] = {}
     for row in rows:
-        if cols.get(row, "decision") != "extended":
+        if cols.get(row, "decision") not in MOVED:
             continue
         new = cols.get(row, "new_seq_id")
         key = element_key(new)

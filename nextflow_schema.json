@@ -111,8 +111,8 @@
                 "reboundary": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Extend LTR-RT calls that stop short of their true ends, using each family's LTR model.",
-                    "help_text": "Off unless set. LTRharvest and LTR_FINDER stop extending an LTR pair at the first indel or mutation-dense patch near an LTR end; each family's LTR model, built from its full-length copies across all samples, proposes the true ends and Kmer2LTR re-scores every changed element. Extends only, never trims. Writes <sample>_reboundary.tsv and marks changed elements boundary_source=family_model in the GFF3.",
+                    "description": "Move LTR-RT call ends that carry no TSD to where calls with an exact TSD put them.",
+                    "help_text": "Off unless set. LTRharvest and LTR_FINDER stop extending an LTR pair at the first indel or mutation-dense patch near an LTR end, so such calls are short and carry no TSD. Calls whose ends carry an exact TSD, from every sample and family, are the templates: where at least two of an element's nearest templates agree, an end moves out, or in by up to 10 bp, and a second call of the same element is merged away. Kmer2LTR re-measures every changed element; bases with no partner in the other LTR are gaps, so K2P is not inflated. Writes <sample>_reboundary.tsv and marks changed elements boundary_source=templates in the GFF3.",
                     "fa_icon": "fas fa-arrows-alt-h"
                 },
                 "skip_plots": {

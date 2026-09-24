@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Tuning sweeps for ltrquest-reboundary (design spec section 9, "Tuning order").
-# Run from the LTRquest run directory. Each stage writes reboundary_bench/tune<STAGE>/.
-#   tune.sh 1                         method x references            (B1 n=500 + B2)
-#   METHOD=.. REFS=.. tune.sh 2       min_identity x anchor_len x max_indel  (B1 n=500)
-#   KNOBS="--set ..." tune.sh 3       credit                         (B2 cached + B1)
-#   KNOBS="--set ..." tune.sh 4a      max_ratio x min_copies          (B2 cached)
-#   KNOBS="--set ..." tune.sh 4b      qc_min_n x untested             (B2 cached)
+# Tuning sweeps for ltrquest-reboundary (template re-boundarying).
+# Run from the LTRquest run directory (made without --reboundary). Each stage writes
+# reboundary_bench/tune<STAGE>/; every cell runs B1 (n=500) and B2 with the same settings.
+#   tune.sh 1                         n_templates x min_support
+#   KNOBS="--set ..." tune.sh 2       min_identity                   (KNOBS: the stage-1 winner)
+#   KNOBS="--set ..." tune.sh 3       max_trim                       (KNOBS: stages 1-2 winners)
+# --tools-dir must hold a Kmer2LTR that ltrquest-reboundary accepts (see CHANGELOG.md).
 # Finished cells are skipped, so a stage can be re-run after an interruption.
 set -euo pipefail
-STAGE="$1"
+STAGE="${1:-}"
 REPO=/data2/chris/poa_LTR/LTRquest
 export PATH=/home/chris/bin/mambaforge/envs/ltrquest/bin:$PATH
 export PYTHONPATH=$REPO/src
@@ -23,44 +23,28 @@ bench() {
 done_or() { [[ -s "$1/summary.json" ]]; }
 case "$STAGE" in
   1)
-    for m in ${METHODS:-consensus subfamily nearest}; do
-      for r in modal tsd; do
-        n="${m}_${r}"
-        done_or "$OUT/b1_$n" || bench b1 --out "$OUT/b1_$n" --n 500 --set method=$m --set references=$r
-        done_or "$OUT/b2_$n" || bench b2 --out "$OUT/b2_$n" --cache "$OUT/cache_$n.pkl" \
-          --set method=$m --set references=$r
-      done
-    done ;;
+    for k in 3 5 10; do for s in 1 2 3; do
+      n="k${k}_s${s}"
+      done_or "$OUT/b1_$n" || bench b1 --out "$OUT/b1_$n" --n 500 \
+        --set n_templates=$k --set min_support=$s
+      done_or "$OUT/b2_$n" || bench b2 --out "$OUT/b2_$n" \
+        --set n_templates=$k --set min_support=$s
+    done; done ;;
   2)
-    : "${METHOD:?set METHOD to the stage-1 winner}" "${REFS:?set REFS to the stage-1 winner}"
-    for id in 0.7 0.8; do for al in 30 50 80; do for mi in 1000 5000 20000; do
-      n="id${id}_al${al}_mi${mi}"
-      done_or "$OUT/b1_$n" || bench b1 --out "$OUT/b1_$n" --n 500 --set method=$METHOD \
-        --set references=$REFS --set min_identity=$id --set anchor_len=$al --set max_indel=$mi
-    done; done; done ;;
-  3)
-    : "${KNOBS:?set KNOBS to the stage-2 winner as --set pairs}"
-    for c in 0 50 200 1000 model; do
-      done_or "$OUT/b2_credit_$c" || bench b2 --out "$OUT/b2_credit_$c" --cache "$OUT/cache.pkl" \
-        $KNOBS --set credit=$c
-      done_or "$OUT/b1_credit_$c" || bench b1 --out "$OUT/b1_credit_$c" --n 500 $KNOBS --set credit=$c
+    : "${KNOBS:?set KNOBS to the stage-1 winner as --set pairs}"
+    for id in 0.7 0.8 0.9; do
+      n="id${id}"
+      done_or "$OUT/b1_$n" || bench b1 --out "$OUT/b1_$n" --n 500 $KNOBS --set min_identity=$id
+      done_or "$OUT/b2_$n" || bench b2 --out "$OUT/b2_$n" $KNOBS --set min_identity=$id
     done ;;
-  4a)
-    : "${KNOBS:?set KNOBS to the stage-3 winner as --set pairs}"
-    # min_copies 5 first: its cached family phase covers the 10 and 20 runs as well.
-    for mr in 1.10 1.15 1.25; do for mc in 5 10 20; do
-      n="ratio${mr}_min${mc}"
-      done_or "$OUT/b2_$n" || bench b2 --out "$OUT/b2_$n" --cache "$OUT/cache_ratio${mr}.pkl" \
-        $KNOBS --set max_ratio=$mr --set min_copies=$mc
-    done; done ;;
-  4b)
-    : "${KNOBS:?set KNOBS to the stage-4a winner as --set pairs}"
-    for qn in 3 5 10; do for u in accept skip; do
-      n="n${qn}_${u}"
-      done_or "$OUT/b2_$n" || bench b2 --out "$OUT/b2_$n" --cache "$OUT/cache.pkl" \
-        $KNOBS --set qc_min_n=$qn --set untested=$u
-    done; done ;;
-  *) echo "usage: tune.sh 1|2|3|4a|4b" >&2; exit 2 ;;
+  3)
+    : "${KNOBS:?set KNOBS to the stage-1 and stage-2 winners as --set pairs}"
+    for mt in 0 5 10 20; do
+      n="trim${mt}"
+      done_or "$OUT/b1_$n" || bench b1 --out "$OUT/b1_$n" --n 500 $KNOBS --set max_trim=$mt
+      done_or "$OUT/b2_$n" || bench b2 --out "$OUT/b2_$n" $KNOBS --set max_trim=$mt
+    done ;;
+  *) echo "usage: tune.sh 1|2|3" >&2; exit 2 ;;
 esac
 python "$REPO/benchmarks/reboundary/bench.py" collect --out "$OUT"
 echo "STAGE_${STAGE}_DONE"

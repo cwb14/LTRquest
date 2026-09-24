@@ -309,29 +309,36 @@ Every flag: `ltrquest --help`.
 
 ## Re-boundarying truncated calls
 
-Some LTR-RT calls stop short of the element's real ends: an indel or a patch of
-mutations near one LTR end makes LTRharvest and LTR_FINDER stop extending there. In a
-family alignment those copies start late and end early. `--reboundary` fixes them
-using each family's own full-length copies as the guide, then lets Kmer2LTR re-score
-every changed element. It only ever extends a call, never trims one.
+LTRharvest and LTR_FINDER stop extending an LTR pair at the first indel or
+mutation-dense patch near an LTR end, so some calls end short of the element; a few
+run a few bases long. Such calls lack a TSD (target-site duplication: the short
+repeat an insertion leaves on both sides) at their ends.
+
+`--reboundary` fixes them, using calls that do have an exact TSD, from every genome
+and family, as templates. Each call's nearest templates are aligned to its LTRs, and
+where at least two agree, an end moves out, or in by up to 10 bp. A second call of
+the same element is merged away, and Kmer2LTR re-measures every changed element.
+Calls that already have a TSD are never moved. Needs BLAST+ (`blastn`,
+`makeblastdb`).
 
 ```bash
 ltrquest --genome A.fa B.fa --proteins prot.fa --threads 32 --reboundary
 ```
 
-Already have a finished run? Update it in place (originals are kept in
-`<prefix>_pre_reboundary/`; `--restore` puts them back):
+To update a finished run made without `--reboundary` (the originals are kept in
+`<prefix>_pre_reboundary/`, and `--restore` puts them back):
 
 ```bash
 ltrquest-reboundary --posthoc --indir my_run --prefix A_LTRs B_LTRs --genome A.fa B.fa --threads 32
 ```
 
-On four *Poa* genomes it extended 20,925 of 64,181 candidate calls; 56% of those landed
-on a target-site duplication, against 1% for a displaced-flank control, and TG..CA
-termini went from 32% to 61%. Adds ~25 min to a four-genome run.
+On rice (*O. sativa*, 6,709 elements) it moved 1,705 calls and merged 21 in 35 s. A
+curated LTR library (EDTA rice7.0.0), placed independently, agrees with 99.5% of the
+new ends, and 50% of moved ends land on an exact TSD, against 0.14% at nearby
+positions.
 
-Every candidate, and why it was or was not extended, is in `<prefix>_reboundary.tsv`.
-Details: [docs/outputs.md §8](docs/outputs.md#8-re-boundarying---reboundary).
+Every candidate, and why it was or was not moved, is listed in
+`<prefix>_reboundary.tsv`; see [docs/outputs.md §8](docs/outputs.md#8-re-boundarying---reboundary).
 Benchmarks: [benchmarks/reboundary/](benchmarks/reboundary/README.md).
 
 ## Nextflow

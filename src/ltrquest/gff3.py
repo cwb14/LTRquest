@@ -408,7 +408,7 @@ def build_element_blocks(prefix: str, tables, ranker: SeqidRanker,
                 ("motif", _field(row, names, "motif")),
                 ("tsd", _field(row, names, "tsd")),
                 ("tsd_offset", list_value(_field(row, names, "tsd_offset"))),
-                ("boundary_source", "family_model" if rb else ""),
+                ("boundary_source", "templates" if rb else ""),
                 ("boundary_shift", list_value(f"{rb.ext5},{rb.ext3}") if rb else ""),
                 ("strand_source", source_label),
                 ("nest_status", list_value(_field(row, names, "nest_status"), ";")),
@@ -749,7 +749,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--reboundary-map", default=None,
                         help="<prefix>_reboundary.tsv from ltrquest-reboundary: lets family "
                              "and strand lookups find elements it renamed, and marks them "
-                             "boundary_source=family_model. Passed by path, never globbed.")
+                             "boundary_source=templates. Passed by path, never globbed.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Per-step progress and per-file counts")
     args = parser.parse_args(argv)

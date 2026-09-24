@@ -163,6 +163,28 @@ def test_api_refuses_without_a_checkout_when_cloning_is_off(tmp_path, monkeypatc
         kmer2ltr.api(tmp_path, clone=False)
 
 
+def test_api_names_the_kmer2ltr_it_refuses(tmp_path, monkeypatch):
+    """An installed kmer2ltr package wins over --tools-dir, so the refusal must say which
+    Kmer2LTR it looked at."""
+    from types import SimpleNamespace
+
+    def old_classify(seq_id, S, tsd_credit=0.0, period_rule="outermost",
+                     mutation_rate=None):
+        return None
+
+    fake = {
+        "kmer2ltr": SimpleNamespace(),
+        "kmer2ltr.align": SimpleNamespace(__file__="/opt/old/kmer2ltr/align.py",
+                                          _classify=old_classify, classify=old_classify),
+        "kmer2ltr.genome": SimpleNamespace(),
+        "kmer2ltr.runner": SimpleNamespace(COLUMNS=list(kmer2ltr.COLUMNS),
+                                           format_row=lambda r: ""),
+    }
+    monkeypatch.setattr(kmer2ltr.importlib, "import_module", lambda name: fake[name])
+    with pytest.raises(kmer2ltr.IncompatibleKmer2LTR, match="/opt/old/kmer2ltr"):
+        kmer2ltr.api(tmp_path, clone=False)
+
+
 def test_api_exposes_the_pieces_reboundary_needs(k2l_api):
     assert callable(k2l_api.classify) and callable(k2l_api.find_tsd)
     assert k2l_api.PAD == 32 and k2l_api.PROBE == 40

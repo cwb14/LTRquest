@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Benchmarks for ltrquest.reboundary (design spec section 9).
+"""Benchmarks for ltrquest.reboundary (template re-boundarying).
 
   b1       planted obstacles with known true ends (B1) plus untouched controls (B3)
-  b2       a finished run re-bounded in a scratch copy (B2, and B3 on TSD-bearing calls)
+  b2       a finished run re-bounded in a scratch copy (B2)
   collect  one table from every <out>/*/summary.json
 
   python bench.py b1 --run RUN --prefix P [P ...] --genome G [G ...] --tools-dir T --out DIR
                      [--n 1000] [--seed 11] [--threads 32] [--set key=value ...]
   python bench.py b2 --run RUN --prefix P [P ...] --genome G [G ...] --tools-dir T --out DIR
-                     [--threads 32] [--cache FILE] [--set key=value ...]
+                     [--threads 32] [--set key=value ...]
   python bench.py collect --out DIR
 
---set takes any reboundary.Settings field (method, references, min_copies, credit,
-max_ratio, qc_min_n, untested, subfamily_jaccard) or ltr_place.Params field
-(min_identity, min_whole_identity, min_ext, anchor, anchor_len, max_indel, n_models).
+--set takes any reboundary.Settings field (blastn, blast_task, max_templates_per_family,
+merge_bp) or ltr_place.Params field (min_identity, min_whole_identity, min_ext, max_trim,
+anchor, anchor_len, max_indel, n_templates, min_support, agree).
 The run directory is only read: b2 works on copies under <out>/run/.
 """
 
@@ -35,8 +35,9 @@ from multiprocessing import Pool
 from typing import Dict, List, Optional, Sequence
 
 from ltrquest import reboundary as rb
-from ltrquest.ltr_model import Genomes, Member, ratio_ok, tsd_enrichment
-from ltrquest.ltr_place import Params, propose
+from ltrquest import templates as tp
+from ltrquest.ltr_model import Genomes, Member
+from ltrquest.ltr_place import Params
 from ltrquest.reboundary_io import load_clean_tables, members_from
 
 OBSTACLES = [("none", 0), ("patch", 30), ("del", 10), ("del", 50), ("del", 200),
@@ -48,8 +49,8 @@ BENCH = "bench"
 NOT_FOUND = ("", ".", "NA")
 
 
-def settings(pairs: Sequence[str], threads: int, mafft: str) -> rb.Settings:
-    s = rb.Settings(threads=threads, mafft=mafft)
+def settings(pairs: Sequence[str], threads: int) -> rb.Settings:
+    s = rb.Settings(threads=threads)
     place_names = {f.name for f in fields(Params)}
     top_names = {f.name for f in fields(rb.Settings)} - {"place"}
     place = {}
@@ -67,13 +68,7 @@ def settings(pairs: Sequence[str], threads: int, mafft: str) -> rb.Settings:
 
 
 def recorded(s: rb.Settings) -> Dict:
-    """The settings as they actually ran: `place_params` overrides `combine` for `nearest`.
-
-    `asdict(s)` records the placement parameters before that override, so a
-    `nearest` run used to be published as `combine: "best"` when every
-    placement was combined by median.
-    """
-    return asdict(replace(s, place=rb.place_params(s)))
+    return asdict(s)
 
 
 def frac(a: int, n: int) -> Optional[float]:
@@ -106,16 +101,16 @@ def found(tsd: str) -> bool:
 
 
 # ---------------------------------------------------------------- B1 / B3 (planted)
-def pick_truth(members: List[Member], s: rb.Settings, n: int, seed: int) -> List[Member]:
-    """TSD-bearing calls (independent evidence the ends are right), <= 20 per family."""
+def pick_truth(members: List[Member], n: int, seed: int) -> List[Member]:
+    """Calls with an exact TSD (independent evidence the ends are right), <= 20 per family."""
     fams: Dict[str, List[Member]] = defaultdict(list)
     for m in members:
         fams[m.family].append(m)
     pool: List[Member] = []
     for fam, ms in sorted(fams.items()):
-        if fam in NOT_FOUND or len(ms) < s.min_copies:
+        if fam in NOT_FOUND:
             continue
-        ok = sorted((m for m in ms if m.has_tsd and m.stranded
+        ok = sorted((m for m in ms if m.has_tsd and m.tsd_offset == "0,0" and m.stranded
                      and min(m.len_left, m.len_right) >= 150), key=lambda m: m.uid)
         random.Random(zlib.crc32(fam.encode()) ^ seed).shuffle(ok)
         pool += ok[:20]
@@ -213,14 +208,9 @@ def outcome(m: Member, truth, left: int, right: int, kind: str) -> str:
     return "exact" if d == 0 else "within1" if d <= 1 else "within5" if d <= 5 else "wrong"
 
 
-def _b1_family(job):
-    family, real, synth, s, exclude = job
-    models, _modal, status = rb.build_models(family, real, rb._G, s, exclude)
-    kept = [mo for mo in models if ratio_ok(mo, s.max_ratio)]
-    if models and not kept:
-        status = "ratio_failed"
-    place = rb.place_params(s)
-    return [(m.uid, propose(m, kept, rb._G, place) if kept else None, status) for m in synth]
+def _b1_place(job):
+    """One synthetic call placed with its (leave-one-out) templates."""
+    return rb.place_job(job)
 
 
 def summarize_b1(rows: List[Dict]) -> Dict:
@@ -242,12 +232,22 @@ def summarize_b1(rows: List[Dict]) -> Dict:
             "false_change": frac(ctrl["false_change"], sum(ctrl.values())), "table": table}
 
 
+def require_kmer2ltr(tools_dir: str) -> None:
+    """Refuse a Kmer2LTR the workers would refuse, before any worker pool starts: a pool
+    whose initializer raises restarts its workers forever instead of failing."""
+    try:
+        rb.k2l.api(tools_dir)
+    except rb.k2l.IncompatibleKmer2LTR as exc:
+        raise SystemExit(f"bench: {exc}") from exc
+
+
 def b1(args) -> None:
-    s = settings(args.set, args.threads, args.mafft)
+    require_kmer2ltr(args.tools_dir)
+    s = settings(args.set, args.threads)
     os.makedirs(args.out, exist_ok=True)
     paths = dict(zip(args.prefix, args.genome))
     members = [m for p in args.prefix for m in members_from(p, load_clean_tables(args.run, p))]
-    truth = pick_truth(members, s, args.n, args.seed)
+    truth = pick_truth(members, args.n, args.seed)
     g = Genomes(paths)
     rng = random.Random(args.seed)
     donors = random.Random(args.seed + 1).sample(
@@ -271,32 +271,32 @@ def b1(args) -> None:
     paths[BENCH] = fasta
     gb = Genomes({BENCH: fasta})
     gb.length(BENCH, contigs[0][0])        # build the .fai here, not in racing workers
-    real = defaultdict(list)
-    for m in members:
-        real[m.family].append(m)
-    exclude = defaultdict(set)
-    for t in truth:
-        exclude[t.family].add(t.key)
-    by_family = defaultdict(list)
-    for m, _, _, _ in synth:
-        by_family[m.family].append(m)
-    jobs = [(f, real[f], ms, s, frozenset(exclude[f])) for f, ms in sorted(by_family.items())]
+    # Leave-one-out: no truth element may template its own planted copy.
+    exclude = frozenset(t.uid for t in truth)
+    g_all = Genomes(paths)
+    templates = tp.cap_per_family(tp.trusted(members, g_all), s.max_templates_per_family)
+    targets = [m for m, _, _, _ in synth]
     t0 = time.time()
+    near = tp.nearest(targets, templates, g_all, k=s.place.n_templates,
+                      workdir=os.path.join(args.out, "blast"), blastn=rb.check_blastn(s.blastn),
+                      threads=s.threads, task=s.blast_task, exclude=exclude)
+    shutil.rmtree(os.path.join(args.out, "blast"), ignore_errors=True)
     with Pool(s.threads, initializer=rb._init, initargs=(paths, args.tools_dir)) as pool:
         placed = {}
-        for chunk in pool.imap_unordered(_b1_family, jobs):
-            for uid, prop, status in chunk:
-                placed[uid] = (prop, status)
+        jobs = [(m, near[m.uid], s.place) for m in targets if m.uid in near]
+        for uid, prop, _tsd, _null, _obst in pool.imap_unordered(_b1_place, jobs, chunksize=8):
+            placed[uid] = prop
         arb = []
         for m, _, _, _ in synth:
-            prop, _ = placed.get(m.uid, (None, "no_model"))
+            prop = placed.get(m.uid)
             if prop is not None and prop.gate_ok:
                 rec = gb.fetch(BENCH, m.chrom, m.start, m.end)[0]
-                arb.append((prop, rec, rb.credit_for(prop, s), s.mutation_rate, s.place.min_ext))
+                arb.append((prop, rec, ".", s.mutation_rate))
         verdicts = {v.uid: v for v in pool.map(rb.arbitrate, arb, chunksize=8)}
     rows = []
     for m, tr, (kind, size, delta, end, copy), t in synth:
-        prop, status = placed.get(m.uid, (None, "no_model"))
+        prop = placed.get(m.uid)
+        status = "templates" if m.uid in near else "no_templates"
         v = verdicts.get(m.uid)
         left, right = (v.accepted.left, v.accepted.right) if v and v.accepted else (m.start, m.end)
         rows.append({"kind": kind, "size": size, "delta": delta, "end": end, "copy": copy,
@@ -319,28 +319,42 @@ def b1(args) -> None:
 
 
 # ---------------------------------------------------------------- B2 / B3 (real run)
-def cross_validated(props: List[Dict[str, str]], s: rb.Settings) -> Dict:
-    """Family QC chosen on one half of each family's candidates, TSD gain measured on the other."""
-    halves = defaultdict(lambda: ([], []))
-    for r in props:
-        if (r["gate_ok"] != "1" or r["called_tsd"] == "1"
-                or r["family_status"] in ("ratio_failed", "too_few_references", "no_ltr_span")):
-            continue
-        halves[r["family"]][zlib.crc32(r["uid"].encode()) % 2].append(r)
-    train = [x for a, _ in halves.values() for x in a]
-    p0 = (sum(found(x["tsd_null"]) for x in train) / len(train)) if train else 0.0
-    n = hits = null = 0
-    for a, b in halves.values():
-        st = tsd_enrichment(sum(found(x["tsd_new"]) for x in a), len(a), p0, s.qc_min_n)
-        if st == "pass" or (st == "untested" and s.untested == "accept"):
-            n += len(b)
-            hits += sum(found(x["tsd_new"]) for x in b)
-            null += sum(found(x["tsd_null"]) for x in b)
-    return {"cv_n": n, "cv_tsd": frac(hits, n), "cv_null": frac(null, n), "cv_p0": round(p0, 4)}
+def positional_spike(g: Genomes, moved: List[Dict[str, str]], k: int = 5) -> Dict:
+    """Exact k-mer TSD rate with a moved end at offset 0 vs 10..100 bp away (the other end
+    held at its new position): one test per offset, so no search inflates it, and the
+    neighbouring offsets are a local, composition-matched null."""
+    at0 = n0 = bg = nbg = 0
+
+    def tsd(prefix, chrom, left, right):
+        a = g.fetch(prefix, chrom, left - k, left - 1)[0]
+        b = g.fetch(prefix, chrom, right + 1, right + k)[0]
+        if len(a) != k or len(b) != k or "N" in a + b:
+            return None
+        return a == b and len(set(a)) >= 2
+
+    for r in moved:
+        prefix = r["_prefix"]
+        chrom, span = r["new_seq_id"].split("#")[0].rsplit(":", 1)
+        nl, nr = (int(x) for x in span.split("-"))
+        ol, orr = (int(x) for x in r["old_seq_id"].split("#")[0].rsplit(":", 1)[1].split("-"))
+        for side, moved_by in (("L", nl != ol), ("R", nr != orr)):
+            if not moved_by:
+                continue
+            for d in [0] + list(range(10, 101, 10)):
+                t = (tsd(prefix, chrom, nl - d, nr) if side == "L"
+                     else tsd(prefix, chrom, nl, nr + d))
+                if t is None:
+                    continue
+                if d == 0:
+                    n0, at0 = n0 + 1, at0 + t
+                else:
+                    nbg, bg = nbg + 1, bg + t
+    return {"spike_at_0": frac(at0, n0), "spike_background": frac(bg, nbg), "spike_ends": n0}
 
 
 def b2(args) -> None:
-    s = settings(args.set, args.threads, args.mafft)
+    require_kmer2ltr(args.tools_dir)
+    s = settings(args.set, args.threads)
     work = os.path.join(args.out, "run")
     os.makedirs(work, exist_ok=True)
     for p in args.prefix:
@@ -351,20 +365,25 @@ def b2(args) -> None:
                     for m in members_from(p, load_clean_tables(args.run, p)))
     dump = os.path.join(args.out, "proposals.tsv")
     t0 = time.time()
-    counts = rb.run(work, args.prefix, args.genome, s, args.tools_dir, dump=dump,
-                    cache=args.cache)
+    counts = rb.run(work, args.prefix, args.genome, s, args.tools_dir, dump=dump)
     wall = time.time() - t0
     rss_kb = max(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                  resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
-    side = [r for p in args.prefix for r in read_tsv(os.path.join(work, p + "_reboundary.tsv"))]
-    ext = [r for r in side if r["decision"] == "extended"]
+    side = []
+    for p in args.prefix:
+        for r in read_tsv(os.path.join(work, p + "_reboundary.tsv")):
+            r["_prefix"] = p
+            side.append(r)
+    ext = [r for r in side if r["decision"] == "moved"]
     fresh = [r for r in ext if not found(r["tsd_called"])]
     had = [r for r in ext if found(r["tsd_called"])]
-    exts = sorted(max(int(r["ext5"]), int(r["ext3"])) for r in ext)
+    exts = sorted(max(abs(int(r["ext5"])), abs(int(r["ext3"]))) for r in ext)
     dk = sorted(float(r["k2p_new"]) - float(r["k2p_called"]) for r in ext
                 if r["k2p_new"] not in NOT_FOUND and r["k2p_called"] not in NOT_FOUND)
     q = lambda xs, f: xs[min(len(xs) - 1, int(f * len(xs)))] if xs else None  # noqa: E731
-    summary = {"settings": recorded(s), "candidates": len(side), "extended": len(ext),
+    summary = {"settings": recorded(s), "candidates": len(side), "moved": len(ext),
+               "merged": sum(r["decision"] == "merged" for r in side),
+               "trimmed": sum(int(r["ext5"]) < 0 or int(r["ext3"]) < 0 for r in ext),
                "counts": counts, "n_fresh": len(fresh),
                "tsd_gain": frac(sum(found(r["tsd_new"]) for r in fresh), len(fresh)),
                "tsd_null": frac(sum(found(r["tsd_null"]) for r in fresh), len(fresh)),
@@ -373,7 +392,7 @@ def b2(args) -> None:
                "ext_median": q(exts, 0.5), "ext_q90": q(exts, 0.9),
                "dk2p_median": q(dk, 0.5), "dk2p_q90": q(dk, 0.9),
                "wall_s": round(wall), "peak_rss_gb": round(rss_kb / 1e6, 2)}
-    summary.update(cross_validated(read_tsv(dump), s))
+    summary.update(positional_spike(Genomes(dict(zip(args.prefix, args.genome))), ext))
     motif_called = {r[0]: t.cols.get(r, "motif") for p in args.prefix
                     for t in load_clean_tables(args.run, p) for r in t.rows}
     motif_new = {r[0]: t.cols.get(r, "motif") for p in args.prefix
@@ -389,9 +408,9 @@ def b2(args) -> None:
             groups[label(r)].append(r)
         out = {}
         for k, rs in sorted(groups.items()):
-            e = [r for r in rs if r["decision"] == "extended"]
+            e = [r for r in rs if r["decision"] == "moved"]
             f = [r for r in e if not found(r["tsd_called"])]
-            out[k] = {"candidates": len(rs), "extended": len(e),
+            out[k] = {"candidates": len(rs), "moved": len(e),
                       "tsd_gain": frac(sum(found(r["tsd_new"]) for r in f), len(f))}
         return out
 
@@ -412,8 +431,8 @@ def b2(args) -> None:
                                    if k not in ("settings", "by_clade", "by_age")]))
     for title in ("by_clade", "by_age"):
         print(f"\n{title}\n")
-        print(md(["group", "candidates", "extended", "TSD gain"],
-                 [[k, v["candidates"], v["extended"], v["tsd_gain"]]
+        print(md(["group", "candidates", "moved", "TSD gain"],
+                 [[k, v["candidates"], v["moved"], v["tsd_gain"]]
                   for k, v in summary[title].items()]))
 
 
@@ -428,17 +447,17 @@ def collect(args) -> None:
             rows1.append([name[3:], s["exact_or_1"], s["exact"], s["over"], s["wrong"],
                           s["unchanged"], s["false_change"], s["wall_s"]])
         elif name.startswith("b2_"):
-            rows2.append([name[3:], s["extended"], s["tsd_gain"], s["tsd_null"], s["cv_tsd"],
-                          s["cv_null"], s["tgca_called"], s["tgca_new"], s["b3_real_changed"],
-                          s["b3_real_tsd_kept"], s["dk2p_q90"], s["wall_s"], s["peak_rss_gb"]])
+            rows2.append([name[3:], s["moved"], s["merged"], s["tsd_gain"], s["tsd_null"],
+                          s["spike_at_0"], s["spike_background"], s["tgca_called"], s["tgca_new"],
+                          s["b3_real_changed"], s["dk2p_q90"], s["wall_s"], s["peak_rss_gb"]])
     if rows1:
         print("B1 planted obstacles (B3 = false change on untouched controls)\n")
         print(md(["setting", "exact/±1", "exact", "over", "wrong", "unchanged", "B3 false",
                   "s"], rows1))
     if rows2:
-        print("\nB2 real run (cv = family QC cross-validated)\n")
-        print(md(["setting", "extended", "TSD gain", "null", "cv TSD", "cv null", "TGCA called",
-                  "TGCA new", "B3 changed", "B3 TSD kept", "dK2P q90", "s", "RSS GB"], rows2))
+        print("\nB2 real run (spike = exact 5-mer TSD at the moved end vs 10-100 bp away)\n")
+        print(md(["setting", "moved", "merged", "TSD gain", "null", "spike@0", "spike bg",
+                  "TGCA called", "TGCA new", "B3 changed", "dK2P q90", "s", "RSS GB"], rows2))
 
 
 def main() -> None:
@@ -448,13 +467,12 @@ def main() -> None:
     ap.add_argument("--run", help="finished LTRquest run directory (read only)")
     ap.add_argument("--prefix", nargs="+")
     ap.add_argument("--genome", nargs="+")
-    ap.add_argument("--tools-dir", help="Kmer2LTR checkout at the pinned commit")
+    ap.add_argument("--tools-dir", help="Kmer2LTR checkout with the homology-paired credit "
+                         "(an older one is refused)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--n", type=int, default=1000, help="b1: truth elements (default 1000)")
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--threads", type=int, default=32)
-    ap.add_argument("--mafft", default="mafft")
-    ap.add_argument("--cache", default=None, help="b2: reuse a family phase across sweeps")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     args = ap.parse_args()
     if args.mode == "collect":

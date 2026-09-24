@@ -354,57 +354,131 @@ immediately rather than after every expensive stage has already succeeded.
 ## 8. Re-boundarying (`--reboundary`)
 
 LTRharvest and LTR_FINDER extend an LTR pair outward from a seed and stop at the
-first obstacle between the element's two LTRs — an indel or a mutation-dense patch
-near an LTR end. Kmer2LTR can only trim. So such an element is called short: in a
-family alignment it starts late and ends early, and it has no TSD (target-site
-duplication, the short direct repeat a transposition leaves flanking the insertion)
-at its called ends.
+first obstacle near an LTR end (an indel or a mutation-dense patch), and Kmer2LTR can
+only trim. Such calls end short of the element and have no TSD (target-site
+duplication, the short direct repeat an insertion leaves on both sides) at their
+called ends. A few calls run a few bases long, with the same result.
 
-`--reboundary` (or `ltrquest-reboundary --posthoc` on a finished run) builds each
-family's LTR model from its full-length copies, pooled over every genome, and places
-it on every member. The model's ends come only from where the family's 5′ and 3′ LTR
-copies stop agreeing — never from a TSD or TG..CA (the `motif` column above records
-this as `tg...ca`). Ends move outward only. A family
-whose model is implausibly long, or whose proposed ends show no TSD enrichment over a
-displaced-flank null, is left alone. Each widened element is re-scored by Kmer2LTR,
-which settles the final ends and every Kmer2LTR column (LTR coordinates, divergence,
-K2P, time, TSD, motif, CIGAR). A genome with no `_depth<N>_clean_ltr.tsv` tables is
-warned about and skipped rather than aborting the run.
+`--reboundary` (or `ltrquest-reboundary --posthoc` on a finished run) moves the ends
+of every call whose `tsd` is `.` or `NA`. A call with any TSD, including one Kmer2LTR
+found only 1 bp off (`tsd_offset` other than `0,0`), is never moved.
 
-What changes: the `_clean_` depth tables and FASTAs, the GFF3s and the plots. The raw
-`<prefix>_depth<N>_ltr.{tsv,fa}` tables keep the calls as detected. Family labels do
-not change; the pooled `<run>_all_ltr.*` clustering files describe the calls before
-re-boundarying.
+How the new ends are chosen:
+
+- **Templates** are calls whose TSD sits exactly at the called ends (`tsd_offset`
+  `0,0`): independent evidence that both ends are right. They are pooled over every
+  genome, family, strand and nesting depth. A call is not a template if either LTR
+  contains `N` or hosts a nested element. At most 100 per family are searched (the
+  youngest half by K2P, plus a draw seeded by the family name).
+- **Search.** One BLASTN (E ≤ 1e-10, both strands) of each call's two LTRs finds its
+  5 best templates (`--templates`).
+- **Placement.** On each side, the template's LTR is aligned end to end around the
+  call's LTR, using the template end that the template's own TSD verifies. If the
+  template's outer 30 bp match below 80% identity (`--min-identity`), usually because
+  a large indel separates the true end from the rest of the LTR, those 30 bp
+  (`--anchor-len`) are searched for up to 5,000 bp (`--max-indel`) beyond the call:
+  an *anchor*. An anchor is refused where a complete copy of the template LTR sits
+  (a solo LTR or a neighbouring copy, not this element's end). `--no-anchor` turns
+  anchors off.
+- **Vote.** Per side, placements whose outer 30 bp are ≥ 80% identical and whose
+  whole LTR is ≥ 60% identical vote. The median wins when at least 2 of them
+  (`--min-support`) agree with it within 2 bp. The end then moves outward by at
+  least 1 bp (`--min-ext`), or inward by at most 10 bp (`--max-trim`; `0` never
+  trims). A move that would add `N` bases (an assembly gap) is refused. The new ends
+  come only from the templates: nothing searches for a TSD or TG..CA (the `motif`
+  column above records this as `tg...ca`).
+- **Split calls.** A detector sometimes calls one element twice, staggered, each call
+  holding one of its true ends. If a move reaches, within 5 bp, the outer end of
+  another call that lies inside the new span, has the same strand, depth and
+  nesting, hosts nothing and has no TSD, the two are one element. The other call is
+  removed (its row, FASTA record and `nest_status` references), provided the
+  surviving call passes Kmer2LTR. Family labels are not compared, because a split
+  call's family was clustered from its partly wrong LTR pair.
+- **Conflicts.** A move is rejected if it would take the element outside its host,
+  give it its host's exact span, make it contain or overlap another element, or
+  leave a nested element outside a trimmed call. When two moves claim the same
+  bases, the first in genome order wins.
+- **Re-measurement.** Kmer2LTR re-measures each moved element on the LTR pair it was
+  called with, taking the templates' outer ends as given. Each LTR's inner end moves
+  only as far as real homology with the other LTR reaches, and bases with no partner
+  count as gaps rather than substitutions, so `k2p` and `k2p_time` are not inflated.
+  The move is kept if Kmer2LTR's status is `pass`, both LTRs are ≥ 100 bp, the
+  alignment is ≥ 90 bp and the element passes detection's size floor
+  (end − start ≥ 300). Kmer2LTR then supplies the element's columns 1–29 except
+  `orientation`, which stays as stored; `nest_status` follows its neighbours' new
+  names.
+
+The stage runs once, by design. On rice, a second pass over its own output changed
+112 more elements, and a curated LTR library agreed with only 88% of those ends,
+against 99.5% for the first pass. `ltrquest --reboundary` uses the defaults; to try
+other settings, run `ltrquest-reboundary --posthoc` (see `--help`) on a run made
+without it.
+
+**What changes:** the `_clean_` depth tables and FASTAs (a host's masked region is
+repainted over added bases and restored over trimmed ones), the GFF3s, the plots, and
+the new `<prefix>_reboundary.tsv`. The raw `<prefix>_depth<N>_ltr.{tsv,fa}` tables
+keep the calls as detected. Family labels do not change; the pooled `<run>_all_ltr.*`
+clustering files describe the calls before re-boundarying. A genome with no
+`_depth<N>_clean_ltr.tsv` tables is skipped with a warning.
+
+**Requirements:** BLAST+ (`blastn` from `PATH` or `--blastn`, with `makeblastdb`
+beside it or on `PATH`) and a Kmer2LTR with the homology-paired credit. An older
+Kmer2LTR is refused before anything changes: `ltrquest-reboundary` exits 3 and
+`ltrquest --reboundary` stops.
 
 > When run through the Nextflow pipeline (`--reboundary`), the re-bounded `_clean_`
 > depth tables and `<prefix>_reboundary.tsv` are published to one pooled
 > `${params.outdir}/reboundary/`, not into each sample's own results
-> directory — the family models are built across all samples at once, so the
-> task that writes them is pooled too. The GFF3s and plots still publish per
+> directory — an element's templates are drawn from every sample, so the task
+> that writes them is pooled too. The GFF3s and plots still publish per
 > sample. See [nextflow.md](nextflow.md#what-the-pipeline-does).
 
 ### 8.1 `<prefix>_reboundary.tsv`
 
-One row per element whose model placement moved an end outward, extended or not.
+One row per candidate (a call whose templates would move an end under the rules
+above, moved or not), plus one row per removed split call. Every genome it ran on gets
+one; it holds only the header when there is nothing to report.
 
 | Column | Meaning |
 |---|---|
-| `old_seq_id`, `new_seq_id` | the call before and after (`.` when not extended) |
-| `family`, `method`, `model_id` | the family and the model that placed it |
-| `decision`, `reason` | `extended`, or `rejected` with one of: `gate_identity`, `family_qc_failed`, `family_untested`, `host_exceeded`, `engulfs_element`, `overlaps_element`, `record_missing`, `kmer2ltr_not_pass`, `kmer2ltr_reverted`, `length_filter` |
-| `ext5`, `ext3` | bp added at the element's biological 5′ / 3′ end |
-| `end_source5`, `end_source3` | `core` (model aligned end to end), `anchor` (model's outer bases found past a large indel), `.` (did not move) |
-| `id_outer5`, `id_outer3` | identity of the model's outer 30 bp at each end |
-| `credit_bits`, `k2l_status` | evidence handed to Kmer2LTR and its status |
-| `tsd_called`, `tsd_new`, `tsd_null` | TSD at the called ends, at the new ends, and with the right flank displaced 1 kb (the null) |
+| `old_seq_id`, `new_seq_id` | the call before and after; `new_seq_id` is `.` when rejected, and on a `merged` row the surviving call's new id |
+| `family` | the call's family |
+| `method`, `templates` | always `templates`; the templates placed on the call, `prefix:seq_id`, comma-separated |
+| `decision`, `reason` | `moved`; `merged`, with reason `split_call`; or `rejected`, with a reason from the table below |
+| `ext5`, `ext3` | signed bp at the element's biological 5′ / 3′ end: positive added, negative trimmed. On a rejected row, what the placements proposed |
+| `end_source5`, `end_source3` | `core` (template aligned end to end), `anchor` (template's outer bases found past a large indel), `.` (end did not move) |
+| `id_outer5`, `id_outer3` | identity of the templates' outer 30 bp at that end; `.` where it did not move |
+| `support5`, `support3` | template placements that agree on that end |
+| `k2l_status` | Kmer2LTR's status for the new record |
+| `tsd_called`, `tsd_new`, `tsd_null` | TSD at the called ends (always `.` or `NA`: only calls without one are moved), at the new ends, and at the new ends with the right flank displaced 1 kb (the null). The last two are `.` where no end moved |
 | `k2p_called`, `k2p_new` | LTR-pair K2P before and after |
-| `obstacle5`, `obstacle3` | what sits between the two LTRs at the old end: `gap:<bp>`, `mm:<rate>`, `none`, `.` |
+| `unpaired5`, `unpaired3` | bases at the new pair's biological 5′ / 3′ outer end with no partner in the other LTR: gap columns in the new alignment |
+| `obstacle5`, `obstacle3` | what sits between the two LTRs at an old end that moved out: `gap:<bp>`, `mm:<rate>`, `none`, `.` |
+| `merged_into` | on a `merged` row, the survivor's new id |
+
+5′ and 3′ follow the element's `strand`; for an element with none, the strand its
+templates imply (a majority vote), else genomic left and right.
+
+| `reason` | Why the call was not moved |
+|---|---|
+| `gate_identity` | no placement passed the identity gates |
+| `no_support` | fewer than `--min-support` placements agree |
+| `gap_in_added` | the move would add `N` bases |
+| `host_exceeded`, `duplicates_host`, `engulfs_element`, `overlaps_element`, `nest_broken` | a conflict, as above |
+| `merge_partner_failed` | this call was to be merged into another whose move then failed; both keep their calls |
+| `record_missing` | the call has no FASTA record |
+| `record_mismatch` | the stored FASTA record is not the genome at the row's span |
+| `kmer2ltr_not_pass` | Kmer2LTR's status for the new record is not `pass` |
+| `kmer2ltr_moved_ends` | Kmer2LTR moved an end it was given (an internal consistency check) |
+| `length_filter` | after re-measuring: an LTR under 100 bp, the alignment under 90 bp, or the element under detection's size floor (end − start < 300) |
 
 ### 8.2 GFF3
 
-Re-bounded elements carry `boundary_source=family_model` and
-`boundary_shift=<ext5>,<ext3>`. The GFF3 writer reads the sidecar (`--reboundary-map`)
-so family and strand-provenance attributes still find renamed elements.
+Moved elements carry `boundary_source=templates` and `boundary_shift=<ext5>,<ext3>`
+(signed bp at the biological 5′ / 3′ end; negative = trimmed). The GFF3 writer reads
+the sidecar (`--reboundary-map`) so family and strand-provenance attributes still find
+renamed elements. Sidecars from the pre-release design (decision `extended`) still
+load.
 
 ### 8.3 Finished runs
 
@@ -414,10 +488,11 @@ ltrquest-reboundary --restore --indir RUN --prefix P1 P2 ...     # undo
 ```
 
 `--posthoc` moves the originals (clean tables and FASTAs, GFF3s, plots) into
-`<prefix>_pre_reboundary/` once, re-bounds, then rewrites the GFF3s and plots. A
-second `--posthoc` run starts again from that backup, so trying other settings never
-stacks on an earlier result. Benchmarks and the evidence behind every default:
-`benchmarks/reboundary/README.md`.
+`<prefix>_pre_reboundary/` once, re-bounds, then rewrites the GFF3s and plots
+(`--no-plots` skips the plots). A second `--posthoc` run starts again from that
+backup, so trying other settings never stacks on an earlier result. It refuses a run
+that `ltrquest --reboundary` already re-boundaried in place (a sidecar and no backup):
+that would be a second pass. Benchmarks: `benchmarks/reboundary/README.md`.
 
 ## 9. Plots (`<prefix>_plots/`)
 

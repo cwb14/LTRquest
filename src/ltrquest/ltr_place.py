@@ -1,16 +1,23 @@
-"""Placing a family LTR model on one element: where would its LTRs really end?
+"""Placing trusted templates on one element: where do its LTRs really end?
 
-The model is aligned end to end in a window around each called LTR (the core).
-When the core's outer bases do not match -- a large insertion sits between the
-true end and the rest of the LTR -- the model's outermost `anchor_len` bases are
-searched for locally up to `max_indel` beyond the call (the anchor).
+Each template contributes one model per side (`templates.models_for`): the LTR
+whose outer end -- the end its own TSD verifies -- is outermost there. A model is
+aligned end to end in a window around the called LTR on its side (the core). When
+the core's outer bases do not match -- a large insertion sits between the true end
+and the rest of the LTR -- the model's outermost `anchor_len` bases are searched
+for locally up to `max_indel` beyond the call (the anchor), unless a complete copy
+of the LTR starts (or ends) there: that is a neighbouring solo LTR or tandem copy,
+not this element's terminus.
 
-Only outward moves are ever proposed. An end that would move inward stays where
-the caller put it: in the feasibility spike, trimming was wrong most of the time.
+Per side, the placements that pass the identity gates vote: the low median, if at
+least `min_support` of them agree with it within `agree` bp. An outer end then
+moves outward by >= `min_ext` bp, or inward by at most `max_trim` bp (a small
+over-call); a larger inward vote is ignored.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -21,38 +28,33 @@ from .ltr_model import (
     GAP_OPEN,
     Genomes,
     Member,
-    Model,
-    canonical_kmers,
     glocal,
-    jaccard,
     matrix,
-    oriented_ltrs,
-    rc,
 )
 
 
 @dataclass(frozen=True)
 class Params:
-    min_identity: float = 0.8       # outer-TERM identity a moved end must reach
+    min_identity: float = 0.8       # outer-TERM identity a placement needs to vote
     min_whole_identity: float = 0.6
-    min_ext: int = 5                # an end must move at least this far to count
+    min_ext: int = 1                # an outward move must reach this far to count
+    max_trim: int = 10              # the largest inward move (0 = never trim)
     anchor: bool = True
     anchor_len: int = 30
     max_indel: int = 5000
-    n_models: int = 3               # models tried per element when a family has several
-    combine: str = "best"      # best | median of the top n_models placements
+    n_templates: int = 5            # templates placed per element
+    min_support: int = 2            # agreeing placements a moved end needs
+    agree: int = 2                  # bp within which placements agree
 
 
 @dataclass(frozen=True)
-class Core:
-    left: int
-    l1: int
-    r0: int
-    right: int
-    id_left: float
-    id_right: float
-    whole: float
-    score: int
+class Side:
+    """One model placed on one side of an element."""
+    outer: int          # this side's outer end (left: first base; right: last base)
+    inner: int          # this side's inner end (left LTR's l1 / right LTR's r0)
+    id_outer: float     # identity of the model's outer TERM bases
+    whole: float        # identity of the whole model
+    src: str = "core"   # core | anchor
 
 
 @dataclass(frozen=True)
@@ -68,23 +70,29 @@ class Hit:
 @dataclass(frozen=True)
 class Proposal:
     member: Member
-    model_id: str
-    orient: str
-    left: int
+    orient: str             # frame of ext5/ext3: the element's strand, else implied
+    left: int               # committed outer ends (the call's own where nothing moved)
     right: int
-    left_src: str       # core | anchor | '.' (did not move)
+    left_src: str           # core | anchor | '.' (did not move)
     right_src: str
-    id_left: float
+    id_left: float          # median outer identity of the placements that carried it
     id_right: float
-    whole: float
-    raw_left: int       # before the gates, for reporting
+    sup_left: int           # placements agreeing with the voted end
+    sup_right: int
+    raw_left: int           # median of every placement, gates or not (reporting)
     raw_right: int
-    inner_left: int     # the model's inner ends, for the obstacle report
+    inner_left: int         # median inner end on each side, for the obstacle report
     inner_right: int
-    gate_ok: bool
+    reason_left: str        # why a side did not move: '.', gate_identity, no_support,
+    reason_right: str       # gap_in_added
+    templates: Tuple[str, ...] = ()
 
     @property
-    def ext_left(self) -> int:
+    def gate_ok(self) -> bool:
+        return self.left != self.member.start or self.right != self.member.end
+
+    @property
+    def ext_left(self) -> int:      # bp added at the left (negative: trimmed)
         return self.member.start - self.left
 
     @property
@@ -98,16 +106,6 @@ class Proposal:
     @property
     def ext3(self) -> int:
         return self.ext_right if self.orient == "+" else self.ext_left
-
-    @property
-    def raw_ext5(self) -> int:
-        left, right = self.member.start - self.raw_left, self.raw_right - self.member.end
-        return max(0, left if self.orient == "+" else right)
-
-    @property
-    def raw_ext3(self) -> int:
-        left, right = self.member.start - self.raw_left, self.raw_right - self.member.end
-        return max(0, right if self.orient == "+" else left)
 
 
 def local(query: str, window: str) -> Optional[Hit]:
@@ -125,28 +123,53 @@ def local(query: str, window: str) -> Optional[Hit]:
                matches / max(1, q_len), r.score)
 
 
-def core(m: Member, fwd: str, g: Genomes) -> Optional[Core]:
-    """The model (forward frame) glocal-aligned around each called LTR.
+def vote(positions: Sequence[int], agree: int, need: int) -> Tuple[Optional[int], int]:
+    """(low median, support): support counts positions within `agree` of it; the
+    median is returned only when at least `need` of them agree."""
+    if not positions:
+        return None, 0
+    s = sorted(positions)
+    med = s[(len(s) - 1) // 2]
+    sup = sum(abs(x - med) <= agree for x in s)
+    return (med if sup >= need else None), sup
 
-    Each window is widened by the truncation on either LTR, so it can reach a
-    neighbouring copy of the same family -- a solo LTR, an uncalled fragment, a
-    tandem array member -- which, being full length, outscores the truncated call
-    site and passes every identity gate. A placement that does not overlap the LTR
-    it was placed on is not a placement of this element, and nothing downstream
-    would catch it: `conflict()` knows only about called elements.
+
+def _extra(m: Member, model: str) -> int:
+    """How far past the call a window reaches: the model may be longer than the
+    shorter called LTR by any amount."""
+    return max(100, len(model) - min(m.len_left, m.len_right) + 100)
+
+
+def place_left(m: Member, model: str, g: Genomes) -> Optional[Side]:
+    """The model aligned end to end around the called left LTR, if it lands on it.
+
+    The window is widened by the truncation, so it can reach a neighbouring copy of
+    the same family -- a solo LTR, an uncalled fragment, a tandem array member --
+    which, being full length, would outscore the truncated call. A placement that
+    does not overlap the LTR it was placed on is not a placement of this element.
     """
-    lc = len(fwd)
-    extra = max(100, lc - min(m.len_left, m.len_right) + 100)
-    wl, wl0 = g.fetch(m.prefix, m.chrom, m.start - extra, m.l1 + extra)
-    wr, wr0 = g.fetch(m.prefix, m.chrom, m.r0 - extra, m.end + extra)
-    if len(wl) < lc // 2 or len(wr) < lc // 2:
+    extra = _extra(m, model)
+    w, w0 = g.fetch(m.prefix, m.chrom, m.start - extra, m.l1 + extra)
+    if len(w) < len(model) // 2:
         return None
-    a, b = glocal(fwd, wl), glocal(fwd, wr)
-    left, l1, r0, right = wl0 + a.start, wl0 + a.end, wr0 + b.start, wr0 + b.end
-    if left > m.l1 or l1 < m.start or r0 > m.end or right < m.r0:
+    a = glocal(model, w)
+    left, l1 = w0 + a.start, w0 + a.end
+    if left > m.l1 or l1 < m.start:
         return None
-    return Core(left, l1, r0, right, a.id_first, b.id_last,
-                min(a.id_all, b.id_all), a.score + b.score)
+    return Side(left, l1, a.id_first, a.id_all)
+
+
+def place_right(m: Member, model: str, g: Genomes) -> Optional[Side]:
+    """`place_left` for the called right LTR."""
+    extra = _extra(m, model)
+    w, w0 = g.fetch(m.prefix, m.chrom, m.r0 - extra, m.end + extra)
+    if len(w) < len(model) // 2:
+        return None
+    b = glocal(model, w)
+    r0, right = w0 + b.start, w0 + b.end
+    if r0 > m.end or right < m.r0:
+        return None
+    return Side(right, r0, b.id_last, b.id_all)
 
 
 def anchor_left(m: Member, fwd: str, g: Genomes, p: Params) -> Optional[Tuple[int, float]]:
@@ -155,7 +178,8 @@ def anchor_left(m: Member, fwd: str, g: Genomes, p: Params) -> Optional[Tuple[in
     h = local(q, w)
     if h is None or h.q_start > 2 or (h.q_end - h.q_start + 1) < 0.9 * len(q):
         return None
-    return w0 + h.w_start - h.q_start, h.identity
+    pos = w0 + h.w_start - h.q_start       # the model's terminal base, extrapolated
+    return (pos, h.identity) if pos >= 1 else None
 
 
 def anchor_right(m: Member, fwd: str, g: Genomes, p: Params) -> Optional[Tuple[int, float]]:
@@ -164,89 +188,121 @@ def anchor_right(m: Member, fwd: str, g: Genomes, p: Params) -> Optional[Tuple[i
     h = local(q, w)
     if h is None or h.q_end < len(q) - 3 or (h.q_end - h.q_start + 1) < 0.9 * len(q):
         return None
-    return w0 + h.w_end + (len(q) - 1 - h.q_end), h.identity
+    pos = w0 + h.w_end + (len(q) - 1 - h.q_end)
+    return (pos, h.identity) if pos <= g.length(m.prefix, m.chrom) else None
 
 
-def candidate_models(m: Member, models: Sequence[Model], g: Genomes, n: int) -> List[Model]:
-    """With several models, the `n` whose k-mers best match the element's called left LTR.
+def complete_copy_from(m: Member, model: str, pos: int, g: Genomes, p: Params) -> bool:
+    """Whether a complete copy of `model` starts at `pos` (a neighbour, not a remainder).
 
-    A model `m` itself helped build is never one of them, whatever the method and
-    whatever the caller passed: an element that is its own reference scores 1.0
-    against itself, which would leave the identity gate -- the whole safeguard --
-    inoperative for exactly the copies that built the model.
+    Beyond a large insertion only the LTR's outer part remains before the insertion
+    takes over, so the model cannot be placed there whole; a solo LTR or a tandem
+    copy holds the whole model, inner end included.
     """
-    usable = [mo for mo in models if m.uid not in mo.refs]
-    if len(usable) <= 1:
-        return usable
-    s, _ = g.fetch(m.prefix, m.chrom, m.start, m.l1)
-    ks = canonical_kmers(s)
-    return sorted(usable, key=lambda mo: (-jaccard(ks, mo.kmers), mo.model_id))[:n]
+    w, w0 = g.fetch(m.prefix, m.chrom, pos - 2, pos + len(model) + 200)
+    if len(w) < len(model):
+        return False
+    a = glocal(model, w)
+    return (abs(w0 + a.start - pos) <= 2 and a.id_all >= p.min_whole_identity
+            and a.id_last >= p.min_identity)
 
 
-def _argmedian(cands, key):
-    """The candidate holding the median coordinate -- a real placement, gates and all.
+def complete_copy_to(m: Member, model: str, pos: int, g: Genomes, p: Params) -> bool:
+    """`complete_copy_from` for a copy that ends at `pos`."""
+    w, w0 = g.fetch(m.prefix, m.chrom, pos - len(model) - 200, pos + 2)
+    if len(w) < len(model):
+        return False
+    a = glocal(model, w)
+    return (abs(w0 + a.end - pos) <= 2 and a.id_all >= p.min_whole_identity
+            and a.id_first >= p.min_identity)
 
-    Splicing a median coordinate into the best-scoring placement's `Core` (what
-    `dataclasses.replace` used to do here) left the identity that authorises the
-    move, the inner ends and the anchor comparison describing a different
-    placement from the one committed.
+
+def _with_anchor_left(m: Member, model: str, s: Side, g: Genomes, p: Params) -> Side:
+    if not p.anchor or s.id_outer >= p.min_identity:
+        return s
+    a = anchor_left(m, model, g, p)
+    if (a is None or a[1] < p.min_identity or a[0] > s.outer + 2
+            or complete_copy_from(m, model, a[0], g, p)):
+        return s
+    return Side(a[0], s.inner, a[1], s.whole, "anchor")
+
+
+def _with_anchor_right(m: Member, model: str, s: Side, g: Genomes, p: Params) -> Side:
+    if not p.anchor or s.id_outer >= p.min_identity:
+        return s
+    a = anchor_right(m, model, g, p)
+    if (a is None or a[1] < p.min_identity or a[0] < s.outer - 2
+            or complete_copy_to(m, model, a[0], g, p)):
+        return s
+    return Side(a[0], s.inner, a[1], s.whole, "anchor")
+
+
+def _median(xs: Sequence[float]) -> float:
+    if not xs:
+        return math.nan
+    s = sorted(xs)
+    return s[(len(s) - 1) // 2]
+
+
+def _decide(m: Member, sides: List[Side], called: int, outward: int, g: Genomes,
+            p: Params):
+    """(end, src, id, support, raw, inner, reason, reportable) for one side.
+
+    `outward` is -1 on the left (a smaller coordinate is further out), +1 on the right.
     """
-    order = sorted(cands, key=lambda t: (key(t[0]), t[1].model_id))
-    return order[(len(order) - 1) // 2]
+    def moves(pos: Optional[int]) -> bool:
+        if pos is None:
+            return False
+        d = called - pos if outward < 0 else pos - called      # + = further out
+        return d >= p.min_ext or (d < 0 and -d <= p.max_trim)
+
+    raw, _ = vote([s.outer for s in sides], p.agree, 1)
+    passing = [s for s in sides if s.id_outer >= p.min_identity
+               and s.whole >= p.min_whole_identity]
+    voted, sup = vote([s.outer for s in passing], p.agree, p.min_support)
+    inner = int(_median([s.inner for s in sides])) if sides else called
+    if not moves(voted):
+        reason = "."
+        if moves(raw):
+            reason = "gate_identity" if not passing else "no_support"
+        return called, ".", math.nan, sup, raw if raw is not None else called, inner, \
+            reason, moves(raw)
+    carried = [s for s in passing if abs(s.outer - voted) <= p.agree]
+    lo, hi = (voted, called - 1) if outward < 0 else (called + 1, voted)
+    if hi >= lo and "N" in g.fetch(m.prefix, m.chrom, lo, hi)[0]:
+        return called, ".", math.nan, sup, raw, inner, "gap_in_added", True
+    srcs = sorted(s.src for s in carried)
+    return (voted, srcs[len(srcs) // 2], _median([s.id_outer for s in carried]), sup, raw,
+            int(_median([s.inner for s in carried])), ".", True)
 
 
-def propose(m: Member, models: Sequence[Model], g: Genomes, p: Params) -> Optional[Proposal]:
-    cands = []
-    for model in candidate_models(m, models, g, p.n_models):
-        top = None
-        for o in ((m.strand,) if m.stranded else ("+", "-")):
-            fwd = model.seq if o == "+" else rc(model.seq)
-            c = core(m, fwd, g)
-            if c is not None and (top is None or c.score > top[0].score):
-                top = (c, model, o, fwd)
-        if top is not None:
-            cands.append(top)
-    if not cands:
+def propose(m: Member, models: Sequence[Tuple[str, str, str]], g: Genomes, p: Params,
+            orient: Optional[str] = None) -> Optional[Proposal]:
+    """New outer ends for `m` from `(template, left_model, right_model)` triples.
+
+    None when no side has anything to report: neither the vote nor the ungated
+    median would move an end under the rules. Otherwise a Proposal whose `left`,
+    `right` are the committed ends and whose reasons say why a side stayed.
+    """
+    lefts: List[Side] = []
+    rights: List[Side] = []
+    for _name, lmod, rmod in models:
+        s = place_left(m, lmod, g)
+        if s is not None:
+            lefts.append(_with_anchor_left(m, lmod, s, g, p))
+        s = place_right(m, rmod, g)
+        if s is not None:
+            rights.append(_with_anchor_right(m, rmod, s, g, p))
+    L = _decide(m, lefts, m.start, -1, g, p)
+    R = _decide(m, rights, m.end, +1, g, p)
+    if not (L[7] or R[7]):
         return None
-    cands.sort(key=lambda t: -t[0].score)
-    best = cands[0]
-    at_left = at_right = best
-    if p.combine == "median":
-        # one orientation at a time: a median across two frames is not a coordinate
-        same = [t for t in cands if t[2] == best[2]]
-        if len(same) >= 3:
-            at_left = _argmedian(same, lambda c: c.left)
-            at_right = _argmedian(same, lambda c: c.right)
-    cl, model_l, o, fwd_l = at_left        # the placement each committed end comes from,
-    cr, model_r, _, fwd_r = at_right       # and whose gates therefore decide it
-
-    left, left_id, left_src = cl.left, cl.id_left, "core"
-    if p.anchor and left_id < p.min_identity:
-        a = anchor_left(m, fwd_l, g, p)
-        if a is not None and a[1] >= p.min_identity and a[0] <= cl.left + 2:
-            left, left_id, left_src = a[0], a[1], "anchor"
-    right, right_id, right_src = cr.right, cr.id_right, "core"
-    if p.anchor and right_id < p.min_identity:
-        a = anchor_right(m, fwd_r, g, p)
-        if a is not None and a[1] >= p.min_identity and a[0] >= cr.right - 2:
-            right, right_id, right_src = a[0], a[1], "anchor"
-
-    moves_left = left <= m.start - p.min_ext
-    moves_right = right >= m.end + p.min_ext
-    if not (moves_left or moves_right):
-        return None
-    whole = min(cl.whole, cr.whole)
-    whole_ok = whole >= p.min_whole_identity
-    gate_left = moves_left and left_id >= p.min_identity and whole_ok
-    gate_right = moves_right and right_id >= p.min_identity and whole_ok
-    model_id = (model_l.model_id if model_l is model_r
-                else f"{model_l.model_id},{model_r.model_id}")
-    return Proposal(
-        member=m, model_id=model_id, orient=o,
-        left=left if gate_left else m.start, right=right if gate_right else m.end,
-        left_src=left_src if gate_left else ".", right_src=right_src if gate_right else ".",
-        id_left=left_id, id_right=right_id, whole=whole, raw_left=left, raw_right=right,
-        inner_left=cl.l1, inner_right=cr.r0, gate_ok=gate_left or gate_right)
+    frame = m.strand if m.stranded else (orient if orient in ("+", "-") else "+")
+    return Proposal(member=m, orient=frame, left=L[0], right=R[0], left_src=L[1],
+                    right_src=R[1], id_left=L[2], id_right=R[2], sup_left=L[3],
+                    sup_right=R[3], raw_left=L[4], raw_right=R[4], inner_left=L[5],
+                    inner_right=R[5], reason_left=L[6], reason_right=R[6],
+                    templates=tuple(name for name, _, _ in models))
 
 
 def _gap_near(q: str, t: str, c: int) -> int:
@@ -276,9 +332,9 @@ def _mismatch(q: str, t: str, cols) -> float:
 
 
 def obstacle(m: Member, prop: Proposal, g: Genomes) -> Tuple[str, str]:
-    """What sits between the element's two LTRs at each old outer end that moved.
+    """What sits between the element's two LTRs at each old outer end that moved out.
 
-    The new left LTR (outer end to the model's inner end) is aligned to the new
+    The new left LTR (outer end to the placements' inner end) is aligned to the new
     right LTR; the old end is mapped onto that alignment. Reported, never used
     to decide anything: 'gap:<bp>' for an indel >= 5 bp within 15 columns,
     'mm:<rate>' for >= 20% mismatches in the 30 bp just outside, else 'none'.
@@ -322,29 +378,3 @@ def tsd_at(api, g: Genomes, m: Member, left: int, right: int, shift: int = 0) ->
         return "NA"
     hit = api.find_tsd(a + b, 10, 30, api.TSD_K, api.TSD_SHIFTS)
     return hit[0] if hit else "."
-
-
-def nearest_templates(consensus: Model, refs: Sequence[Member], g: Genomes,
-                      tol: int = 2) -> List[Model]:
-    """References whose called ends the family consensus confirms, as models of their own.
-
-    A template's termini are then checked by its family rather than taken on trust --
-    both ends of both LTRs, not just the outer ones. A template is cut at the
-    reference's *inner* ends (`m.start..m.l1`), and placing it on a target sets that
-    target's opposite *outer* end: a reference over-called a few bases inward pushes
-    every target it places that far past the true terminus, which the outer-30 gate
-    tolerates (~6 bases) and which silently destroys the TSD the family QC looks for.
-    Falls back to the consensus itself when no reference qualifies.
-    """
-    out: List[Model] = []
-    for m in refs:
-        fwd = consensus.seq if m.strand != "-" else rc(consensus.seq)
-        c = core(m, fwd, g)
-        if c is None or abs(c.left - m.start) > tol or abs(c.right - m.end) > tol:
-            continue
-        if abs(c.l1 - m.l1) > tol or abs(c.r0 - m.r0) > tol:
-            continue
-        five, _ = oriented_ltrs(m, g)
-        out.append(Model(f"{consensus.family}:tpl:{m.key}", consensus.family, five,
-                         consensus.modal_len, 1, frozenset({m.uid})))
-    return out or [consensus]

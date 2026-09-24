@@ -4,7 +4,7 @@ channels:
   - bioconda
 dependencies:
   - python=3.11
-  - mafft=7.526
+  - blast
   - pyfaidx
   - numpy
   # `parasail` on Bioconda is the C library; `import parasail` needs this one.

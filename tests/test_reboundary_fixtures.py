@@ -29,6 +29,9 @@ def test_every_family_copy_but_the_decayed_one_has_a_tsd_at_its_true_ends(fx):
 
 def test_calls_sit_inside_their_true_spans_and_only_truncated_ones_differ(fx):
     for e in fx.family_members():
+        if e.kind == "long3_right":                 # the one over-call
+            assert (e.start, e.end) == (e.true_start, e.true_end + 3)
+            continue
         assert e.true_start <= e.start and e.end <= e.true_end
         truncated = e.kind not in ("normal", "decayed")
         assert ((e.start, e.end) != (e.true_start, e.true_end)) == truncated, e.kind
@@ -41,7 +44,7 @@ def test_truncated_calls_keep_len_left_and_len_right_equal(fx):
     truncation sits in only one LTR, so every truncated kind's called
     left-LTR length must equal its called right-LTR length."""
     truncated = [e for e in fx.family_members() if e.kind not in ("normal", "decayed")]
-    assert len(truncated) == 6
+    assert len(truncated) == 11
     for e in truncated:
         len_left = e.l1 - e.start + 1
         len_right = e.end - e.r0 + 1

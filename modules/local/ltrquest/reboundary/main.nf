@@ -1,6 +1,5 @@
-// Family-guided re-boundarying. One pooled task: a family's LTR model is built
-// from its copies in every genome, so the samples cannot be split here the way
-// the per-genome stages are. It rewrites the _clean_ tables and FASTAs and
+// Template re-boundarying. One pooled task: an element's templates may sit in any
+// genome, so the samples cannot be split here the way the per-genome stages are. It rewrites the _clean_ tables and FASTAs and
 // writes one <prefix>_reboundary.tsv per sample, which LTRQUEST_GFF3 reads to
 // follow the elements it renamed.
 
@@ -48,7 +47,7 @@ process LTRQUEST_REBOUNDARY {
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
         ltrquest: \$(python -c 'import ltrquest; print(ltrquest.__version__)')
-        mafft: \$(mafft --version 2>&1 | head -1)
+        blastn: \$(blastn -version 2>&1 | head -1 | sed 's/^blastn: //')
     END_VERSIONS
     """
 

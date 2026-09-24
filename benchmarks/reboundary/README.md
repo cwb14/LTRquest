@@ -1,122 +1,166 @@
 # Re-boundarying benchmarks
 
-How well `--reboundary` recovers truncated LTR-RT ends, and how to re-measure it.
+How well `--reboundary` finds the true ends of truncated LTR-RT calls, and how to
+measure it again. How the stage works:
+[docs/outputs.md §8](../../docs/outputs.md#8-re-boundarying---reboundary).
 
-## The problem it is measuring
+## Two independent checks
 
-LTRharvest and LTR_FINDER stop extending at the first obstacle between an element's
-two LTRs, so some calls are short at one or both ends. `--reboundary` extends them to
-the ends the rest of the family agrees on. The question is whether those new ends are
-right.
+The new ends come only from templates, so two signals the stage never uses can check
+them:
 
-The honest check is the **target-site duplication**: a transposon insertion duplicates
-5 bp of host sequence at the insertion point, so a correct boundary lands on a TSD and
-a wrong one does not. Nothing in the algorithm looks at TSDs when placing an end, so
-TSD recovery is independent evidence.
+- **Target-site duplication (TSD).** An insertion duplicates a few host bases
+  (usually 5) on both sides, so a correct end lands on a TSD and a wrong one rarely
+  does. Templates carry TSDs at their own loci, which are other insertions, and
+  nothing moves an end toward a TSD.
+- **A curated library.** Where a curated LTR library can be placed on an element, its
+  terminus shows where the end should be. This check is not part of `bench.py`.
 
-## How it performs
+## Results on rice (*O. sativa*)
 
-Four *Poa* genomes, 208,018 elements, at the default settings:
+One genome, 6,709 elements, 32 threads. This design and the pre-release one
+(per-family LTR models, outward moves only) ran on the same tables.
 
-```
-64,181 candidates -> 20,925 extended
-TSD at the new boundary   0.565    (displaced-flank null 0.010)
-  cross-validated         0.535    (null 0.009, n=13,170)
-TG..CA termini            0.317 -> 0.610
-extension length          median 323 bp, q90 1,269 bp
-K2P shift                 median +0.0018
-cost                      ~26 min, 4 GB  (~80 s with a cached family phase)
-```
+| | pre-release | this design |
+|---|---|---|
+| elements changed | 560 | 1,726: 1,705 moved, 21 split calls merged |
+| kinds of move | outward only | 1,203 outward, 300 trimmed, 202 one of each |
+| curated terminus at the new end | 98.6% of 576 ends | 99.5% of 1,965 ends |
+| exact 5-bp TSD at the moved end (10–100 bp away) | 46.0% (0.17%) | 50.2% (0.14%) |
+| TSD at the new ends (right end moved 1 kb) | 55.5% (0.5%) | 50.1% (1.1%) |
+| K2P change where added bases have no partner (median) | +0.090 | 0.000 |
+| elements gaining more than 0.05 K2P | 103 | 18 |
+| calls with a TSD that were moved | 22 | 0 |
+| run time | 203 s | 35 s |
 
-TSD recovery falls with element age, which is what makes the result believable — TSDs
-decay by mutation, and nothing in the method knows an element's age:
+- Where the two designs put the same end in different places and the curated library
+  can judge (156 ends), it backs this design's end 148 times and the pre-release
+  one's 6 times.
+- The pre-release design aligned bases without a partner as substitutions, which
+  inflated K2P and age. The 18 elements that still gain more than 0.05 pair genuine
+  but more diverged homology beyond a short called LTR pair.
+- A second pass over its own output changes 112 more elements, and the curated
+  library agrees with only 88% of those ends (of 42 it can place). So the stage runs
+  once, and `--posthoc` refuses tables a pipeline run already re-boundaried.
 
-| K2P | < 0.005 | 0.005–0.02 | 0.02–0.05 | ≥ 0.05 |
-|---|---|---|---|---|
-| TSD recovered | 0.666 | 0.676 | 0.569 | 0.338 |
-
-Against planted obstacles with known truth (B1, n=3000), it recovers the true end
-exactly or within 1 bp **40%** of the time, over-extends 2%, and gets it wrong 1.6%.
-Recovery depends on what it has to cross: a 30 bp diverged patch 52%, a 50 bp deletion
-47%, a 300 bp insertion 40%, a 5 kb insertion 26%. Large insertions are where it
-struggles.
-
-Why elements are rejected, at the defaults:
+Why candidates were not moved, at the defaults:
 
 | reason | n |
 |---|---|
-| gate_identity | 31,816 |
-| family_qc_failed | 3,804 |
-| overlaps_element | 3,741 |
-| kmer2ltr_not_pass | 3,339 |
-| host_exceeded | 274 |
-| engulfs_element | 149 |
-| kmer2ltr_reverted | 98 |
-| length_filter | 29 |
-| duplicates_host | 6 |
+| gate_identity | 563 |
+| no_support | 335 |
+| overlaps_element | 122 |
+| host_exceeded | 7 |
+| engulfs_element | 2 |
+| length_filter | 2 |
+| kmer2ltr_moved_ends | 1 |
+
+**B1 (planted truncations, leave-one-out)**, on the 489 truth elements whose
+TSD-backed ends the curated library confirms (4,588 planted obstacles):
+
+| | pre-release | this design |
+|---|---|---|
+| exact or within 1 bp | 55.9% | 62.4% |
+| over-extended | 0.15% | 0.15% |
+| wrong | 0.44% | 0.48% |
+| untouched controls changed | 0 of 489 | 5 of 489 |
+
+Both designs used the same truth set: exact TSD, stranded, both LTRs ≥ 150 bp, at
+most 20 per family, from families of ≥ 10 copies. `bench.py b1` as shipped draws truth
+from families of any size, which scores lower on rice.
+
+B1's truth is "the called ends carry an exact TSD". For 9 of the 514 truth elements
+the curated library places the ends elsewhere (AT/GA-repeat flanks, chance or
+duplicated TSDs), and this design's templates agree with the library there. Scored
+against TSD truth alone, B1 therefore overstates this design's errors: 60.8% exact or
+within 1 bp, 0.90% over-extended, 0.73% wrong and 12 of 514 controls changed
+(pre-release: 54.7%, 0.67%, 0.46%, 4 of 514). Where a curated library exists, score
+B1 on the truth elements it confirms.
 
 ## The three benchmarks
 
-- **B1 — planted obstacles.** Well-called elements are copied onto synthetic contigs
-  with 3 kb of their real flanks, one obstacle is planted in one LTR (a 30 bp diverged
-  patch, a 10–200 bp deletion, or a 50 bp–5 kb insertion), and the call is cut where
-  the finders would stop. Each truth element is left out of its own family's model.
-  Scored against the known true end.
-- **B2 — a real run.** The clean tables are copied and re-bounded. Measures TSD
-  recovery against a null with the flank displaced 1 kb, plus K2P shifts, time, memory.
-  The `cv` variant picks family QC on half of each family's candidates and scores it on
-  the other half, so TSD-based QC cannot inflate its own validation.
-- **B3 — false changes.** Elements that should not have moved, but did.
+- **B1, planted obstacles.** Truth elements are calls with an exact TSD
+  (`tsd_offset` `0,0`), a strand and both LTRs ≥ 150 bp, from labelled families, at
+  most 20 per family (`--n`, default 1000). Each is copied onto a synthetic contig
+  with 3 kb of its real flanks, and one obstacle is planted 20–400 bp from an outer
+  end, in that end's LTR or at the matching place in its partner: none (a plain
+  truncation), a 30 bp diverged patch, a 10–200 bp deletion, a 50 bp to 5 kb random
+  insertion, or 300 bp or 1 kb of another family's element. The call is then cut
+  where a finder would stop. Every truth element is excluded from the templates, so
+  none templates its own copy. Each call is scored against its true ends: exact,
+  within 1 bp, within 5 bp, over-extended (more than 5 bp past a true end), wrong, or
+  unchanged.
+- **B2, a real run.** The run's `_clean_` tables are copied under `<out>/run/` and
+  re-bounded there by the full stage, including conflicts and merges; the run itself
+  is only read. It reports moved, merged and trimmed counts and every rejection
+  reason; TSD at the called, new and null ends (`tsd_gain`, `tsd_null`); the
+  positional TSD spike (`spike_at_0` vs `spike_background`: an exact 5-bp TSD at the
+  moved end vs 10–100 bp away); TG..CA termini before and after; move length; K2P
+  shift; run time and peak memory; and TSD gain by clade and by age.
+- **B3, false changes.** B1's untouched controls (a truth element called at its true
+  ends) that were changed anyway (`false_change`). On a real run, B2 also reports the
+  share of TSD-bearing calls that were moved (`b3_real_changed`), which should be
+  zero, since those calls are never targets.
 
 ## Run it
 
 ```bash
-cd <a finished LTRquest run directory>
-export PATH=/path/to/ltrquest/env/bin:$PATH
+cd <a finished LTRquest run directory>          # made without --reboundary
+export PATH=/path/to/ltrquest/env/bin:$PATH      # blastn and makeblastdb on it
+export PYTHONPATH=<repo>/src                     # or pip install . from this checkout
 B=<repo>/benchmarks/reboundary/bench.py
-P="A_LTRs B_LTRs"; G="A.fa B.fa"; T=<kmer2ltr checkout>
+P="A_LTRs B_LTRs"; G="A.fa B.fa"; T=<directory holding a Kmer2LTR/ checkout>
 
-python $B b1 --run . --prefix $P --genome $G --tools-dir $T --out bench/b1 --n 1000
-python $B b2 --run . --prefix $P --genome $G --tools-dir $T --out bench/b2 --cache bench/c.pkl
+python $B b1 --run . --prefix $P --genome $G --tools-dir $T --out bench/b1_default --n 1000
+python $B b2 --run . --prefix $P --genome $G --tools-dir $T --out bench/b2_default
 python $B collect --out bench
 ```
 
-`--set KEY=VALUE` reaches any field of `reboundary.Settings` or `ltr_place.Params`.
-**Always pass `--cache`** — the family phase is ~25 min, the rest is ~1 min — and give
-each `method`/`references` combination its own cache file.
+Point `--run` at a run made without `--reboundary` (or one put back with
+`--restore`); on re-boundaried tables, B2 would measure a second pass. `--tools-dir`
+needs a Kmer2LTR that `ltrquest-reboundary` accepts (see the CHANGELOG). Each mode
+writes `summary.json` into its `--out`. B1 adds `b1.tsv` (one row per contig) and
+`synthetic.fa`; B2 adds the re-bounded copy under `run/` and every proposal in
+`proposals.tsv`. `collect` tabulates every `b1_*` and `b2_*` directory under its
+`--out`, naming each row by what follows the prefix.
 
-`tune.sh 1|2|3|4a|4b` re-runs the four-stage sweep that set the defaults below.
+`--set KEY=VALUE` (repeatable) sets any field of `reboundary.Settings` or
+`ltr_place.Params`:
 
-## Defaults, and why
+| key | flag | default | what it sets |
+|---|---|---|---|
+| `n_templates` | `--templates` | 5 | nearest templates placed per element |
+| `min_support` | `--min-support` | 2 | agreeing placements a moved end needs |
+| `agree` | | 2 | bp within which placements agree |
+| `min_identity` | `--min-identity` | 0.8 | identity a placement's outer 30 bp need |
+| `min_whole_identity` | | 0.6 | identity the whole template LTR needs |
+| `min_ext` | `--min-ext` | 1 | the smallest outward move, bp |
+| `max_trim` | `--max-trim` | 10 | the largest inward move, bp; 0 never trims |
+| `anchor` | `--no-anchor` | true | search past a large indel |
+| `anchor_len` | `--anchor-len` | 30 | template bases searched for there |
+| `max_indel` | `--max-indel` | 5000 | how far past the call, bp |
+| `max_templates_per_family` | | 100 | templates per family in the search; 0 = no cap |
+| `merge_bp` | | 5 | how near a split call's end must be to the new end, bp |
+| `blastn` | `--blastn` | `blastn` | the BLASTN executable; `makeblastdb` is taken from beside it, else `PATH` |
+| `blast_task` | | `blastn` | its `-task` |
 
-| knob | value | why |
-|---|---|---|
-| `method` | nearest | beats `consensus` on recovery, 0.404 vs 0.394 at n=3000 (p=0.03) |
-| `references` | modal | ties with `tsd`; keeps TSD out of the metric that validates it |
-| `min_identity` | 0.8 | 0.7 buys +1 point of recovery and doubles the wrong rate |
-| `anchor_len`, `max_indel` | 30, 5000 | no measurable effect within noise |
-| `credit` | 5000 | Kmer2LTR's veto mostly overturns *correct* extensions; see below |
-| `max_ratio`, `min_copies` | 1.15, 10 | inert below those values |
-| `qc_min_n`, `untested` | 5, accept | all settings within noise |
+`threads` and `mutation_rate` are `Settings` fields too.
 
-`credit` is the one worth understanding. It is how much external evidence Kmer2LTR is
-told the family model represents. At `credit=0` it reverts 8,698 proposals; at 5000,
-98. Recovery rises and the B1 error rate *falls* as the veto is withdrawn, so those
-reversions were mostly wrong. Kmer2LTR still does the re-scoring and owns every column
-it always did — only its veto turns out to be redundant here.
+`tune.sh 1|2|3` sweeps the settings most likely to matter, running B1 (`--n 500`) and
+B2 for each: `n_templates` × `min_support`, then `min_identity`, then `max_trim`, each
+stage taking the previous one's choice as `KNOBS`.
 
 ## What these numbers do not show
 
-- **TG..CA is partly self-fulfilling.** A template is cut from a reference's own
-  *called* span, so a reference whose original call happened to land on TG..CA passes
-  the motif to elements placed against it, within the ~2 bp matching window. The
-  improvement is real but not independent. TSD recovery is not affected: a TSD is read
-  from the host flanks at the target's own locus — a different insertion event than any
-  element that built the model.
-- **B1's false-change rate is pessimistic.** Its synthetic contigs have no neighbouring
-  annotations, so the conflict rules that block a kb-scale jump on real data cannot fire
-  there; and a control whose original call was already short counts as a false change
-  even when the extension is correct.
-- **`cv TSD` is blind to anything after arbitration.** It is computed from the family
-  phase's proposals, so it is identical at every value of `credit`. Read `tsd_gain` and
-  the B1 columns for those knobs instead.
+- **TG..CA is not independent evidence.** A moved end is a template's end, so a
+  template whose end sits on TG..CA passes the motif on. B2 reports it (`tgca_called`,
+  `tgca_new`), but the TSD is the test that counts: it is read from the host flanks at
+  the target's own locus, a different insertion from any template's.
+- **B1 runs no conflict rules or merges.** Each synthetic contig holds one call, so a
+  move that a neighbouring element would block on a real genome goes ahead in B1. Its
+  false-change rate is, if anything, pessimistic.
+- **B1's controls share its truth.** A control is a truth element called at its
+  TSD-backed ends; where those ends are wrong (the 9 above), a correct move counts as
+  a false change.
+- **The curated check is not in the harness.** It needs a curated LTR library for the
+  genome, placed on it independently of LTRquest.

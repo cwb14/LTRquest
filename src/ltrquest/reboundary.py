@@ -1,15 +1,20 @@
-"""Family-guided re-boundarying of truncated LTR-RT calls (opt-in stage).
+"""Template-guided re-boundarying of LTR-RT calls (opt-in stage).
 
 LTRharvest and LTR_FINDER extend an LTR pair outward from a seed and stop at the
-first obstacle between the element's two LTRs -- an indel, a patch of mutations.
-Kmer2LTR can only trim. So an element whose LTR carries an obstacle near its end
-is called short. This stage builds each family's LTR model from its full-length
-copies (pooled over every genome), places it on every member, and proposes
-outward-only ends. Candidates pass family QC and conflict checks, then Kmer2LTR
-re-scores each widened record with the family's evidence as `tsd_credit`: it
-settles the final ends and every Kmer2LTR column. Only the `_clean_` tables and
-FASTAs are rewritten; `<prefix>_reboundary.tsv` records every candidate and why
-it was or was not extended, and doubles as the old->new key map for the GFF3.
+first obstacle between the element's two LTRs -- an indel, a patch of mutations --
+so such an element is called short; a few are called a few bases long. This stage
+re-bounds every element whose called ends carry no target-site duplication (TSD).
+Its templates are the elements whose called ends carry an exact one, pooled over
+every genome and family: their outer ends are where the insertion put them. Each
+target's nearest templates (BLASTN) are placed on it one LTR per side, and where at
+least two agree an outer end moves out, or in by a few bases. A second call of the
+same element that the move reaches is merged away. Kmer2LTR then re-measures the
+pair the element was called with, on the new record, with the templates' ends as
+external evidence: the outer ends stay where the templates put them, the other
+LTR's inner end follows real homology, and bases with no partner are gaps, so the
+divergence is not inflated. Only the `_clean_` tables and FASTAs are rewritten;
+`<prefix>_reboundary.tsv` records every candidate and why it was or was not moved,
+and doubles as the old->new key map for the GFF3.
 
 Usage:
   ltrquest-reboundary --indir RUN --prefix P1 [P2 ...] --genome G1 [G2 ...] [options]
@@ -19,32 +24,24 @@ from __future__ import annotations
 
 import argparse
 import glob
-import hashlib
 import json
+import math
 import os
-import pickle
+import re
 import shutil
 import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from multiprocessing import Pool
-from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import kmer2ltr as k2l
+from . import templates as tp
 from .kmer2ltr import COLUMNS
-from .ltr_model import (
-    Genomes,
-    Member,
-    Model,
-    consensus_model,
-    ratio_ok,
-    select_references,
-    subfamily_models,
-    tsd_enrichment,
-)
-from .ltr_place import Params, Proposal, nearest_templates, obstacle, propose, tsd_at
+from .ltr_model import Genomes, Member
+from .ltr_place import Params, Proposal, obstacle, propose, tsd_at
 from .reboundary_io import (
     SIDECAR_SUFFIX,
     Accepted,
@@ -53,25 +50,31 @@ from .reboundary_io import (
     conflict,
     fetch_records,
     forward,
+    genome_order,
+    hosts_of,
     leftover_message,
     leftover_staging,
     load_clean_tables,
     members_from,
+    merge_partner,
     mutual_conflicts,
+    nested_index,
     rewrite,
     sanitize,
     sidecar_text,
     stored,
     sync_dir,
+    trim_restore,
 )
 from .reconcile import IUPAC_DEPTH_SEQ
 
-METHODS = ("consensus", "subfamily", "nearest")
+# Bits of external evidence handed to Kmer2LTR that the record's termini are the
+# element's ends. With the homology-paired credit it can only authorize those outer
+# ends -- the templates chose them -- so it is a constant, not a knob.
+CREDIT_BITS = 1e6
+EXIT_INCOMPATIBLE_KMER2LTR = 3
 _I = {c: i for i, c in enumerate(COLUMNS)}
-# Bump when a pickled FamilyResult changes shape, so `--cache` files written by an
-# older build are recomputed instead of being loaded into the new code.
-# 2: Model carries `refs` and no longer pickles its k-mer index.
-CACHE_FORMAT = 2
+_CIGAR = re.compile(r"(\d+)([=XID])")
 
 
 def log(msg: str) -> None:
@@ -84,27 +87,13 @@ def warn(msg: str) -> None:
 
 @dataclass(frozen=True)
 class Settings:
-    method: str = "nearest"
-    references: str = "modal"
-    min_copies: int = 10
-    credit: str = "5000"
-    max_ratio: float = 1.15
-    qc_min_n: int = 5
-    untested: str = "accept"
-    subfamily_jaccard: float = 0.5
     mutation_rate: float = 3e-8
-    mafft: str = "mafft"
     threads: int = 8
+    blastn: str = "blastn"
+    blast_task: str = "blastn"
+    max_templates_per_family: int = 100     # database cap; only `place.n_templates` are used
+    merge_bp: int = 5                        # a merge partner's end within this of the new end
     place: Params = field(default_factory=Params)
-
-    def family_key(self) -> str:
-        """Everything the family phase depends on, so a cached phase is reused only when valid."""
-        # min_copies is left out on purpose: it only chooses which families run, and a
-        # cached phase covering more families is reused for fewer (see _family_phase).
-        keep = ("method", "references", "subfamily_jaccard", "max_ratio", "place")
-        d = {k: v for k, v in asdict(self).items() if k in keep}
-        d["cache_format"] = CACHE_FORMAT
-        return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
 
 _G: Optional[Genomes] = None
@@ -118,116 +107,36 @@ def _init(paths: Dict[str, str], tools_dir: str) -> None:
     _API = k2l.api(tools_dir)
 
 
-def build_models(family: str, members: Sequence[Member], g: Genomes, s: Settings,
-                 exclude: FrozenSet[str] = frozenset()) -> Tuple[List[Model], Optional[float], str]:
-    """The family's model(s), the modal called LTR length, and what stopped a model.
-
-    Leave-one-out does not depend on this call: every model records the copies whose
-    sequence went into it (`Model.refs`), and `ltr_place.candidate_models` refuses a
-    model for the element that built it. `exclude` is the stronger, caller-driven
-    form -- the copies named are kept out of the reference pool altogether, which the
-    benchmark uses to keep a planted element out of its family's model. It can drop a
-    family below MIN_REFS; that returns 'too_few_references' and no model, which
-    `family_job` and the sidecar already report.
-    """
-    if s.method not in METHODS:
-        raise ValueError(f"unknown method {s.method!r}")
-    many = s.method == "subfamily"
-    refs, modal = select_references(members, s.references, family, exclude,
-                                    n_young=150 if many else 40, n_random=150 if many else 40)
-    if not refs:
-        return [], modal, "too_few_references"
-    if s.method == "subfamily":
-        models = subfamily_models(family, refs, g, modal, s.subfamily_jaccard, s.mafft)
-        return models, modal, ("ok" if models else "no_ltr_span")
-    model = consensus_model(family, refs, g, modal, s.mafft)
-    if model is None:
-        return [], modal, "no_ltr_span"
-    if s.method == "nearest":
-        return nearest_templates(model, refs, g), modal, "ok"
-    return [model], modal, "ok"
+def _label(t: Member) -> str:
+    return f"{t.prefix}:{t.name}"
 
 
-def place_params(s: Settings) -> Params:
-    """`nearest` takes the median of its top templates' placements (spec 5.1)."""
-    return replace(s.place, combine="median") if s.method == "nearest" else s.place
+def _flip(strand: str) -> str:
+    return {"+": "-", "-": "+"}.get(strand, strand)
 
 
-@dataclass
-class FamilyResult:
-    family: str
-    n_members: int
-    models: List[Model]
-    modal: Optional[float]
-    status: str
-    proposals: List[Proposal] = field(default_factory=list)
-    tsd_new: Dict[str, str] = field(default_factory=dict)
-    tsd_null: Dict[str, str] = field(default_factory=dict)
-    obstacles: Dict[str, Tuple[str, str]] = field(default_factory=dict)
+def implied_orient(m: Member, hits: Sequence[Tuple[Member, str]]) -> str:
+    """The frame ext5/ext3 are reported in: `m`'s strand, else the one its stranded
+    templates imply (majority; a tie reads `+`), else `+`."""
+    if m.stranded:
+        return m.strand
+    votes = Counter(t.strand if rel == "+" else _flip(t.strand) for t, rel in hits if t.stranded)
+    if not votes:
+        return "+"
+    return sorted(votes.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
 
 
-def family_job(args) -> FamilyResult:
-    family, members, s = args
-    models, modal, status = build_models(family, members, _G, s)
-    fr = FamilyResult(family, len(members), models, modal, status)
-    if not models:
-        return fr
-    kept = [mo for mo in models if ratio_ok(mo, s.max_ratio)]
-    if not kept:
-        fr.status = "ratio_failed"   # proposals still computed, so the sidecar says what failed
-    for m in members:
-        p = propose(m, kept or models, _G, place_params(s))
-        if p is None:
-            continue
-        fr.proposals.append(p)
-        if p.gate_ok:
-            fr.tsd_new[m.uid] = tsd_at(_API, _G, m, p.left, p.right)
-            fr.tsd_null[m.uid] = tsd_at(_API, _G, m, p.left, p.right, shift=1000)
-            fr.obstacles[m.uid] = obstacle(m, p, _G)
-    return fr
-
-
-def _found(tsd: str) -> bool:
-    return tsd not in ("", ".", "NA")
-
-
-def qc(results: Sequence[FamilyResult], s: Settings) -> Tuple[Dict[str, str], float]:
-    """Per-family QC status and the pooled displaced-flank null rate it was tested against.
-
-    Evidence: TSDs at the proposed ends of candidates whose called ends had none
-    (TSDs are a credibility signal the finders did not select on; TG..CA is not
-    used because they did).
-    """
-    null_hits = null_n = 0
-    for fr in results:
-        for p in fr.proposals:
-            u = p.member.uid
-            if p.gate_ok and not p.member.has_tsd and u in fr.tsd_null:
-                null_n += 1
-                null_hits += _found(fr.tsd_null[u])
-    p0 = null_hits / null_n if null_n else 0.0
-    status: Dict[str, str] = {}
-    for fr in results:
-        if fr.status != "ok":
-            status[fr.family] = fr.status
-            continue
-        ev = [fr.tsd_new[p.member.uid] for p in fr.proposals
-              if p.gate_ok and not p.member.has_tsd and p.member.uid in fr.tsd_new]
-        status[fr.family] = tsd_enrichment(sum(map(_found, ev)), len(ev), p0, s.qc_min_n)
-    return status, p0
-
-
-def family_accepts(status: str, s: Settings) -> bool:
-    return status == "pass" or (status == "untested" and s.untested == "accept")
-
-
-def credit_for(p: Proposal, s: Settings) -> float:
-    """Bits of family evidence handed to Kmer2LTR that the proposed termini are the ends."""
-    if s.credit == "model":
-        ids = (([p.id_left] if p.left < p.member.start else [])
-               + ([p.id_right] if p.right > p.member.end else []))
-        return 2.0 * s.place.anchor_len * min(ids) if ids else 0.0
-    return float(s.credit)
+def place_job(args):
+    """Place `m`'s templates on it; for a move, the TSD at the new ends and its null."""
+    m, hits, p = args
+    models = [(_label(t), *tp.models_for(t, rel, _G)) for t, rel in hits]
+    prop = propose(m, models, _G, p, orient=implied_orient(m, hits))
+    if prop is None:
+        return m.uid, None, ".", ".", (".", ".")
+    if not prop.gate_ok:
+        return m.uid, prop, ".", ".", (".", ".")
+    return (m.uid, prop, tsd_at(_API, _G, m, prop.left, prop.right),
+            tsd_at(_API, _G, m, prop.left, prop.right, shift=1000), obstacle(m, prop, _G))
 
 
 @dataclass(frozen=True)
@@ -238,7 +147,7 @@ class Verdict:
     k2l_status: str
     tsd: str
     k2p: str
-    credit: float
+    unpaired: Tuple[int, int] = (0, 0)      # (genomic left, genomic right) unpaired bases
 
 
 def window(m: Member, left: int, right: int):
@@ -264,107 +173,157 @@ def rebase(fields: List[str], f5: int, name: str) -> List[str]:
 
 
 def length_ok(l5, l3, aln, left: int, right: int) -> bool:
-    """Detection's Step 8a gate (detect.filter_kmer2ltr_in_place) on the settled pair."""
+    """Detection's Step 8a size floors on the re-measured pair: LTRs >= 100, alignment
+    >= 90, end - start >= 300 (detection's own element test, so >= 301 bp). Its 0.65
+    length-ratio term is left out: LTRs of unequal length are what a deletion in one
+    or an insertion in the other looks like, and here the templates, not the pair,
+    set the ends."""
     if l5 is None or l3 is None or aln is None:
         return False
-    hi = max(l5, l3, aln)
-    return (hi > 0 and min(l5, l3) >= 100 and aln >= 90
-            and min(l5, l3, aln) / hi >= 0.65 and right - left >= 300)
+    return min(l5, l3) >= 100 and aln >= 90 and right - left >= 300
+
+
+def trim_spans(cigar: str, spans: Tuple[int, int, int, int], cut5: int,
+               cut3: int) -> Tuple[int, int, int, int]:
+    """The called pair after a trim. Cutting `cut5` bases off the left LTR's outer end
+    takes the partner bases the called alignment paired with them off the right LTR's
+    inner end; a `cut3` cut on the right takes theirs off the left LTR's inner end.
+    `cigar` is the called pair's (query = left LTR, ref = right LTR)."""
+    l5b, l5e, l3b, l3e = spans
+    ops = [op for n, op in _CIGAR.findall(cigar or "") for _ in range(int(n))]
+    if cut5 > 0:
+        q = r = 0
+        for op in ops:
+            if q >= cut5:
+                break
+            q += op in "=XI"
+            r += op in "=XD"
+        l3b += r
+    if cut3 > 0:
+        q = r = 0
+        for op in reversed(ops):
+            if r >= cut3:
+                break
+            r += op in "=XD"
+            q += op in "=XI"
+        l5e -= q
+    return l5b, l5e, l3b, l3e
+
+
+def _unpaired(cigar: str) -> Tuple[int, int]:
+    """(leading I run, trailing D run): left-LTR bases at its outer end, right-LTR
+    bases at its outer end, with no partner."""
+    ops = _CIGAR.findall(cigar or "")
+    lead = int(ops[0][0]) if ops and ops[0][1] == "I" else 0
+    tail = int(ops[-1][0]) if ops and ops[-1][1] == "D" else 0
+    return lead, tail
+
+
+def record_matches(fwd: str, genomic: str) -> bool:
+    """Whether a stored record, turned to the forward frame, is the genome at its called
+    span wherever it is not masked (a depth letter stands for a nested element). Case
+    is ignored: detection keeps a soft-masked genome's lowercase."""
+    if fwd == genomic:
+        return True
+    return len(fwd) == len(genomic) and all(
+        a == b for a, b in zip(fwd.upper(), genomic.upper()) if a in "ACGT")
 
 
 def arbitrate(args) -> Verdict:
-    """Kmer2LTR re-scores the widened record; it settles the final ends and every column."""
-    p, record, credit, mu, min_ext = args
+    """Kmer2LTR re-measures the called pair on the new record; the templates' ends are
+    its credited termini."""
+    p, record, cigar, mu = args
     m = p.member
+    fwd = forward(record, m.orientation)
+    if not record_matches(fwd, _G.fetch(m.prefix, m.chrom, m.start, m.end)[0]):
+        # e.g. a record stored reverse-complemented under an orientation `+` row:
+        # splicing genome segments onto it would build a chimera
+        return Verdict(m.uid, "record_mismatch", None, "NA", "NA", "NA")
+    cut5, cut3 = max(0, p.left - m.start), max(0, m.end - p.right)
     left_seg = _G.fetch(m.prefix, m.chrom, p.left, m.start - 1)[0] if p.left < m.start else ""
     right_seg = _G.fetch(m.prefix, m.chrom, m.end + 1, p.right)[0] if p.right > m.end else ""
-    fwd = left_seg + forward(record, m.orientation) + right_seg
-    if len(fwd) != p.right - p.left + 1:
-        return Verdict(m.uid, "record_mismatch", None, "NA", "NA", "NA", credit)
+    new = left_seg + fwd[cut5:len(fwd) - cut3] + right_seg
+    if len(new) != p.right - p.left + 1:
+        return Verdict(m.uid, "record_mismatch", None, "NA", "NA", "NA")
+    n = len(new)
+    spans = trim_spans(cigar, (max(0, m.start - p.left), m.l1 - p.left, m.r0 - p.left,
+                               min(n - 1, m.end - p.left)), cut5, cut3)
     suffix = "#" + m.name.split("#", 1)[1] if "#" in m.name else ""
-    seq = sanitize(fwd)
+    name = f"{m.chrom}:{p.left}-{p.right}{suffix}"
+    seq = sanitize(new)
     ctx = _API.orient(seq, window(m, p.left, p.right))
-    res = _API.classify(f"{m.chrom}:{p.left}-{p.right}{suffix}", seq, period_rule="outermost",
-                        mutation_rate=mu, tsd_credit=credit)
+    res = _API.classify(name, seq, period_rule="outermost", mutation_rate=mu,
+                        tsd_credit=CREDIT_BITS, spans=spans)
     if ctx is not None:
         res = _API.annotate(res, seq, ctx, _API.Options())
     if res.status != "pass":
-        return Verdict(m.uid, "kmer2ltr_not_pass", None, res.status, "NA", "NA", credit)
+        return Verdict(m.uid, "kmer2ltr_not_pass", None, res.status, "NA", "NA")
     row = _API.format_row(res).split("\t")
-    f5, f3 = res.flank5_len, res.flank3_len
-    fl, fr = p.left + f5, p.right - f3
     tsd, k2p = row[_I["tsd"]], row[_I["k2p"]]
-    if fl > m.start or fr < m.end or (m.start - fl < min_ext and fr - m.end < min_ext):
-        return Verdict(m.uid, "kmer2ltr_reverted", None, res.status, tsd, k2p, credit)
-    if not length_ok(res.ltr5_len, res.ltr3_len, res.aln_len, fl, fr):
-        return Verdict(m.uid, "length_filter", None, res.status, tsd, k2p, credit)
-    fields = rebase(row, f5, f"{m.chrom}:{fl}-{fr}{suffix}")
+    if res.flank5_len or res.flank3_len:       # cannot happen with credit + known spans
+        return Verdict(m.uid, "kmer2ltr_moved_ends", None, res.status, tsd, k2p)
+    if not length_ok(res.ltr5_len, res.ltr3_len, res.aln_len, p.left, p.right):
+        return Verdict(m.uid, "length_filter", None, res.status, tsd, k2p)
+    fields = rebase(row, 0, name)
     fields[_I["orientation"]] = m.orientation   # a storage fact: the record stays stored as it was
-    acc = Accepted(m, fields[0], fields, stored(fwd[f5:len(fwd) - f3], m.orientation), fl, fr)
-    return Verdict(m.uid, "extended", acc, res.status, tsd, k2p, credit)
+    acc = Accepted(m, fields[0], fields, stored(new, m.orientation), p.left, p.right)
+    return Verdict(m.uid, "moved", acc, res.status, tsd, k2p, _unpaired(res.cigar))
 
 
-def sidecar_row(p: Proposal, fr: FamilyResult, s: Settings) -> Dict[str, str]:
-    m, u = p.member, p.member.uid
-    ob_l, ob_r = fr.obstacles.get(u, (".", "."))
+def _fmt_id(x: float) -> str:
+    return "." if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:.3f}"
+
+
+def sidecar_row(p: Proposal, tsd_new: str, tsd_null: str, obst: Tuple[str, str]) -> Dict[str, str]:
+    m = p.member
     plus = p.orient == "+"
+
+    def bio(left, right):
+        return (left, right) if plus else (right, left)
+
+    ext_l = p.ext_left if p.left != m.start else m.start - p.raw_left
+    ext_r = p.ext_right if p.right != m.end else p.raw_right - m.end
+    reason = next((r for r in (p.reason_left, p.reason_right) if r != "."), ".")
+    ext5, ext3 = bio(ext_l, ext_r)
+    src5, src3 = bio(p.left_src, p.right_src)
+    id5, id3 = bio(p.id_left, p.id_right)
+    sup5, sup3 = bio(p.sup_left, p.sup_right)
+    ob5, ob3 = bio(*obst)
     return {
-        "old_seq_id": m.name, "new_seq_id": ".", "family": m.family, "method": s.method,
-        "model_id": p.model_id, "decision": "rejected", "reason": ".",
-        "ext5": str(p.ext5 if p.gate_ok else p.raw_ext5),
-        "ext3": str(p.ext3 if p.gate_ok else p.raw_ext3),
-        "end_source5": p.left_src if plus else p.right_src,
-        "end_source3": p.right_src if plus else p.left_src,
-        "id_outer5": f"{(p.id_left if plus else p.id_right):.3f}",
-        "id_outer3": f"{(p.id_right if plus else p.id_left):.3f}",
-        "credit_bits": ".", "k2l_status": ".",
-        "tsd_called": m.tsd or ".", "tsd_new": fr.tsd_new.get(u, "."),
-        "tsd_null": fr.tsd_null.get(u, "."),
+        "old_seq_id": m.name, "new_seq_id": ".", "family": m.family, "method": "templates",
+        "templates": ",".join(p.templates) or ".", "decision": "rejected",
+        "reason": "." if p.gate_ok else reason, "ext5": str(ext5), "ext3": str(ext3),
+        "end_source5": src5, "end_source3": src3, "id_outer5": _fmt_id(id5),
+        "id_outer3": _fmt_id(id3), "support5": str(sup5), "support3": str(sup3),
+        "k2l_status": ".", "tsd_called": m.tsd or ".", "tsd_new": tsd_new, "tsd_null": tsd_null,
         "k2p_called": "NA" if m.k2p is None else f"{m.k2p:g}", "k2p_new": ".",
-        "obstacle5": ob_l if plus else ob_r, "obstacle3": ob_r if plus else ob_l,
+        "unpaired5": ".", "unpaired3": ".", "obstacle5": ob5, "obstacle3": ob3,
+        "merged_into": ".",
     }
+
+
+def _partner_row(x: Member, into: str) -> Dict[str, str]:
+    row = dict.fromkeys(("new_seq_id", "templates", "ext5", "ext3", "end_source5", "end_source3",
+                         "id_outer5", "id_outer3", "support5", "support3", "k2l_status",
+                         "tsd_new", "tsd_null", "k2p_new", "unpaired5", "unpaired3",
+                         "obstacle5", "obstacle3"), ".")
+    row.update(old_seq_id=x.name, family=x.family, method="templates", decision="merged",
+               reason="split_call", new_seq_id=into, merged_into=into, tsd_called=x.tsd or ".",
+               k2p_called="NA" if x.k2p is None else f"{x.k2p:g}")
+    return row
+
+
+def _unmerge(rows: Dict[str, Dict[str, str]], pu: Optional[str]) -> None:
+    """A survivor dropped out: the call it would have absorbed keeps its own call, and a
+    row it has (it was a candidate itself) says so."""
+    if pu is not None and pu in rows:
+        rows[pu]["reason"] = "merge_partner_failed"
 
 
 def _row_order(row: Dict[str, str]):
     chrom, span = row["old_seq_id"].split("#", 1)[0].rsplit(":", 1)
-    return chrom, int(span.split("-")[0])
-
-
-def _family_phase(pool, eligible, s: Settings, cache: Optional[str], verbose: bool):
-    key = s.family_key()
-    if cache and os.path.isfile(cache):
-        with open(cache, "rb") as fh:
-            saved_key, results = pickle.load(fh)
-        wanted = {f for f, _ in eligible}
-        if saved_key == key and wanted <= {r.family for r in results}:
-            log(f"family phase reused from {cache}")
-            return [r for r in results if r.family in wanted]
-    results = []
-    for fr in pool.imap_unordered(family_job, [(f, ms, s) for f, ms in eligible]):
-        results.append(fr)
-        if verbose:
-            lens = ",".join(str(len(mo.seq)) for mo in fr.models) or "-"
-            log(f"{fr.family}: {fr.n_members} copies, model {lens} bp, modal {fr.modal}, "
-                f"{fr.status}, {len(fr.proposals)} proposal(s)")
-    results.sort(key=lambda fr: fr.family)
-    if cache:
-        with open(cache, "wb") as fh:
-            pickle.dump((key, results), fh)
-    return results
-
-
-def _dump(path: str, results, status, rows) -> None:
-    with open(path, "w") as fh:
-        fh.write("uid\tfamily\tfamily_status\tgate_ok\tcalled_tsd\ttsd_new\ttsd_null\t"
-                 "decision\treason\n")
-        for fr in results:
-            for p in fr.proposals:
-                u = p.member.uid
-                r = rows[u]
-                fh.write("\t".join([u.replace("\t", "|"), fr.family, status[fr.family],
-                                    str(int(p.gate_ok)), str(int(p.member.has_tsd)),
-                                    fr.tsd_new.get(u, "."), fr.tsd_null.get(u, "."),
-                                    r["decision"], r["reason"]]) + "\n")
+    start, end = (int(x) for x in span.split("-"))
+    return chrom, start, end, row["old_seq_id"]
 
 
 def check_prefixes(prefixes: Sequence[str]) -> None:
@@ -389,18 +348,37 @@ def check_indir(indir: str) -> None:
         raise SystemExit(leftover_message(indir, leftovers))
 
 
+def check_blastn(blastn: str) -> str:
+    """The blastn to run, with makeblastdb beside it (or on PATH); fail before any work."""
+    path = shutil.which(blastn) or (blastn if os.path.isfile(blastn) else None)
+    if path is None:
+        raise SystemExit(f"reboundary: blastn not found ({blastn}); it is in environment.yml")
+    here = os.path.dirname(path)
+    if not (os.path.isfile(os.path.join(here, "makeblastdb")) or shutil.which("makeblastdb")):
+        raise SystemExit("reboundary: makeblastdb not found beside blastn or on PATH")
+    return path
+
+
+def _dump(path: str, props: Dict[str, Proposal], rows: Dict[str, Dict[str, str]]) -> None:
+    with open(path, "w") as fh:
+        fh.write("uid\tleft\tright\traw_left\traw_right\tsup_left\tsup_right\t"
+                 "reason_left\treason_right\tdecision\treason\n")
+        for u, p in sorted(props.items()):
+            r = rows[u]
+            fh.write("\t".join(str(x) for x in (
+                u.replace("\t", "|"), p.left, p.right, p.raw_left, p.raw_right, p.sup_left,
+                p.sup_right, p.reason_left, p.reason_right, r["decision"], r["reason"])) + "\n")
+
+
 def run(indir: str, prefixes: Sequence[str], genomes: Sequence[str], s: Settings,
-        tools_dir: str, dump: Optional[str] = None, cache: Optional[str] = None,
-        verbose: bool = False) -> Dict[str, int]:
+        tools_dir: str, dump: Optional[str] = None, verbose: bool = False) -> Dict[str, int]:
     t0 = time.time()
+    vlog = log if verbose else (lambda msg: None)
     check_prefixes(prefixes)
     check_indir(indir)
     if len(prefixes) != len(genomes):
         raise SystemExit("reboundary: --prefix and --genome must pair up one to one")
-    if s.method not in METHODS:
-        raise SystemExit(f"reboundary: unknown method {s.method!r}")
-    if shutil.which(s.mafft) is None:
-        raise SystemExit(f"reboundary: mafft not found ({s.mafft}); it is in environment.yml")
+    blastn = check_blastn(s.blastn)
     for gpath in genomes:
         if not os.path.isfile(gpath):
             raise SystemExit(f"reboundary: genome not found: {gpath}")
@@ -415,87 +393,152 @@ def run(indir: str, prefixes: Sequence[str], genomes: Sequence[str], s: Settings
     prefixes, genomes = [p for p, _ in kept], [g for _, g in kept]
     tables = {p: tables_by_prefix[p] for p in prefixes}
     members = [m for p in prefixes for m in members_from(p, tables[p])]
-    families: Dict[str, List[Member]] = defaultdict(list)
-    for m in members:
-        if m.family not in ("", ".", "NA"):
-            families[m.family].append(m)
-    spaces = {f.rsplit("_fam", 1)[0] for f in families if "_fam" in f}
-    if len(spaces) > 1:
-        raise SystemExit(f"reboundary: the prefixes carry {len(spaces)} family namespaces "
-                         f"({', '.join(sorted(spaces))}); pool only genomes whose families "
-                         f"were clustered together in one run")
-    eligible = sorted(((f, ms) for f, ms in families.items() if len(ms) >= s.min_copies),
-                      key=lambda kv: (-len(kv[1]), kv[0]))
-    log(f"start: {len(members)} elements in {len(prefixes)} genome(s), {len(families)} "
-        f"families, {len(eligible)} with >= {s.min_copies} copies; method {s.method}")
+    by_uid = {m.uid: m for m in members}
+    paths = dict(zip(prefixes, genomes))
+    g = Genomes(paths)
+    g.index()              # once, here: workers left to it race to build one .fai
+    trusted = tp.trusted(members, g)
+    templates = tp.cap_per_family(trusted, s.max_templates_per_family)
+    targets = tp.targets(members)
+    log(f"start: {len(members)} elements in {len(prefixes)} genome(s); {len(templates)} "
+        f"templates (exact TSD), {len(targets)} targets (no TSD)")
+    for p in prefixes:
+        vlog(f"  {p}: {sum(m.prefix == p for m in members)} elements, "
+             f"{sum(t.prefix == p for t in trusted)} trusted templates, "
+             f"{sum(t.prefix == p for t in templates)} templates (after the per-family cap), "
+             f"{sum(m.prefix == p for m in targets)} targets")
 
     rows: Dict[str, Dict[str, str]] = {}
-    by_uid: Dict[str, Proposal] = {}
-    with Pool(s.threads, initializer=_init, initargs=(dict(zip(prefixes, genomes)), tools_dir)) \
-            as pool:
-        results = _family_phase(pool, eligible, s, cache, verbose)
-        status, p0 = qc(results, s)
-        log(f"family phase: {sum(len(fr.proposals) for fr in results)} candidates; "
-            f"QC {dict(Counter(status.values()))}; displaced-flank null {p0:.3f}")
-        survivors: List[Proposal] = []
-        for fr in results:
-            accept = family_accepts(status[fr.family], s)
-            for p in fr.proposals:
+    props: Dict[str, Proposal] = {}
+    verdicts: List[Verdict] = []
+    partner_of: Dict[str, str] = {}              # survivor uid -> the uid it absorbs
+    if not templates:
+        warn("no element carries an exact TSD at its called ends, so there are no templates; "
+             "nothing was moved")
+    elif targets:
+        work = os.path.join(indir, prefixes[0] + "_reboundary.tmp")
+        try:
+            near = tp.nearest(targets, templates, g, k=s.place.n_templates, workdir=work,
+                              blastn=blastn, threads=s.threads, task=s.blast_task)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        jobs = [(m, near[m.uid], s.place) for m in targets if m.uid in near]
+        log(f"templates found for {len(jobs)} of {len(targets)} targets "
+            f"({time.time() - t0:.0f} s)")
+        per_target = Counter(len(h) for h in near.values())
+        vlog(f"  templates per target: {dict(sorted(per_target.items()))}")
+        with Pool(s.threads, initializer=_init, initargs=(paths, tools_dir)) as pool:
+            for u, prop, tsd_new, tsd_null, obst in pool.imap_unordered(place_job, jobs,
+                                                                        chunksize=8):
+                if prop is not None:
+                    props[u] = prop
+                    rows[u] = sidecar_row(prop, tsd_new, tsd_null, obst)
+            order = sorted((p for p in props.values() if p.gate_ok),
+                           key=lambda p: genome_order(p.member))
+            log(f"placement: {len(props)} candidate(s), {len(order)} with a supported move")
+            if verbose:
+                sides = Counter(r for p in props.values() for r in (p.reason_left, p.reason_right))
+                sources = Counter(src for p in order
+                                  for src, moved in ((p.left_src, p.left != p.member.start),
+                                                     (p.right_src, p.right != p.member.end))
+                                  if moved)
+                vlog(f"  side outcomes: {dict(sides)}; end sources of supported moves: "
+                     f"{dict(sources)} ({time.time() - t0:.0f} s)")
+            index = SpanIndex(members)
+            clear: List[Proposal] = []
+            absorbed = set()
+            for p in order:
                 u = p.member.uid
-                by_uid[u] = p
-                rows[u] = sidecar_row(p, fr, s)
-                if not p.gate_ok:
-                    rows[u]["reason"] = "gate_identity"
-                elif not accept:
-                    rows[u]["reason"] = ("family_untested" if status[fr.family] == "untested"
-                                         else "family_qc_failed")
-                else:
-                    survivors.append(p)
-        index = SpanIndex(members)
-        clear: List[Proposal] = []
-        for p in survivors:
-            why = conflict(index, p.member, p.left, p.right)
-            if why:
-                rows[p.member.uid]["reason"] = why
-            else:
+                if u in absorbed:
+                    continue
+                part = merge_partner(index, by_uid, p.member, p.left, p.right, s.merge_bp)
+                pu = f"{p.member.prefix}\t{part}" if part else None
+                if pu is not None and (pu in absorbed or pu in partner_of):
+                    part, pu = None, None       # taken, or itself absorbing another call
+                why = conflict(index, p.member, p.left, p.right,
+                               ignore=frozenset({part}) if part else frozenset())
+                if why:
+                    rows[u]["reason"] = why
+                    continue
+                if pu is not None:
+                    partner_of[u] = pu
+                    absorbed.add(pu)
+                    clear = [c for c in clear if c.member.uid != pu]
                 clear.append(p)
-        lost = mutual_conflicts([(p.member, p.left, p.right) for p in clear])
-        for u in lost:
-            rows[u]["reason"] = "overlaps_element"
-        final = [p for p in clear if p.member.uid not in lost]
-        jobs = []
-        for prefix in prefixes:
-            mine = [p for p in final if p.member.prefix == prefix]
-            recs = fetch_records([t.fasta for t in tables[prefix]], {p.member.name for p in mine})
-            for p in mine:
-                rec = recs.get(p.member.name)
-                if rec is None:
-                    rows[p.member.uid]["reason"] = "record_missing"
-                else:
-                    jobs.append((p, rec, credit_for(p, s), s.mutation_rate, s.place.min_ext))
-        log(f"arbitration: {len(jobs)} candidate(s) to Kmer2LTR")
-        verdicts = pool.map(arbitrate, jobs, chunksize=8) if jobs else []
+            for u in mutual_conflicts([(p.member, p.left, p.right) for p in clear]):
+                rows[u]["reason"] = "overlaps_element"
+            final = [p for p in clear if rows[p.member.uid]["reason"] == "."]
+            for u, pu in list(partner_of.items()):
+                if rows[u]["reason"] != ".":
+                    _unmerge(rows, partner_of.pop(u))
+            cigars = {}
+            for prefix in prefixes:
+                for t in tables[prefix]:
+                    for row in t.rows:
+                        cigars[(prefix, row[0])] = t.cols.get(row, "cigar")
+            arb = []
+            for prefix in prefixes:
+                mine = [p for p in final if p.member.prefix == prefix]
+                recs = fetch_records([t.fasta for t in tables[prefix]],
+                                     {p.member.name for p in mine})
+                for p in mine:
+                    rec = recs.get(p.member.name)
+                    if rec is None:
+                        rows[p.member.uid]["reason"] = "record_missing"
+                        _unmerge(rows, partner_of.pop(p.member.uid, None))
+                    else:
+                        arb.append((p, rec, cigars.get((prefix, p.member.name), "."),
+                                    s.mutation_rate))
+            if verbose:
+                lost = Counter(rows[p.member.uid]["reason"] for p in order
+                               if rows[p.member.uid]["reason"] != ".")
+                vlog(f"  conflicts: {dict(lost)}; split calls to merge: {len(partner_of)}")
+            log(f"re-measuring {len(arb)} element(s) with Kmer2LTR")
+            verdicts = pool.map(arbitrate, arb, chunksize=8) if arb else []
+            vlog(f"  Kmer2LTR status: {dict(Counter(v.k2l_status for v in verdicts))}; "
+                 f"verdicts: {dict(Counter(v.status for v in verdicts))} "
+                 f"({time.time() - t0:.0f} s)")
 
     accepted: Dict[str, Dict[str, Accepted]] = defaultdict(dict)
+    retired: Dict[str, set] = defaultdict(set)
+    fetch = (lambda prefix, chrom, a, b: g.fetch(prefix, chrom, a, b)[0])
+    nested = None             # host -> nested elements, built on the first trim that needs it
     for v in verdicts:
         row = rows[v.uid]
-        row["credit_bits"], row["k2l_status"] = f"{v.credit:g}", v.k2l_status
+        row["k2l_status"] = v.k2l_status
+        pu = partner_of.get(v.uid)
         if v.accepted is None:
             row["reason"] = v.status
+            _unmerge(rows, pu)
             continue
         a = v.accepted
-        ext_l, ext_r = a.member.start - a.left, a.right - a.member.end
-        plus = by_uid[v.uid].orient == "+"
-        row.update(decision="extended", reason=".", new_seq_id=a.new_name, tsd_new=v.tsd,
-                   k2p_new=v.k2p, ext5=str(ext_l if plus else ext_r),
-                   ext3=str(ext_r if plus else ext_l))
-        accepted[a.member.prefix][a.member.key] = a
+        m = a.member
+        trimmed = ([(m.start, a.left - 1)] if a.left > m.start else []) + \
+                  ([(a.right + 1, m.end)] if a.right < m.end else [])
+        if trimmed and hosts_of(m.nest_status):
+            if nested is None:
+                nested = nested_index(members)
+            a = replace(a, restore=trim_restore(m, trimmed, by_uid, IUPAC_DEPTH_SEQ, fetch,
+                                                nested=nested))
+        plus = props[v.uid].orient == "+"
+        u5, u3 = v.unpaired if plus else v.unpaired[::-1]
+        e5, e3 = ((m.start - a.left, a.right - m.end) if plus
+                  else (a.right - m.end, m.start - a.left))
+        row.update(decision="moved", reason=".", new_seq_id=a.new_name, tsd_new=v.tsd,
+                   k2p_new=v.k2p, ext5=str(e5), ext3=str(e3), unpaired5=str(u5),
+                   unpaired3=str(u3))
+        accepted[m.prefix][m.key] = a
+        if pu is not None:
+            x = by_uid[pu]
+            retired[x.prefix].add(x.key)
+            rows[pu] = _partner_row(x, a.new_name)
 
     commit = Commit()
     try:
         for prefix in prefixes:
-            if accepted[prefix]:
-                rewrite(tables[prefix], accepted[prefix], IUPAC_DEPTH_SEQ, commit)
+            if accepted[prefix] or retired[prefix]:
+                rewrite(tables[prefix], accepted[prefix], IUPAC_DEPTH_SEQ, commit,
+                        retired=frozenset(retired[prefix]))
             mine = sorted((r for u, r in rows.items() if u.split("\t", 1)[0] == prefix),
                           key=_row_order)
             with commit.open(os.path.join(indir, prefix + SIDECAR_SUFFIX)) as fh:
@@ -505,12 +548,13 @@ def run(indir: str, prefixes: Sequence[str], genomes: Sequence[str], s: Settings
         commit.abort()
         raise
     if dump:
-        _dump(dump, results, status, rows)
-    counts = Counter(r["decision"] if r["decision"] == "extended" else r["reason"]
+        _dump(dump, props, rows)
+    counts = Counter(r["decision"] if r["decision"] in ("moved", "merged") else r["reason"]
                      for r in rows.values())
     log(f"done in {time.time() - t0:.0f} s: {len(rows)} candidates, "
-        f"{counts.get('extended', 0)} extended; "
-        + ", ".join(f"{k} {n}" for k, n in sorted(counts.items()) if k != "extended"))
+        f"{counts.get('moved', 0)} moved, {counts.get('merged', 0)} merged; "
+        + ", ".join(f"{k} {n}" for k, n in sorted(counts.items())
+                    if k not in ("moved", "merged")))
     return dict(counts)
 
 
@@ -582,6 +626,14 @@ def prepare_posthoc(indir: str, prefix: str) -> str:
         raise SystemExit(f"reboundary: {bdir}.partial exists: an earlier backup was interrupted. "
                          f"Move its files back into {indir}, delete it, then re-run.")
     if not os.path.isdir(bdir):
+        if os.path.lexists(os.path.join(indir, prefix + SIDECAR_SUFFIX)):
+            # A pipeline run re-boundaries in place and keeps no backup: these tables
+            # are already moved calls, and a second pass is not the first one again.
+            raise SystemExit(
+                f"reboundary: {prefix} was already re-boundaried in {indir} "
+                f"({prefix}{SIDECAR_SUFFIX} exists, {os.path.basename(bdir)}/ does not); a "
+                f"post-hoc run would re-boundary the moved calls a second time. Start from "
+                f"a run made without --reboundary.")
         _check_clean_set(indir, prefix)
         tmp = bdir + ".partial"
         os.makedirs(tmp)
@@ -693,54 +745,68 @@ def regenerate(indir: str, prefix: str, genome: str, plots: bool) -> None:
             warn(f"plotting reported failures for {prefix}; the tables and GFF3 are unaffected")
 
 
+def _at_least(lo: int):
+    def parse(value: str) -> int:
+        x = int(value)
+        if x < lo:
+            raise argparse.ArgumentTypeError(f"must be >= {lo}, got {value}")
+        return x
+    return parse
+
+
+def _fraction(value: str) -> float:
+    x = float(value)
+    if not 0.0 < x <= 1.0:
+        raise argparse.ArgumentTypeError(f"must be in (0, 1], got {value}")
+    return x
+
+
+def _positive(value: str) -> float:
+    x = float(value)
+    if not x > 0.0:
+        raise argparse.ArgumentTypeError(f"must be > 0, got {value}")
+    return x
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="ltrquest-reboundary",
-        description="Extend truncated LTR-RT calls to the ends their family's LTR model "
-                    "supports. Rewrites the _clean_ depth tables and FASTAs in place and "
-                    "writes <prefix>_reboundary.tsv.")
+        description="Re-bound LTR-RT calls whose ends carry no TSD, using the calls whose ends "
+                    "carry an exact one as templates. Rewrites the _clean_ depth tables and "
+                    "FASTAs in place and writes <prefix>_reboundary.tsv.")
     ap.add_argument("--indir", default=".", help="directory holding the run (default: .)")
     ap.add_argument("--prefix", nargs="+", required=True,
-                    help="genome prefix(es); all are pooled, since families span genomes")
+                    help="genome prefix(es); all are pooled, since templates span genomes")
     ap.add_argument("--genome", nargs="+",
                     help="original (unmasked) genome FASTA per prefix, in the same order")
-    ap.add_argument("--method", choices=METHODS, default="nearest",
-                    help="family model (default: nearest)")
-    ap.add_argument("--references", choices=("modal", "tsd"), default="modal",
-                    help="copies models are built from: modal-length (default) or TSD-bearing")
-    ap.add_argument("--subfamily-jaccard", type=float, default=0.5,
-                    help="with --method subfamily: LTR 11-mer Jaccard to join a cluster "
-                         "(default 0.5)")
-    ap.add_argument("--min-copies", type=int, default=10,
-                    help="families with fewer copies are left alone (default 10)")
-    ap.add_argument("--min-identity", type=float, default=0.8,
-                    help="identity over the outer 30 bp a moved end needs (default 0.8)")
-    ap.add_argument("--anchor-len", type=int, default=30,
-                    help="bp of the model's end searched for past a large indel (default 30)")
+    ap.add_argument("--templates", type=_at_least(1), default=5,
+                    help="nearest templates placed per element (default 5)")
+    ap.add_argument("--min-support", type=_at_least(1), default=2,
+                    help="agreeing template placements a moved end needs (default 2)")
+    ap.add_argument("--min-ext", type=_at_least(1), default=1,
+                    help="the smallest outward move, bp (default 1)")
+    ap.add_argument("--max-trim", type=_at_least(0), default=10,
+                    help="the largest inward move, bp; 0 never trims (default 10)")
+    ap.add_argument("--min-identity", type=_fraction, default=0.8,
+                    help="identity over a template's outer 30 bp a placement needs (default 0.8)")
+    ap.add_argument("--anchor-len", type=_at_least(1), default=30,
+                    help="bp of a template's end searched for past a large indel (default 30)")
     ap.add_argument("--no-anchor", action="store_true", help="do not search past large indels")
-    ap.add_argument("--max-indel", type=int, default=5000,
+    ap.add_argument("--max-indel", type=_at_least(0), default=5000,
                     help="how far past the call the anchor looks, bp (default 5000)")
-    ap.add_argument("--credit", default="5000",
-                    help="bits of family evidence given to Kmer2LTR: a number, or 'model' "
-                         "(default 5000)")
-    ap.add_argument("--max-ratio", type=float, default=1.15,
-                    help="family QC: model length / modal called LTR length ceiling (default 1.15)")
-    ap.add_argument("--qc-min-n", type=int, default=5,
-                    help="family QC: candidates needed to test TSD enrichment (default 5)")
-    ap.add_argument("--untested", choices=("accept", "skip"), default="accept",
-                    help="families with too few candidates to test (default: accept)")
-    ap.add_argument("--mutation-rate", type=float, default=None,
+    ap.add_argument("--mutation-rate", type=_positive, default=None,
                     help="per site per year, for k2p_time (default: the run's own, else 3e-8)")
     ap.add_argument("--tools-dir", default=os.environ.get("LTRQUEST_TOOLS_DIR", "ltrquest_tools"),
                     help="Kmer2LTR checkout location, cloned there if absent "
                          "(default: $LTRQUEST_TOOLS_DIR or ./ltrquest_tools)")
-    ap.add_argument("--mafft", default="mafft", help="mafft executable (default: mafft on PATH)")
-    ap.add_argument("-t", "--threads", type=int, default=8, help="worker processes (default 8)")
+    ap.add_argument("--blastn", default="blastn",
+                    help="blastn executable; makeblastdb is taken from beside it or PATH "
+                         "(default: blastn on PATH)")
+    ap.add_argument("-t", "--threads", type=_at_least(1), default=8,
+                    help="worker processes (default 8)")
     ap.add_argument("--dump-proposals", default=None,
                     help="also write every proposal to this TSV (benchmarks)")
-    ap.add_argument("--cache", default=None,
-                    help="pickle the family phase here; reuse it when the settings allow")
-    ap.add_argument("-v", "--verbose", action="store_true", help="one line per family")
+    ap.add_argument("-v", "--verbose", action="store_true", help="more progress")
     ap.add_argument("--posthoc", action="store_true",
                     help="update a finished run in place: originals go to "
                          "<prefix>_pre_reboundary/ (once; later runs start from it), then the "
@@ -752,40 +818,43 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def settings_from(args) -> Settings:
-    if args.credit != "model":
-        try:
-            float(args.credit)
-        except ValueError:
-            raise SystemExit(f"reboundary: --credit must be a number or 'model' "
-                             f"(got {args.credit!r})") from None
     return Settings(
-        method=args.method, references=args.references, min_copies=args.min_copies,
-        credit=args.credit, max_ratio=args.max_ratio, qc_min_n=args.qc_min_n,
-        untested=args.untested, subfamily_jaccard=args.subfamily_jaccard,
         mutation_rate=resolve_mutation_rate(args.indir, args.prefix, args.mutation_rate),
-        mafft=args.mafft, threads=args.threads,
+        threads=args.threads, blastn=args.blastn,
         place=Params(min_identity=args.min_identity, anchor=not args.no_anchor,
-                     anchor_len=args.anchor_len, max_indel=args.max_indel))
+                     anchor_len=args.anchor_len, max_indel=args.max_indel,
+                     n_templates=args.templates, min_support=args.min_support,
+                     min_ext=args.min_ext, max_trim=args.max_trim))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    ap = build_parser()
+    args = ap.parse_args(argv)
+    if args.min_support > args.templates:
+        ap.error(f"--min-support {args.min_support} exceeds --templates {args.templates}: "
+                 f"no end could ever move")
     check_prefixes(args.prefix)
     if args.restore:
         for p in args.prefix:
             restore(args.indir, p)
         return 0
     check_indir(args.indir)        # before --posthoc moves a single original
-    s = settings_from(args)
     if not args.genome:
         raise SystemExit("reboundary: --genome is required")
     if len(args.genome) != len(args.prefix):
         raise SystemExit("reboundary: --prefix and --genome must pair up one to one")
+    s = settings_from(args)
+    check_blastn(s.blastn)         # both before --posthoc backs anything up
+    try:
+        k2l.api(args.tools_dir)
+    except k2l.IncompatibleKmer2LTR as exc:
+        print(f"reboundary: {exc}", file=sys.stderr, flush=True)
+        return EXIT_INCOMPATIBLE_KMER2LTR
     if args.posthoc:
         for p in args.prefix:
             prepare_posthoc(args.indir, p)
     run(args.indir, args.prefix, args.genome, s, args.tools_dir, args.dump_proposals,
-        args.cache, args.verbose)
+        args.verbose)
     if args.posthoc:
         for p, gpath in zip(args.prefix, args.genome):
             regenerate(args.indir, p, gpath, plots=not args.no_plots)

@@ -18,10 +18,31 @@ def test_the_flag_parses(driver):
     assert run("bash", str(driver), "--reboundary", "--help").returncode == 0
 
 
-def test_a_missing_mafft_fails_before_any_work(driver, toy_genome):
+def test_a_missing_blastn_fails_before_any_work(driver, toy_genome, tmp_path):
     result = run("bash", str(driver), "--genome", str(toy_genome), "--reboundary",
-                 env={"PATH": "/usr/bin:/bin", "LTRQUEST_PYTHON": "/nonexistent/python"})
-    assert result.returncode != 0 and "mafft" in result.stderr
+                 env={"PATH": "/usr/bin:/bin", "LTRQUEST_PYTHON": "/nonexistent/python"},
+                 cwd=tmp_path)
+    assert result.returncode != 0 and "blastn" in result.stderr
+
+
+def test_an_incompatible_kmer2ltr_stops_the_run_before_detection(driver, toy_genome, tmp_path):
+    """A stand-in interpreter imports ltrquest fine but reports a Kmer2LTR that
+    force-pairs credited flanks: the run must stop with exit 3, not detect for hours
+    and then keep the calls as detected."""
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    for tool in ("blastn", "makeblastdb"):
+        stub = bin_ / tool
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    py = bin_ / "python-stub"
+    py.write_text('#!/bin/sh\ncase "$2" in *IncompatibleKmer2LTR*) '
+                  'echo "ERROR: --reboundary: force-pairs credited flanks" >&2; exit 3;; esac\n'
+                  'exit 0\n')
+    py.chmod(0o755)
+    result = run("bash", str(driver), "--genome", str(toy_genome), "--reboundary",
+                 env={"PATH": f"{bin_}:/usr/bin:/bin", "LTRQUEST_PYTHON": str(py)}, cwd=tmp_path)
+    assert result.returncode == 3 and "force-pairs credited flanks" in result.stderr
 
 
 def test_it_is_not_a_detection_setting(driver):

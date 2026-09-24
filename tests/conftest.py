@@ -98,8 +98,8 @@ def k2l_api():
 
 
 @pytest.fixture(scope="session")
-def mafft() -> str:
-    path = shutil.which("mafft")
-    if path is None:
-        pytest.skip("mafft is not on PATH")
+def blastn() -> str:
+    path = shutil.which("blastn")
+    if path is None or shutil.which("makeblastdb") is None:
+        pytest.skip("blastn/makeblastdb are not on PATH")
     return path

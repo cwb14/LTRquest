@@ -11,6 +11,16 @@ obstacle between their two LTRs -- the way LTRharvest / LTR_FINDER stop:
   nested_del_left  del_left inside the internal region of a one-copy host (depth 1)
   conflict_left    del_left with an annotated neighbour overlapping the recoverable bases
 
+and, for template re-boundarying, calls off by a few bases, an unstranded call and
+one element called twice:
+
+  short3_left          the call starts 3 bp inside the true left end
+  long3_right          the call ends 3 bp into the right flank (a small over-call)
+  unstranded_del_left  del_left with strand `.`
+  split_short          a patch_right-style short call of an element that is also
+  split_part           called a second time from inside its internal region to its
+                       true right end (one element, two staggered calls)
+
 Every copy has a 5 bp TSD at its true ends except `decayed`, an intact copy whose
 TSD was broken. Tables carry LTRquest's 33 columns; FASTAs store minus-oriented
 records reverse-complemented and mask the host's nested inner with `N` (depth 0).
@@ -221,6 +231,31 @@ def build(root: Path, prefix: str = "syn_LTRs",
                            xs + 99, xe - 99))
     g.add(g.rand(SPACER))
 
+    # Placed after every earlier copy, so those keep their exact sequences.
+    a, b, internal = copy_pair()
+    e = place("short3_left", a, internal, b, "+")
+    e.start, e.r0, e.tsd = e.true_start + 3, e.r0 + 3, "."
+    g.add(g.rand(SPACER))
+
+    a, b, internal = copy_pair()
+    e = place("long3_right", a, internal, b, "+")
+    e.end, e.l1, e.tsd = e.true_end + 3, e.l1 + 3, "."
+    g.add(g.rand(SPACER))
+
+    a, b, internal = copy_pair()
+    e = place("unstranded_del_left", a[:50] + a[110:], internal, b, "+", k2p=0.03)
+    e.start, e.r0, e.tsd, e.strand = e.true_start + 50, e.r0 + 110, ".", "."
+    g.add(g.rand(SPACER))
+
+    a, b, internal = copy_pair()
+    e = place("split_short", a, internal,
+              b[:330] + _patch(rng, b[330:360], 9) + b[360:], "+", k2p=0.03)
+    e.end, e.l1, e.tsd = e.true_end - 70, e.l1 - 70, "."
+    elements.append(Element("split_part", FAMILY, "+", e.true_start, e.true_end,
+                            e.true_start + 1000, e.true_end, e.true_start + 1399,
+                            e.true_end - LTR_LEN + 1, k2p=0.03))
+    g.add(g.rand(SPACER))
+
     contig = "".join(g.parts)
     root.mkdir(parents=True, exist_ok=True)
     genome = root / "genome.fa"
@@ -301,5 +336,6 @@ def members(fx: Fixture):
                    end=e.end, l1=e.l1, r0=e.r0, strand=e.strand,
                    orientation="-" if e.strand == "-" else "+", family=e.family,
                    depth=e.depth, k2p=e.k2p, tsd=e.tsd,
+                   tsd_offset="NA" if e.tsd == "." else "0,0",
                    nest_status=e.nest_status)
             for e in fx.elements]
