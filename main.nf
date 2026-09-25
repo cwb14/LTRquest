@@ -35,6 +35,8 @@ def helpMessage() {
                               elements (default: ${params.terminate_count})
       --fp_mask_threshold     False-positive element fraction above which the run
                               is flagged (default: ${params.fp_mask_threshold})
+      --skip_tandem_filter    Keep calls cut from tandem arrays (rDNA,
+                              satellites) in the _clean_ tables
       --family_prefix         Names the shared family namespace (default: ${params.family_prefix})
       --strand_recovery       Recover strand for the LTR-RTs the annotator leaves
                               unstranded: conservative|balanced|sensitive

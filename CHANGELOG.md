@@ -21,6 +21,37 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Added
 
+- A tandem-array filter, on by default (`--no-tandem-filter` turns it off).
+  Complete assemblies include the rDNA arrays and centromeric satellites, and
+  LTRharvest and LTR_FINDER pair any two copies of a repeat unit as "LTRs": the
+  telomere-to-telomere *A. thaliana* Col-CC assembly gave 876 such calls from
+  its two 45S rDNA arrays (~10 kb units), 43% of all its elements. The `_clean_`
+  tables now drop a call, alongside the false-positive families, when its
+  LTR-pair repeat carries on past both termini: at least half of the
+  non-overlapping 15-mers in the 1 kb outside each LTR occur in the 2 kb of
+  internal sequence next to the other LTR (`ltrquest-flagfp --tandem-genome`,
+  `--tandem-min-frac`). A genuine element's flanks are unrelated target-site
+  sequence and score ~0; the containment test, rather than a fixed-offset
+  comparison, still matches rDNA units that differ in spacer-subrepeat copy
+  number. Two elements sharing a middle LTR each continue on one side only and
+  are kept; three or more head-to-tail copies count as an array. On Col-CC
+  (same detection, filter off vs on) the clean set goes from 2,012 to 1,074
+  calls: 859 of the 871 rDNA calls, 41 CEN180-satellite calls and 39 calls
+  in other tandem duplications leave; the pooled stages run in 2:13 instead of 2:33.
+  In three more plant genomes (*B. napus* A, *C. canephora*, *O. punctata*) it
+  removes 4.8%, 2.0% and 0.2% of calls. The raw
+  `depth<N>_ltr.tsv` tables keep these calls, `<prefix>_fpcheck.tandem.tsv`
+  scores every call, and they never count toward the FP fraction that
+  triggers masking. Detection is unchanged, so a genome reused from an earlier
+  run gains the filter without `--redetect`. The Nextflow pipeline runs it too:
+  `LTRQUEST_FLAGFP` now stages every sample's genome, and `--skip_tandem_filter`
+  turns it off.
+
+  Tried first and dropped: the same test as a gate on raw LTRharvest/LTR_FINDER
+  candidates, before Kmer2LTR. Their unrefined LTR bounds let ~550 unit-length
+  rDNA candidates through, and removing the rest let short spacer-subrepeat
+  candidates that dedup had suppressed surface as calls: 814 rDNA-region calls
+  survived.
 - `--reboundary` / `ltrquest-reboundary`: move the ends of LTR-RT calls that have
   no TSD at their called ends, typically calls a detector stopped short at an indel
   or a mutation-dense patch. The templates are calls with an exact TSD, pooled over
@@ -133,6 +164,11 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Fixed
 
+- Nextflow: a genome that completed a single detection round (`--max_rounds 1`,
+  or a first round below `--terminate_count`) crashed `LTRQUEST_RECONCILE`. One
+  table arrives as a Path, not a list, and iterating it walked the path's
+  components, so the reconciler was called as `--tsv round_1 x_r1_ltr.tsv`. The
+  three-round stub test never reached the case.
 - **`--reboundary` could abort on one pair of calls and move nothing.** When
   detection leaves two calls of one element, one inside the other, one call can be
   extended and the other trimmed to the same ends. Neither move conflicted with the

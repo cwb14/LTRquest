@@ -259,6 +259,12 @@ Several genomes (`--genome A.fa B.fa`) share one family vocabulary. To add one
 later, re-run in the same directory with the longer list: genomes already
 detected are reused, and families are rebuilt across all of them.
 
+Complete (telomere-to-telomere) assemblies include the rDNA arrays and
+centromeric satellites, whose repeat units an LTR caller will happily pair as
+"LTRs". LTRquest drops calls cut from a tandem array from its `_clean_`
+outputs by default; `--no-tandem-filter` keeps them. See
+[docs/outputs.md](docs/outputs.md#3-usage) for how the filter decides.
+
 ## A worked example
 
 Run the quickstart without `--max-rounds` and LTRquest iterates, masking between
@@ -375,6 +381,7 @@ ltrquest (driver)
   │
   ├── ltrquest.reconcile                  pool rounds, resolve containment → depth buckets
   ├── Kmer2LTR + ltrquest.flag_fp         cluster into families, purge false-positive families
+  │                                       and tandem-array calls (rDNA, satellites)
   ├── ltrquest.recover_strand             recover strand for unstranded elements  (opt-in)
   ├── ltrquest.annotate                   add strand + family columns
   ├── ltrquest.gff3                       pooled GFF3

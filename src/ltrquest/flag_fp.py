@@ -8,7 +8,10 @@ Stage A (always): a two-gate filter over Kmer2LTR's consensus-LTR clusters sorts
   internal structure alongside a handful of borderline and reference families.
 Stage B (whenever --domains-tsv is given): for each depth TSV, write an
   FP-cleaned copy (<name>_ltr.tsv -> <name>_clean_ltr.tsv) with FP rows removed
-  and dangling nest cross-references scrubbed in both directions.
+  and dangling nest cross-references scrubbed in both directions. With
+  --tandem-genome, calls cut from tandem arrays (rDNA, satellites, tandem
+  segmental duplications) are removed too, element by element, and scored in
+  <prefix>.tandem.tsv; they do not count toward the FP fraction.
 Stage C (only if the FP fraction exceeds --fp-mask-threshold): mmseqs
   easy-cluster the FP LTRs, then dc-megablast the representatives against
   --genome and hard-mask hits to N.
@@ -58,6 +61,7 @@ import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
+from .detect import iter_fasta as iter_genome
 from .table import Columns, as_float, as_int
 
 IGNORE_DEFAULT = frozenset({"unknown", "mixture"})
@@ -844,6 +848,115 @@ def clean_depth_tsv(in_path, out_path, fp_coords):
     return removed, scrubbed
 
 
+# -----------------------------------------------------------------------------
+# Tandem-array calls
+# -----------------------------------------------------------------------------
+# Flank window and k-mer size. 1 kb of flank rides over the copy-number
+# differences between neighbouring rDNA units (310 bp spacer subrepeats in
+# Arabidopsis), and a 15-mer occurs by chance in 2 kb of unrelated sequence
+# about once in 500,000 tries.
+TANDEM_WINDOW = 1000
+TANDEM_K = 15
+DEFAULT_TANDEM_MIN_FRAC = 0.5
+
+_DROP_ACGT = str.maketrans("", "", "ACGT")
+
+
+def _kmers_found(query, target, k):
+    """Fraction of `query`'s non-overlapping ACGT-only k-mers that occur in `target`."""
+    n = hit = 0
+    for i in range(0, len(query) - k + 1, k):
+        kmer = query[i:i + k]
+        if kmer.translate(_DROP_ACGT):
+            continue  # an N gap or an IUPAC nest mask
+        n += 1
+        hit += kmer in target
+    return hit / n if n else 0.0
+
+
+def tandem_flank_scores(seq, s5, e5, s3, e3, window=TANDEM_WINDOW, k=TANDEM_K):
+    """How strongly a call's LTR-pair repeat carries on past its termini.
+
+    s5..e5 and s3..e3 are the two LTRs, 1-based inclusive on `seq`. A genuine
+    LTR-RT's LTR homology stops at its termini: outside them is the unrelated
+    target site. A call cut from a tandem array (rDNA, a satellite, a tandem
+    segmental duplication) pairs two slices of one longer direct repeat, so the
+    sequence outside each LTR is another copy of the sequence inside the element
+    next to the other LTR:
+
+        up: the flank before the 5' LTR  vs  the internal region before the 3' LTR
+        dn: the flank after the 3' LTR   vs  the internal region after the 5' LTR
+
+    Each score is the fraction of the flank's k-mers found anywhere in 2 x
+    `window` of that internal region, not at the aligned position, so units
+    that differ in length next to the LTR still read as continuing. The target
+    is internal sequence only, which keeps a solo LTR in the flank from matching
+    the element's own LTRs. The flank is capped at the internal length: in an
+    array of short units, a longer flank would reach into the preceding unit's
+    LTR, which the internal target cannot contain.
+
+    Returns (up, dn); (0.0, 0.0) when there is no internal region to compare.
+    """
+    internal = s3 - e5 - 1
+    if internal < k:
+        return 0.0, 0.0
+    w, tw = min(window, internal), min(2 * window, internal)
+    up = _kmers_found(seq[max(0, s5 - 1 - w):s5 - 1].upper(), seq[s3 - 1 - tw:s3 - 1].upper(), k)
+    dn = _kmers_found(seq[e3:e3 + w].upper(), seq[e5:e5 + tw].upper(), k)
+    return up, dn
+
+
+def tandem_array_coords(depth_tsvs, genomes, min_frac, report_path=None):
+    """Coords ('chrom:start-end') of the calls whose LTR-pair repeat carries on
+    past BOTH termini (both `tandem_flank_scores` >= min_frac), and the number
+    of calls judged.
+
+    Both sides, because two genuine elements sharing a middle LTR
+    (LTR-int-LTR-int-LTR) each continue into the other on one side only. The
+    price is the unit at each end of an array, which continues on one side.
+    Three or more elements in head-to-tail tandem are an array by this test.
+
+    LTR bounds are read from each depth TSV by column name. Each genome is
+    streamed once, one sequence resident at a time; a call on a sequence no
+    genome holds is left alone.
+    """
+    calls = defaultdict(list)
+    for path in depth_tsvs:
+        with open(path) as fh:
+            cols = Columns.of([])
+            for line in fh:
+                if line.startswith("#"):
+                    cols = Columns.from_line(line)
+                    continue
+                f = line.rstrip("\n").split("\t")
+                m = re.match(r"^(.+):(\d+)-(\d+)(?:#|$)", f[0])
+                bounds = [as_int(cols.get(f, c))
+                          for c in ("ltr5_start", "ltr5_end", "ltr3_start", "ltr3_end")]
+                if m and None not in bounds:
+                    start = int(m.group(2))
+                    calls[m.group(1)].append((f[0], *(start + b - 1 for b in bounds)))
+
+    flagged, judged = set(), 0
+    rf = open(report_path, "w") if report_path else None
+    try:
+        if rf:
+            rf.write("#element\tup\tdn\tverdict\n")
+        for genome in genomes:
+            for chrom, seq in iter_genome(genome):
+                for eid, s5, e5, s3, e3 in calls.pop(chrom, ()):
+                    up, dn = tandem_flank_scores(seq, s5, e5, s3, e3)
+                    judged += 1
+                    tandem = min(up, dn) >= min_frac
+                    if tandem:
+                        flagged.add(coord_of(eid))
+                    if rf:
+                        rf.write(f"{eid}\t{up:.3f}\t{dn:.3f}\t{'tandem' if tandem else 'keep'}\n")
+    finally:
+        if rf:
+            rf.close()
+    return flagged, judged
+
+
 def fp_fraction(n_fp, n_total):
     """FP elements / total consensus-cluster members; 0.0 if no members."""
     return (n_fp / n_total) if n_total else 0.0
@@ -1006,6 +1119,18 @@ def parse_args(argv=None):
     ap.add_argument("--tp-pages", type=int, default=3,
                     help="clean true-positive reference pages (default 3; 0 disables)")
     ap.add_argument("--pdf-out", default=None, help="PDF path (default <prefix>.fp_structure.pdf)")
+    # --- tandem-array calls ---
+    ap.add_argument("--tandem-genome", nargs="+", default=None,
+                    help="genome FASTA(s) holding the --domains-tsv calls (plain or gzip). "
+                         "Given, calls cut from tandem arrays (rDNA, satellites, tandem segmental "
+                         "duplications) are also removed from the *_clean_ltr.tsv outputs: those "
+                         "whose LTR-pair repeat carries on past both termini. Scores go to "
+                         "<prefix>.tandem.tsv. They do not count toward the FP fraction.")
+    ap.add_argument("--tandem-min-frac", type=float, default=DEFAULT_TANDEM_MIN_FRAC,
+                    help="a call is a tandem-array unit when at least this fraction of the "
+                         "15-mers of BOTH 1 kb flanks recur inside it next to the other LTR "
+                         "(default 0.5). Genuine elements score ~0; Arabidopsis rDNA and CEN180 "
+                         "array units 0.9-1.0.")
     # --- masking stage ---
     ap.add_argument("-g", "--genome", default=None,
                     help="genome FASTA to hard-mask (only used if FP fraction > --fp-mask-threshold)")
@@ -1028,6 +1153,10 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     if not args.no_plot and not args.domains_tsv:
         sys.exit("[ERROR] --domains-tsv is required unless --no-plot is given")
+    if args.tandem_genome and not args.domains_tsv:
+        sys.exit("[ERROR] --tandem-genome needs --domains-tsv: the depth TSVs are the calls it judges")
+    if not (0.0 < args.tandem_min_frac <= 1.0):
+        sys.exit("[ERROR] --tandem-min-frac must be in (0, 1]")
     ignore = frozenset(s for s in args.ignore_clades.split(",") if s)
 
     # ---- Stage A: flag FP families ----
@@ -1105,12 +1234,21 @@ def main(argv=None) -> int:
 
     # ---- Stage B: FP-cleaned depth TSVs (always, when --domains-tsv given) ----
     fp_coords = {coord_of(m) for m in fp_members}
+    purge = fp_coords
+    if args.tandem_genome:
+        report = args.out_prefix + ".tandem.tsv"
+        tandem, judged = tandem_array_coords(args.domains_tsv, args.tandem_genome,
+                                             args.tandem_min_frac, report)
+        print(f"[INFO] tandem arrays: {len(tandem)}/{judged} calls carry their LTR repeat on "
+              f"past both ends (>= {args.tandem_min_frac:g} of flank 15-mers); scores in "
+              f"{report}", file=sys.stderr)
+        purge = fp_coords | tandem
     if args.domains_tsv:
         for in_path in args.domains_tsv:
             out_path = clean_output_path(in_path)
-            removed, scrubbed = clean_depth_tsv(in_path, out_path, fp_coords)
-            print(f"[INFO] {out_path}: removed {removed} FP rows, scrubbed {scrubbed} "
-                  f"dangling nest tokens", file=sys.stderr)
+            removed, scrubbed = clean_depth_tsv(in_path, out_path, purge)
+            print(f"[INFO] {out_path}: removed {removed} FP/tandem-array rows, scrubbed "
+                  f"{scrubbed} dangling nest tokens", file=sys.stderr)
 
     # ---- Stage C: conditional mmseqs + masking ----
     frac = fp_fraction(len(fp_members), len(member2rep))

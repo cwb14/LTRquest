@@ -58,7 +58,22 @@ Occasionally useful:
 | `--out_prefix` | Output prefix (default: `<genome>_LTRs`). With several genomes it names the shared family namespace instead — see [§5](#5-multiple-genomes-shared-family-names). |
 | `--terminate_count` | Stop iterating when a round finds fewer than this many elements (default 100). |
 | `--run-sdust` | Drop candidates made mostly of low-complexity sequence, early. Off by default. |
+| `--no-tandem-filter` | Keep calls cut from tandem arrays (rDNA, satellites) in the `_clean_` outputs — see below. |
 | `--redetect` | Detect every genome again instead of reusing ones detected earlier in this directory — see [§5](#5-multiple-genomes-shared-family-names). |
+
+**Tandem arrays.** Complete (telomere-to-telomere) assemblies include the rDNA
+arrays and centromeric satellites, and an LTR caller pairs any two copies of a
+repeat unit as "LTRs". The `_clean_` tables (section 4) drop such a call along
+with the false-positive families when its repeat carries on past **both** of
+its ends: at least half of the 15-mers in the 1 kb outside each LTR recur in the
+2 kb inside the element next to the other LTR. A genuine element's flanks are
+unrelated target-site sequence and score near 0. Two elements sharing a middle
+LTR each continue on one side only, so they are kept; three or more in
+head-to-tail tandem are treated as an array. The raw `depth<N>_ltr.tsv` tables
+keep these calls, `<prefix>_fpcheck.tandem.tsv` lists every call's two scores
+and verdict, and they never count toward the FP fraction that triggers
+masking. Detection is untouched, so a reused genome needs no `--redetect` to
+gain or lose the filter.
 
 ## 4. Primary outputs: `depth<N>_clean_ltr.{tsv,fa}`
 
@@ -239,8 +254,8 @@ families can differ slightly from a run from scratch.
 
 ## 6. GFF3 annotation
 
-Two files, pooled across all depths and built from the FP-purged
-`_clean_ltr.tsv` set (falling back to the raw set, with a warning, if the FP
+Two files, pooled across all depths and built from the FP- and
+tandem-array-purged `_clean_ltr.tsv` set (falling back to the raw set, with a warning, if the FP
 stage never ran):
 
 | Output | Contents |

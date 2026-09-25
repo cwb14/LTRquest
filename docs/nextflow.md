@@ -115,7 +115,7 @@ per genome ─┬─ ROUND_01: detect ──► mask ─┐
   ═════════════════▼══════════════ pooled across ALL genomes ═════════════════
               cluster              one Kmer2LTR pass → the shared family basis
                    │
-              flag-fp              purge false-positive families
+              flag-fp              purge false-positive families and tandem-array calls
   ═════════════════▼══════════════ back to per genome ═══════════════════════
         recoverstrand:align        recover strand for unstranded elements  (opt-in)
                    │
@@ -187,7 +187,10 @@ Everything else — the rounds, the reconciliation, the pooled family basis, the
 annotation, strand recovery, the GFF3, the plots — is the same code the CLI
 calls, invoked the same way. The CLI's `--strand-recovery` and
 `--strand-recovery-ppt` are `--strand_recovery` and `--strand_recovery_ppt`
-here, following the pipeline's own underscore convention.
+here, following the pipeline's own underscore convention, and its
+`--no-tandem-filter` is `--skip_tandem_filter`. `flag-fp` stages every sample's
+genome for the tandem-array purge, so each call is judged against its own
+flanks; its scores publish to `results/families/*_fpcheck.tandem.tsv`.
 
 ## Development
 

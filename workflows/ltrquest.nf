@@ -83,6 +83,15 @@ workflow LTRQUEST {
     // are pervasive; see docs/nextflow.md for why this pipeline reports instead.
     ch_first_genome = ch_samples.map { _meta, genome, _proteins -> genome }.first()
 
+    // The tandem-array purge judges each call against its own genome's flanks,
+    // so it needs every sample's genome, not just the first. Sorted by name so
+    // the task hash, and with it -resume, does not depend on arrival order.
+    // Off, an empty list flows in its place and stages nothing.
+    ch_tandem_genomes = params.skip_tandem_filter
+        ? Channel.value([])
+        : ch_samples.map { _meta, genome, _proteins -> genome }
+            .toSortedList { a, b -> a.name <=> b.name }
+
     LTRQUEST_FLAGFP(
         LTRQUEST_CLUSTER.out.consensus_cluster
             .join(LTRQUEST_CLUSTER.out.internal_cluster)
@@ -90,6 +99,7 @@ workflow LTRQUEST {
             .combine(ch_pooled_tsv.map { files -> [files] })
             .combine(ch_pooled_fasta.map { files -> [files] })
             .combine(ch_first_genome)
+            .combine(ch_tandem_genomes.map { files -> [files] })
     )
     ch_versions = ch_versions.mix(LTRQUEST_FLAGFP.out.versions)
 

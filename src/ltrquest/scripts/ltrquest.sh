@@ -59,6 +59,11 @@
 #     (3) runs ltrquest.flag_fp to flag FP families and purge their rows from
 #         each depth TSV -> {OUT_PREFIX}_depth{N}_clean_ltr.tsv, then writes the
 #         matching FP-purged FASTA -> {OUT_PREFIX}_depth{N}_clean_ltr.fa
+#         Unless --no-tandem-filter, the same purge drops calls cut from tandem
+#         arrays (rDNA, satellites, tandem segmental duplications): those whose
+#         LTR-pair repeat carries on past both termini, judged element by element
+#         against the genome -> {RUN}_fpcheck.tandem.tsv. They are not FP
+#         families and never count toward the FP fraction below.
 #   If the FP fraction exceeds --fp-mask-threshold, ltrquest.flag_fp hard-masks
 #   those repeats in the genome ({OUT_PREFIX}_FP_masked.fa) and the ENTIRE pipeline
 #   is automatically re-run on the masked genome. Each attempt runs fully isolated
@@ -146,6 +151,7 @@ RUN_TRF=true
 RUN_SDUST=false
 SDUST_ARGS="-w 64 -t 15"
 MAX_DUST_FRAC="0.55"
+RUN_TANDEM=true
 MUTATION_RATE="3e-8"
 KEEP_WEAK_HMM_PASS2=false
 PASS2_ALIGNER="minimap2"
@@ -233,7 +239,7 @@ Usage:
   ltrquest --genome genome.fa [genome2.fa ...] [--proteins prot.fa]
       [--terminate_count 100]
       [--max-rounds N] [--threads 20] [--out_prefix PREFIX]
-      [--run-sdust] [--fp-mask-threshold 0.10] [--mutation-rate 3e-8]
+      [--run-sdust] [--no-tandem-filter] [--fp-mask-threshold 0.10] [--mutation-rate 3e-8]
       [--detect-args "KEY=VALUE ..."] [--detect-args-from-round N "KEY=VALUE ..."]
 
 Required:
@@ -270,6 +276,10 @@ Optional:
   --max-dust-frac       Drop a candidate when this fraction or more of its
                         ACGT bases are sdust-masked (default: 0.55).
                         Raise toward 0.80 for AT-rich/fungal genomes.
+  --no-tandem-filter    Keep calls cut from tandem arrays (rDNA, satellites,
+                        tandem segmental duplications) in the _clean_ outputs.
+                        By default they are purged with the FP families: a call
+                        whose LTR-pair repeat carries on past both of its ends.
   --mutation-rate       Neutral substitution rate per site per year, forwarded to
                         ltrquest.detect and the pooled Kmer2LTR clustering pass;
                         sets the k2p_time column (default: 3e-8).
@@ -620,7 +630,7 @@ resolve_merged_tools_dir() {
 run_fp_stage() {
   local cons="$1" int="$2" cons_fa="$3"; shift 3
   local -a dtsvs=( "$@" )
-  local -a maskable=() mask_opts=()
+  local -a maskable=() mask_opts=() tandem_opts=()
   local i p frac log rc=0
 
   # A reused genome's detection is final: it shares the pooled call (its
@@ -636,6 +646,15 @@ run_fp_stage() {
     log="${RUN_PREFIX}_fpcheck.log"
   fi
 
+  # Tandem-array calls are judged against the ORIGINAL genomes, as for strand
+  # recovery: from FP attempt 2 onward the staged input is the hard-masked FASTA.
+  if [[ "$RUN_TANDEM" == true ]]; then
+    tandem_opts=( --tandem-genome )
+    for i in "${!OUT_PREFIXES[@]}"; do
+      tandem_opts+=( "${abs_genomes[$i]:-${OUT_PREFIXES[$i]}.input_genome.fa}" )
+    done
+  fi
+
   # stderr is teed to $log via an fd swap, NOT process substitution: bash does
   # not wait for >(...) to finish, so the log would still be empty when the
   # fraction is parsed out of it a moment later. A pipeline is waited on.
@@ -647,6 +666,7 @@ run_fp_stage() {
       --domains-tsv "${dtsvs[@]}" \
       -o "${RUN_PREFIX}_fpcheck" \
       "${mask_opts[@]}" \
+      "${tandem_opts[@]}" \
       --threads "$THREADS" \
       --fp-mask-threshold "$FP_MASK_THRESHOLD" \
       2>&1 1>&3 | tee "$log" >&2; } 3>&1 || rc=$?
@@ -1257,7 +1277,7 @@ run_fp_orchestrator() {
   # A genome detected by this run replaces what an earlier run left for it
   # (ltrquest.record clear). FP logs describe one pool, so an earlier run's
   # are cleared for everyone.
-  rm -f "${final_dir}/${RUN_PREFIX}_fpcheck.log"
+  rm -f "${final_dir}/${RUN_PREFIX}_fpcheck.log" "${final_dir}/${RUN_PREFIX}_fpcheck.tandem.tsv"
   for i in "${!GENOMES[@]}"; do
     p="${OUT_PREFIXES[$i]}"
     rm -f "${final_dir}/${p}_fpcheck.log"
@@ -1345,6 +1365,7 @@ while [[ $# -gt 0 ]]; do
     --run-sdust) RUN_SDUST=true; shift;;
     --sdust-args) SDUST_ARGS="${2:-}"; shift 2;;
     --max-dust-frac) MAX_DUST_FRAC="${2:-}"; shift 2;;
+    --no-tandem-filter) RUN_TANDEM=false; shift;;
     --mutation-rate) MUTATION_RATE="${2:-}"; shift 2;;
     --keep-weak-hmm-pass2-matches) KEEP_WEAK_HMM_PASS2=true; shift;;
     --pass2-aligner) PASS2_ALIGNER="${2:-}"; shift 2;;

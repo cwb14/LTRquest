@@ -9,12 +9,13 @@ process LTRQUEST_FLAGFP {
     container 'ghcr.io/cwb14/ltrquest:1.0.1'
 
     input:
-    tuple val(meta), path(consensus_cluster), path(internal_cluster), path(consensus_fasta), path(depth_tsvs), path(depth_fastas), path(genome)
+    tuple val(meta), path(consensus_cluster), path(internal_cluster), path(consensus_fasta), path(depth_tsvs), path(depth_fastas), path(genome), path(tandem_genomes, stageAs: 'genomes/g??/*')
 
     output:
     tuple val(meta), path("*_depth*_clean_ltr.tsv", arity: '1..*'), emit: tsv
     tuple val(meta), path("*_depth*_clean_ltr.fa", arity: '1..*') , emit: fasta
     tuple val(meta), path("${prefix}_fpcheck.log") , emit: log
+    tuple val(meta), path("${prefix}_fpcheck.tandem.tsv"), emit: tandem, optional: true
     path "versions.yml"                            , emit: versions
 
     when:
@@ -23,9 +24,13 @@ process LTRQUEST_FLAGFP {
     script:
     def args = task.ext.args ?: ''
     prefix   = task.ext.prefix ?: "${meta.id}"
+    // Every sample's genome, each in its own numbered directory so two samples
+    // whose FASTAs share a file name cannot collide. Empty when the filter is off.
+    def tandem = tandem_genomes ? "--tandem-genome ${tandem_genomes}" : ''
     """
     # High-abundance non-LTR repeats can seed convincing but spurious LTR-RT
-    # calls. Families whose members are mostly such repeats are purged here.
+    # calls. Families whose members are mostly such repeats are purged here,
+    # together with calls cut from tandem arrays (rDNA, satellites).
     python -m ltrquest.flag_fp \\
         --consensus-cluster ${consensus_cluster} \\
         --internal-cluster ${internal_cluster} \\
@@ -36,6 +41,7 @@ process LTRQUEST_FLAGFP {
         --masked-out ${prefix}_FP_masked.fa \\
         --threads ${task.cpus} \\
         --fp-mask-threshold ${params.fp_mask_threshold} \\
+        ${tandem} \\
         ${args} \\
         2>&1 | tee ${prefix}_fpcheck.log >&2
 
@@ -68,6 +74,7 @@ process LTRQUEST_FLAGFP {
         cp "\$fa" "\${fa%_ltr.fa}_clean_ltr.fa"
     done
     printf '[INFO] FP fraction: 0/1 = 0.0000 (threshold ${params.fp_mask_threshold})\\n' > ${prefix}_fpcheck.log
+    ${tandem_genomes ? "printf '#element\\tup\\tdn\\tverdict\\n' > ${prefix}_fpcheck.tandem.tsv" : ''}
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":

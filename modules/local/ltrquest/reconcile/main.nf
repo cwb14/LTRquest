@@ -25,8 +25,10 @@ process LTRQUEST_RECONCILE {
 
     // The two lists are round-ordered and index-aligned; the reconciler reads
     // the round index off the position, so they must be sorted identically.
-    def tsv_list = tsvs.collect  { it.toString() }.sort().join(' ')
-    def fa_list  = fastas.collect{ it.toString() }.sort().join(' ')
+    // A genome that completed one round arrives as a single Path, not a list,
+    // and collect() on a Path walks its name components ('round_1', 'x.tsv').
+    def tsv_list = (tsvs   instanceof List ? tsvs   : [tsvs]  ).collect { it.toString() }.sort().join(' ')
+    def fa_list  = (fastas instanceof List ? fastas : [fastas]).collect { it.toString() }.sort().join(' ')
     """
     ltrquest-reconcile \\
         --out-prefix ${prefix} \\

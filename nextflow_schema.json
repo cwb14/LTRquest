@@ -70,6 +70,12 @@
                     "help_text": "High-abundance non-LTR repeats can seed convincing but spurious calls. Families that are mostly such repeats are purged from the *_clean_* tables regardless; this threshold governs whether the run is additionally reported as FP-dominated. See docs/nextflow.md.",
                     "fa_icon": "fas fa-exclamation-triangle"
                 },
+                "skip_tandem_filter": {
+                    "type": "boolean",
+                    "description": "Keep calls cut from tandem arrays (rDNA, satellites) in the *_clean_* tables.",
+                    "help_text": "By default the false-positive stage also purges, call by call, every element whose LTR-pair repeat carries on past both of its ends: at least half of the 15-mers in the 1 kb outside each LTR recur in the 2 kb inside the element next to the other LTR. That is the signature of units cut from rDNA arrays, centromeric satellites and tandem segmental duplications, which complete assemblies include. Each call's scores go to results/families/<family_prefix>_fpcheck.tandem.tsv; purged calls never count toward --fp_mask_threshold.",
+                    "fa_icon": "fas fa-grip-lines"
+                },
                 "family_prefix": {
                     "type": "string",
                     "default": "merged",
