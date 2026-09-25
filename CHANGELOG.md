@@ -133,6 +133,15 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Fixed
 
+- **`--reboundary` could abort on one pair of calls and move nothing.** When
+  detection leaves two calls of one element, one inside the other, one call can be
+  extended and the other trimmed to the same ends. Neither move conflicted with the
+  other call as it stood, so both were accepted, and the rewrite refused to give two
+  elements one key: `ValueError: ... would both be written with the same key`, then
+  `re-boundarying failed; the calls are kept as detected` for every genome in the
+  run (6 of 9 allotetraploid runs, 4 genomes each). The first move in genome order
+  now wins and the other call keeps its ends (reason `duplicates_move`); a trim onto
+  the exact span of a call inside is refused (`duplicates_element`).
 - **`./ltrquest.sif --genome x.fa` did not work.** The image declared
   `ENTRYPOINT []` with only a `CMD`, and Apptainer builds a SIF's runscript from
   those two: with no ENTRYPOINT it *replaces* the command with the user's

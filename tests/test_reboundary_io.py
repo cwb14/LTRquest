@@ -481,6 +481,34 @@ def test_a_trim_that_would_leave_a_nested_element_outside_is_refused():
     assert rio.conflict(index, host, 100, 5000) is None
 
 
+def _mm(s, e, name="x"):
+    from ltrquest.ltr_model import Member
+    return Member(prefix="p", name=f"c:{s}-{e}#{name}", chrom="c", start=s, end=e,
+                  l1=s + 99, r0=e - 99, strand="+", orientation="+", family="f", depth=0,
+                  k2p=0.01, tsd=".")
+
+
+def test_a_trim_onto_the_exact_span_of_a_call_inside_is_refused():
+    """The trimmed call would take the key of the call it contains."""
+    outer, inner = _mm(1000, 5002, "o"), _mm(1000, 5000, "i")
+    index = rio.SpanIndex([outer, inner])
+    assert rio.conflict(index, outer, 1000, 5000) == "duplicates_element"
+    assert rio.conflict(index, outer, 1000, 5001) is None
+
+
+def test_two_moves_to_one_span_keep_the_first_claim_in_any_input_order():
+    """A call and a second call of it around it: one extends and one trims to the same
+    ends. Neither move conflicts with the other call as it stands, so only the moves
+    themselves show that both would take one key."""
+    outer, inner = _mm(1000, 5002, "o"), _mm(1003, 5000, "i")
+    items = [(inner, 1000, 5000), (outer, 1000, 5000)]
+    assert rio.conflict(rio.SpanIndex([outer, inner]), inner, 1000, 5000) is None
+    assert rio.conflict(rio.SpanIndex([outer, inner]), outer, 1000, 5000) is None
+    assert rio.duplicate_moves(items) == {inner.uid}
+    assert rio.duplicate_moves(items[::-1]) == {inner.uid}
+    assert rio.duplicate_moves([(inner, 1000, 5000), (outer, 1000, 5001)]) == set()
+
+
 def test_sidecar_v2_round_trips_and_legacy_extended_rows_still_map(tmp_path):
     row = dict.fromkeys(rio.SIDECAR_COLUMNS, ".")
     row.update(old_seq_id="c:150-900#LTR/Gypsy/X", new_seq_id="c:100-897#LTR/Gypsy/X",

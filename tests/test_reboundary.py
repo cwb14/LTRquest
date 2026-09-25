@@ -13,7 +13,7 @@ from ltrquest import reboundary as rb
 from ltrquest.detect import revcomp as revcomp_record
 from ltrquest.kmer2ltr import COLUMNS
 from ltrquest.reboundary_io import NEW_SUFFIX, OLD_SUFFIX, fetch_records
-from reboundary_fixtures import build
+from reboundary_fixtures import FAMILY, Element, _row, build
 
 TOOLS = os.environ.get("LTRQUEST_TOOLS_DIR", ".")
 MOVED_KINDS = ("del_left", "patch_right", "del_left_minus", "nested_del_left", "ins_left",
@@ -159,6 +159,39 @@ def test_the_second_call_of_one_element_is_merged_into_the_first(ran):
 def test_a_clash_with_a_neighbour_is_rejected(ran):
     fx, _, _, _ = ran
     assert sidecar(fx)[fx.kind("conflict_left").key]["reason"] == "overlaps_element"
+
+
+def _add_call(fx, e):
+    """Append `e` to the depth-0 clean table and FASTA, as detection would have left it."""
+    contig = "".join(fx.genome.read_text().splitlines()[1:])
+    seq = contig[e.start - 1:e.end]
+    base = fx.indir / f"{fx.prefix}_depth0_clean_ltr"
+    with open(f"{base}.tsv", "a") as fh:
+        fh.write("\t".join(_row(e)) + "\n")
+    with open(f"{base}.fa", "a") as fh:
+        fh.write(f">{e.name}\n" + "".join(seq[i:i + 60] + "\n"
+                                          for i in range(0, len(seq), 60)))
+
+
+def test_two_calls_moved_to_the_same_ends_do_not_abort_the_run(tmp_path, k2l_api, blastn):
+    """One element called twice, one call inside the other: 3 bp short on the left, and
+    2 bp long on the right. Extending the one and trimming the other gives both the
+    element's true ends, and so one key; the rewrite refused that and the whole run wrote
+    nothing. The first claim in genome order moves; the other keeps its call."""
+    fx = build(tmp_path / "syn_converge")
+    inner = fx.kind("short3_left")
+    outer = Element("dup_long2_right", FAMILY, "+", inner.true_start, inner.true_end,
+                    inner.true_start, inner.true_end + 2, inner.l1 + 2, inner.r0 - 3)
+    _add_call(fx, outer)
+    rb.run(str(fx.indir), [fx.prefix], [str(fx.genome)], rb.Settings(threads=2), TOOLS)
+    side = sidecar(fx)
+    assert side[outer.key]["decision"] == "moved", side[outer.key]
+    assert side[outer.key]["new_seq_id"].split("#")[0] == \
+        f"chrS:{inner.true_start}-{inner.true_end}"
+    assert (side[inner.key]["decision"], side[inner.key]["reason"]) == \
+        ("rejected", "duplicates_move")
+    assert table_row(fx, 0, inner.name) is not None                # it keeps its call
+    assert side[fx.kind("del_left").key]["decision"] == "moved"     # and the rest went ahead
 
 
 def test_intact_and_tsd_bearing_copies_are_left_alone(ran):

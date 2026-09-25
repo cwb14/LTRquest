@@ -48,6 +48,7 @@ from .reboundary_io import (
     Commit,
     SpanIndex,
     conflict,
+    duplicate_moves,
     fetch_records,
     forward,
     genome_order,
@@ -467,6 +468,9 @@ def run(indir: str, prefixes: Sequence[str], genomes: Sequence[str], s: Settings
                 clear.append(p)
             for u in mutual_conflicts([(p.member, p.left, p.right) for p in clear]):
                 rows[u]["reason"] = "overlaps_element"
+            for u in duplicate_moves([(p.member, p.left, p.right) for p in clear
+                                      if rows[p.member.uid]["reason"] == "."]):
+                rows[u]["reason"] = "duplicates_move"
             final = [p for p in clear if rows[p.member.uid]["reason"] == "."]
             for u, pu in list(partner_of.items()):
                 if rows[u]["reason"] != ".":

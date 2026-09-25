@@ -395,9 +395,11 @@ How the new ends are chosen:
   surviving call passes Kmer2LTR. Family labels are not compared, because a split
   call's family was clustered from its partly wrong LTR pair.
 - **Conflicts.** A move is rejected if it would take the element outside its host,
-  give it its host's exact span, make it contain or overlap another element, or
-  leave a nested element outside a trimmed call. When two moves claim the same
-  bases, the first in genome order wins.
+  give it its host's exact span or the exact span of a call inside it, make it
+  contain or overlap another element, or leave a nested element outside a trimmed
+  call. When two moves claim the same bases, or the same ends (two calls of one
+  element, one inside the other, one extended and one trimmed to the same span),
+  the first in genome order wins.
 - **Re-measurement.** Kmer2LTR re-measures each moved element on the LTR pair it was
   called with, taking the templates' outer ends as given. Each LTR's inner end moves
   only as far as real homology with the other LTR reaches, and bases with no partner
@@ -464,7 +466,8 @@ templates imply (a majority vote), else genomic left and right.
 | `gate_identity` | no placement passed the identity gates |
 | `no_support` | fewer than `--min-support` placements agree |
 | `gap_in_added` | the move would add `N` bases |
-| `host_exceeded`, `duplicates_host`, `engulfs_element`, `overlaps_element`, `nest_broken` | a conflict, as above |
+| `host_exceeded`, `duplicates_host`, `duplicates_element`, `engulfs_element`, `overlaps_element`, `nest_broken` | a conflict, as above |
+| `duplicates_move` | another call, earlier in genome order, moves to the same span; this one keeps its call |
 | `merge_partner_failed` | this call was to be merged into another whose move then failed; both keep their calls |
 | `record_missing` | the call has no FASTA record |
 | `record_mismatch` | the stored FASTA record is not the genome at the row's span |

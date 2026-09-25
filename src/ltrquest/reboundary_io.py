@@ -232,6 +232,8 @@ def conflict(index: SpanIndex, m: Member, left: int, right: int,
         if s >= m.start and e <= m.end:           # nested inside the call already
             if s < left or e > right:             # ...and a trim would leave it outside
                 return "nest_broken"
+            if s == left and e == right:          # ...or give the call its key
+                return "duplicates_element"
             continue
         for a, b in added:
             if s >= a and e <= b:
@@ -351,6 +353,24 @@ def mutual_conflicts(items: Sequence[Tuple[Member, int, int]]) -> Set[str]:
             lost.add(m.uid)
             continue
         taken[k].extend(added)
+    return lost
+
+
+def duplicate_moves(items: Sequence[Tuple[Member, int, int]]) -> Set[str]:
+    """uids moving to the span an earlier candidate (`genome_order`) moves to.
+
+    Two calls of one element, one inside the other, can reach the same ends from
+    opposite sides, one extending and the other trimming. Neither move conflicts
+    with the other call as it stands, but both would be written under one key.
+    """
+    taken: Set[Tuple[str, str, int, int]] = set()
+    lost: Set[str] = set()
+    for m, left, right in sorted(items, key=lambda t: genome_order(t[0])):
+        span = (m.prefix, m.chrom, left, right)
+        if span in taken:
+            lost.add(m.uid)
+        else:
+            taken.add(span)
     return lost
 
 
