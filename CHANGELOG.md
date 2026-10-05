@@ -164,6 +164,12 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Fixed
 
+- **FP masking crashed on a gzipped genome.** When a genome's FP fraction passed
+  `--fp-mask-threshold`, `ltrquest.flag_fp` ran `makeblastdb` on
+  `<prefix>.input_genome.fa`, a symlink to the user's genome; a `.fa.gz` input
+  failed with "Input doesn't start with a defline", hours into the run. The
+  genome is now streamed into `makeblastdb` on stdin, decompressed if need be,
+  and the masked genome is written from plain or gzip input alike.
 - Nextflow: a genome that completed a single detection round (`--max_rounds 1`,
   or a first round below `--terminate_count`) crashed `LTRQUEST_RECONCILE`. One
   table arrives as a Path, not a list, and iterating it walked the path's
