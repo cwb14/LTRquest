@@ -180,3 +180,34 @@ def test_main_warns_when_the_internal_table_carries_an_unknown_member(tmp_path, 
     err = capsys.readouterr().err
     assert "scaf9:1-9#LTR/Copia/Ale" in err
     assert "not from the same run" in err
+
+
+@pytest.mark.parametrize("name, gz", [("genome.fa", False), ("genome.fa.gz", True),
+                                      ("genome.input_genome.fa", True)])
+def test_mask_genome_reads_plain_and_gzipped_genomes(tmp_path, blastn, name, gz):
+    """The driver hands mask_genome `<prefix>.input_genome.fa`, a symlink to the
+    user's genome, which may be gzip under a .fa name. makeblastdb cannot read
+    gzip, so masking must not depend on how the genome is compressed."""
+    import gzip
+    import random
+
+    rng = random.Random(7)
+    chr1 = "".join(rng.choice("ACGT") for _ in range(3000))
+    chr2 = "".join(rng.choice("ACGT") for _ in range(1500))
+    text = f">chr1 desc kept\n{chr1}\n>chr2\n{chr2}\n"
+    genome = tmp_path / name
+    if gz:
+        with gzip.open(genome, "wt") as fh:
+            fh.write(text)
+    else:
+        genome.write_text(text)
+    query = tmp_path / "fp.fa"
+    query.write_text(f">fp1\n{chr1[1000:1400]}\n")
+    out = tmp_path / "masked.fa"
+
+    assert flag_fp.mask_genome(str(genome), str(query), str(out), threads=1) == 400
+
+    masked = dict(flag_fp.iter_fasta(str(out)))
+    assert set(masked) == {"chr1 desc kept", "chr2"}
+    assert masked["chr1 desc kept"] == chr1[:1000] + "N" * 400 + chr1[1400:]
+    assert masked["chr2"] == chr2
