@@ -62,6 +62,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 from .detect import iter_fasta as iter_genome
+from .detect import open_text_auto
 from .table import Columns, as_float, as_int
 
 IGNORE_DEFAULT = frozenset({"unknown", "mixture"})
@@ -754,9 +755,9 @@ def run(cmd, **kw):
 
 
 def iter_fasta(path):
-    """Yield (header, sequence) one record at a time."""
+    """Yield (header, sequence) one record at a time; plain or gzip input."""
     name, chunks = None, []
-    with open(path) as fh:
+    with open_text_auto(path) as fh:
         for line in fh:
             if line.startswith(">"):
                 if name is not None:
@@ -1060,6 +1061,24 @@ def run_mmseqs(fp_fasta, out_prefix, threads):
     return rep
 
 
+def make_blast_db(genome, db):
+    """makeblastdb over a plain or gzipped genome. makeblastdb cannot read gzip
+    under a .fa name (the driver's <prefix>.input_genome.fa symlink), so the
+    genome is streamed in on stdin, decompressed if need be."""
+    cmd = ["makeblastdb", "-in", "-", "-dbtype", "nucl", "-out", db,
+           "-title", os.path.basename(genome)]
+    print("  " + " ".join(cmd) + f" < {genome}", file=sys.stderr)
+    with open_text_auto(genome) as src:
+        p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
+        try:
+            shutil.copyfileobj(src, p.stdin, 1 << 20)
+            p.stdin.close()
+        except BrokenPipeError:
+            pass                  # makeblastdb quit early; its exit code says why
+    if p.wait() != 0:
+        die(f"command failed: {' '.join(cmd)} < {genome}")
+
+
 def mask_genome(genome, query, out, pident=80.0, qcov=90.0, threads=None):
     """dc-megablast the query FASTA against the genome and hard-mask hits to N.
     One chromosome in memory at a time. Returns total bp masked."""
@@ -1070,8 +1089,7 @@ def mask_genome(genome, query, out, pident=80.0, qcov=90.0, threads=None):
     tmp = tempfile.mkdtemp(prefix="mask_fp.")
     try:
         db = os.path.join(tmp, "db")
-        run(["makeblastdb", "-in", genome, "-dbtype", "nucl", "-out", db],
-            stdout=subprocess.DEVNULL)
+        make_blast_db(genome, db)
         queries = list(iter_fasta(query))
         intervals = defaultdict(list)
         with mp.Pool(threads, initializer=_init, initargs=(db, pident, qcov)) as pool:
