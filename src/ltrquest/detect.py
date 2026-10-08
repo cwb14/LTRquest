@@ -1445,7 +1445,8 @@ def load_tesorter_gff3_domains(gff3_path: str) -> Dict[str, list]:
 
     Returns:
         Dict mapping 'chrom:start-end' -> list of dicts, each with keys:
-        gene, clade, start (int, genomic), end (int, genomic), evalue, coverage.
+        gene, clade, start (int, genomic), end (int, genomic), strand, evalue,
+        coverage.
     """
     result: Dict[str, list] = {}
     p = Path(gff3_path)
@@ -1492,6 +1493,7 @@ def load_tesorter_gff3_domains(gff3_path: str) -> Dict[str, list]:
                 "clade_path": clade_path,
                 "start": gff_start,
                 "end": gff_end,
+                "strand": cols[6],
                 "evalue": attrs.get("evalue", ""),
                 "coverage": attrs.get("coverage", ""),
             }
@@ -1676,6 +1678,7 @@ def load_tebinsorter_domains_from_db(db_path: str, pipeline_py_path: str,
             "clade_path": clade_path,
             "start": nuc_start,
             "end": nuc_end,
+            "strand": sd,
             "evalue": float(evalue[i]),
             "coverage": f"{float(hmm_cov[i]):.1f}",
         })
@@ -2699,6 +2702,7 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
                        gff3_domains: Optional[Dict[str, list]] = None,
                        ltr_bounds: Optional[Dict[str, Tuple[int, int, int, int]]] = None,
                        rename_map: Optional[Dict[str, str]] = None,
+                       own_strands: Optional[Dict[str, Set[str]]] = None,
                        ) -> None:
     """
     Dedup a Kmer2LTR output TSV, keeping the lowest p_dist.
@@ -2710,6 +2714,10 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
       1. If tsd_names is provided and exactly one record has a TSD, keep the TSD record.
       2. Otherwise fall back to lowest p-distance, but print a warning for pairs where
          no TSD information is available so we can study the scale of the problem.
+
+    own_strands, when given, is filled with nest-outer key -> the strands of
+    its domain hits that lie outside every inner (empty when all of them lie
+    inside one); see `withdraw_inner_derived_strands`.
     """
     in_path = Path(kmer2ltr_tsv)
     if not in_path.exists() or in_path.stat().st_size == 0:
@@ -2844,6 +2852,16 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
         # the outer is labeled by its own identity rather than mixing
         # in the nested inner's domains.
         new_class = _reclassify_from_domains(key, inner_ranges)
+        # The strand needs the same treatment, but TEsorter2 called it in
+        # cls.tsv rather than in this row; record what the outer's own hits
+        # say and let the caller correct it there.
+        if own_strands is not None and inner_ranges and gff3_domains:
+            hits = gff3_domains.get(key, [])
+            if hits:
+                own_strands[key] = {
+                    d.get("strand") for d in hits
+                    if not any(d["start"] >= ex_s and d["end"] <= ex_e
+                               for ex_s, ex_e in inner_ranges)}
         if new_class is not None:
             parts = line.split("\t")
             if len(parts) > i_id and "#" in parts[i_id]:
@@ -3650,6 +3668,42 @@ def build_tesorter_full_length_ltr_fasta_from_cls_tsv(cls_tsv_path: str, genome_
 
     if n_written == 0:
         Path(out_fa).touch()
+
+
+def withdraw_inner_derived_strands(workdir: str,
+                                   own_strands: Dict[str, Set[str]]) -> int:
+    """Set TEsorter2's strand to '?' for each nest-outer its own hits do not support.
+
+    TEsorter2 classifies at Step 9, before Step 9c masks same-round inners, so
+    a nest-outer's hits include its inner's, and its strand -- the one strand
+    all its hits share -- can be the inner's alone. Step 9b already re-derives
+    the clade from the hits outside the inners; this does the same for the
+    strand (column 6), which the library orientation, ltrquest.annotate,
+    ltrquest.gff3 and ltrquest.recover_strand all read. A call stands only
+    when every own hit lies on it; none is ever invented.
+
+    Every *.cls.tsv in the round's work directory is rewritten in place: the
+    combined table and TEsorter2's per-database one both carry the strand,
+    and ltrquest.annotate reads both, letting a +/- in either beat a '?'.
+
+    own_strands: nest-outer key -> strands of its hits outside every inner,
+    as filled by `dedup_kmer2ltr_tsv`. Returns how many nest-outers lost one.
+    """
+    withdrawn: Set[str] = set()
+    for in_path in sorted(Path(workdir).glob("*.cls.tsv")):
+        tmp_path = in_path.parent / (in_path.name + ".strand.tmp")
+        with open(in_path) as fin, open(tmp_path, "w") as fout:
+            for line in fin:
+                cols = line.rstrip("\n").split("\t")
+                if (len(cols) >= 6 and cols[0] in own_strands
+                        and cols[5] in ("+", "-")
+                        and own_strands[cols[0]] != {cols[5]}):
+                    cols[5] = "?"
+                    line = "\t".join(cols) + "\n"
+                    withdrawn.add(cols[0])
+                fout.write(line)
+        tmp_path.replace(in_path)
+    return len(withdrawn)
 
 
 def bounded_fasta_oriented(bounded_fa: str, cls_tsv_path: str, out_fa: str,
@@ -4575,15 +4629,25 @@ def main():
               f"{n_named - len(ltr_bounds_for_dedup)} have no usable LTR "
               f"coordinates and will be treated as sharing no LTRs with "
               f"anything")
+    own_strands: Dict[str, Set[str]] = {}
     dedup_kmer2ltr_tsv(k2l_tsv, k2l_dedup_out, threshold=args.dedup_threshold,
                        tsd_names=tsd_after_trim or None, gff3_domains=gff3_dom_data,
                        ltr_bounds=ltr_bounds_for_dedup,
-                       rename_map=nest_rename_map)
+                       rename_map=nest_rename_map, own_strands=own_strands)
 
     if nest_rename_map:
         print(f"[Step9b] reclassified {len(nest_rename_map)} element(s) from TEBinSorter "
               f"domain hits (order-independent majority vote; nest-outers additionally "
               f"exclude domains inside detected inner-nested boundaries)")
+
+    # Before Step 9c orients the library by it: a same-round inner was still
+    # in its outer's sequence when TEBinSorter called the outer's strand.
+    if cls_tsv_path and own_strands:
+        n_withdrawn = withdraw_inner_derived_strands(
+            str(Path(cls_tsv_path).parent), own_strands)
+        print(f"[Step9b] withdrew the TEBinSorter strand of {n_withdrawn} of "
+              f"{len(own_strands)} nest-outer(s) whose own domain hits (outside "
+              f"their same-round inners) do not support it")
 
     _t_kmer2ltr += time.monotonic() - _t0
 

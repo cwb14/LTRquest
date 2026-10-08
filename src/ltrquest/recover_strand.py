@@ -16,6 +16,8 @@ of the cascade happened to reach the same answer.
 Signal 1, homology orientation transfer. The unstranded element, in genome-forward
 orientation, is aligned against the elements that already carry a strand, held in
 coding-sense orientation. The alignment orientation IS the query's genomic strand.
+Every element, query or reference, is read with the elements nested inside it
+masked to N, so a tenant and its host never vote on each other's strand.
 Four independent views are run:
     dc-megablast on the full-length element
     dc-megablast on the internal region between the LTRs
@@ -53,6 +55,8 @@ to transfer from, logs and returns 0, because the pipeline continues past this s
 A missing aligner is a real fault and exits non-zero, but the wrapper checks for both
 aligners while parsing its own arguments, so an opted-in run fails in its first second
 rather than after the last expensive stage.
+
+- not fixed (small): in nested elements, annotate pass-2 tier can give a tenant its own host's strand.
 """
 from __future__ import annotations
 
@@ -69,6 +73,7 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 import pyfaidx
 
 from .annotate import (
+    ELEMENT_RE,
     RECOVERY_HEADER,
     UNKNOWN,
     collect_elements,
@@ -190,6 +195,23 @@ class Element(NamedTuple):
     end: int
     ltr5_end: int       # 1-based, relative to `start`; 0 when unknown
     ltr3_start: int     # 1-based, relative to `start`; 0 when unknown
+    # Genomic spans of the elements nested inside it ('nest-outer:' partners).
+    inners: Tuple[Tuple[int, int], ...] = ()
+
+    def own_sequence(self, seq: str) -> str:
+        """`seq`, this element's genomic span, with its nested elements as N.
+
+        A tenant's bases are the same bases in its host. Left in place, an
+        alignment between the two copies one's strand onto the other, and
+        either picks up homology to the other's family, so only the element's
+        own bases are evidence of its strand.
+        """
+        for start, end in self.inners:
+            lo = max(start - self.start, 0)
+            hi = min(end - self.start + 1, len(seq))
+            if lo < hi:
+                seq = seq[:lo] + "N" * (hi - lo) + seq[hi:]
+        return seq
 
     def internal_bounds(self) -> Optional[Tuple[int, int]]:
         """0-based half-open cut of the region between the LTRs, or None.
@@ -235,10 +257,17 @@ def elements_from(loaded: Sequence[Tuple[object, Optional[List[str]], List[List[
                 continue
             chrom, _, span = key.rpartition(":")
             lo, _, hi = span.partition("-")
+            inners = []
+            for token in (cols.get(row, "nest_status") or "").split(";"):
+                role, _, partner = token.strip().partition(":")
+                m = ELEMENT_RE.match(partner)
+                if role == "nest-outer" and m:
+                    inners.append((int(m.group(2)), int(m.group(3))))
             elements[key] = Element(
                 key=key, name=name, chrom=chrom, start=int(lo), end=int(hi),
                 ltr5_end=as_int(cols.get(row, "ltr5_end"), 0) or 0,
                 ltr3_start=as_int(cols.get(row, "ltr3_start"), 0) or 0,
+                inners=tuple(inners),
             )
     if verbose:
         log(f"elements: {len(elements)} across {len(loaded)} depth table(s)")
@@ -630,6 +659,7 @@ def build_work_fastas(elements: Dict[str, Element], strand: Dict[str, str],
             if not seq:
                 n_missing += 1
                 continue
+            seq = element.own_sequence(seq)
             bounds = element.internal_bounds()
             internal = None
             if bounds is not None and bounds[1] <= len(seq):

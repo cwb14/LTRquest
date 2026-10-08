@@ -647,6 +647,42 @@ class TestBuildWorkFastas:
         assert self.read(paths["int_ref"])[keys[0]] == rc(internal)
         assert self.read(paths["int_qry"])[keys[1]] == internal
 
+    def test_a_nest_outers_tenant_is_masked_in_both_roles(self, tmp_path):
+        # The first element hosts a tenant at 201-300 (and one running off its
+        # end). Left in place, the tenant is the same bases in host and tenant,
+        # so whichever one is stranded hands its strand to the other.
+        elements, genome, body = self.setup(tmp_path)
+        keys = list(elements)
+        host = elements[keys[0]]._replace(inners=((201, 300), (451, 600)))
+        elements[keys[0]] = host
+        own = body[:100] + "N" * 100 + body[200:350] + "N" * 50
+        try:
+            ref_paths, _seqs, _r, _q = build_work_fastas(
+                elements, {keys[0]: "+"}, genome, str(tmp_path))
+            ref = self.read(ref_paths["full_ref"])[keys[0]]
+            ref_int = self.read(ref_paths["int_ref"])[keys[0]]
+            qry_paths, seqs, _r, _q = build_work_fastas(
+                elements, {keys[1]: "+"}, genome, str(tmp_path))
+        finally:
+            genome.close()
+        assert ref == own
+        assert ref_int == own[50:350]
+        assert self.read(qry_paths["full_qry"])[keys[0]] == own
+        assert seqs[keys[0]] == own
+        # Elements with nothing nested inside are read as before.
+        assert seqs[keys[2]] == body
+
+    def test_elements_from_reads_the_nest_outer_spans(self):
+        header = HEADER.split("\t")
+        rows = [["chr1:1-2000#LTR/Copia", "1", "300", "1701", "2000", "+", ".",
+                 ".", "nest-outer:chr1:501-900;nest-inner:chr1:1-9000;"
+                      "nest-outer:chr1:1001-1400"],
+                ["chr1:501-900#LTR/Gypsy", "1", "50", "351", "400", "+", ".",
+                 ".", "nest-inner:chr1:1-2000"]]
+        elements = elements_from([(None, header, rows)])
+        assert elements["chr1:1-2000"].inners == ((501, 900), (1001, 1400))
+        assert elements["chr1:501-900"].inners == ()
+
     def test_an_element_off_the_end_of_the_contig_is_skipped(self, tmp_path):
         elements, genome, _body = self.setup(tmp_path)
         elements["chrZ:1-400"] = Element(key="chrZ:1-400", name="chrZ:1-400",

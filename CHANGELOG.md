@@ -164,6 +164,32 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Fixed
 
+- **A nested host could take its strand from its tenant.** Two paths copied it:
+  - TEsorter2 classifies a round's elements (Step 9) before Step 9c masks the
+    inners found in that same round, so a host still held its tenant's
+    domains. Step 9b already rebuilt the host's clade from its own hits but
+    kept TEsorter2's strand, which is the one strand all hits share. A host
+    with no domain hits of its own therefore got its tenant's strand. Step 9b
+    now sets that strand to `?` unless the host's own hits (outside its
+    inners) all lie on it; it never invents one. Both of the round's cls
+    tables (`*.cls.tsv` and `*.rexdb.cls.tsv`) are rewritten, because
+    `ltrquest.annotate` reads both and a `+`/`-` in either beats a `?`. The
+    library orientation, `ltrquest.annotate`, `ltrquest.gff3` and
+    `ltrquest.recover_strand` all read the corrected strand.
+  - `ltrquest.recover_strand` read each element from the plain genome, so a
+    host's sequence still held its tenant, and a host and tenant aligned to
+    each other at 100% identity. Each element, as query or reference, is now
+    read with its `nest_status` inners masked to N.
+
+  On *P. annua* (5 rounds), 1,408 hosts lose a strand. The polypurine tract
+  agreed with that strand for only 20 of 45 PPT-called hosts (44%, binomial
+  p = 0.55). For the 958 hosts that keep their strand it agrees 104/109
+  (95%). In strand recovery on chromosome Pa1A (`--strand-recovery
+  sensitive --strand-recovery-ppt`), homology-recovered tenants were 497/497
+  co-oriented with their host before the fix and 180/247 after. Pairs of
+  different clades come out at 54% (35/65, tenant with a TSD), and the stage
+  now recovers 1,025 strands instead of 717. Unmasked tenants had been
+  creating conflicting alignments.
 - **FP masking crashed on a gzipped genome.** When a genome's FP fraction passed
   `--fp-mask-threshold`, `ltrquest.flag_fp` ran `makeblastdb` on
   `<prefix>.input_genome.fa`, a symlink to the user's genome; a `.fa.gz` input

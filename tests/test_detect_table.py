@@ -422,6 +422,100 @@ def test_dedup_of_an_absent_table_writes_the_canonical_header(tmp_path):
     assert out.read_text() == detect.DETECT_HEADER
 
 
+# A same-round nest: the inner sits wholly inside the outer, so TEsorter2 saw
+# the inner's domains as part of the outer's sequence at Step 9.
+OUTER, INNER = "chr1:1000-9000", "chr1:3000-6000"
+
+
+def _nest_k2l(tmp_path):
+    lines = ["#" + "\t".join(kmer2ltr.COLUMNS)]
+    for locus in (OUTER, INNER):
+        s, e = (int(x) for x in locus.split(":")[1].split("-"))
+        v = dict.fromkeys(kmer2ltr.COLUMNS, "NA")
+        v.update(seq_id=f"{locus}#LTR/Copia/Ale", seq_len=str(e - s + 1),
+                 status="pass", aln_len="300", p_dist="0.02")
+        lines.append("\t".join(v[c] for c in kmer2ltr.COLUMNS))
+    p = tmp_path / "k.tsv"
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+def _hit(start, end, strand):
+    return {"gene": "RT", "clade": "Ale", "clade_path": "Class_I/LTR/Ty1_copia/Ale",
+            "start": start, "end": end, "strand": strand,
+            "evalue": 1e-30, "coverage": "90.0"}
+
+
+def test_dedup_reports_the_strands_of_a_nest_outers_own_hits(tmp_path):
+    doms = {OUTER: [_hit(1500, 1800, "-"), _hit(3500, 3800, "+")],
+            INNER: [_hit(3500, 3800, "+")]}
+    own = {}
+    detect.dedup_kmer2ltr_tsv(str(_nest_k2l(tmp_path)), str(tmp_path / "d.tsv"),
+                              threshold=0.8, gff3_domains=doms, own_strands=own)
+    # Only the outer is a nest-outer, and the hit inside the inner is not its own.
+    assert own == {OUTER: {"-"}}
+
+
+def test_dedup_reports_no_own_strand_when_every_hit_is_the_inners(tmp_path):
+    doms = {OUTER: [_hit(3500, 3800, "+"), _hit(4000, 4300, "+")],
+            INNER: [_hit(3500, 3800, "+"), _hit(4000, 4300, "+")]}
+    own = {}
+    detect.dedup_kmer2ltr_tsv(str(_nest_k2l(tmp_path)), str(tmp_path / "d.tsv"),
+                              threshold=0.8, gff3_domains=doms, own_strands=own)
+    assert own == {OUTER: set()}
+
+
+CLS_HEADER = "#TE\tOrder\tSuperfamily\tClade\tComplete\tStrand\tDomains\n"
+
+
+def _cls(path, rows):
+    path.write_text(CLS_HEADER + "".join(f"{k}\tLTR\tCopia\tAle\tyes\t{s}\tRT|Ale\n"
+                                         for k, s in rows))
+
+
+def test_withdraw_inner_derived_strands_keeps_only_own_hit_support(tmp_path):
+    rows = [("chr1:1000-9000", "+"),     # every hit was the inner's
+            ("chr1:20000-29000", "-"),   # own hits agree
+            ("chr1:40000-49000", "+"),   # own hits lie on the other strand
+            ("chr1:60000-69000", "?"),   # never upgraded to a strand
+            ("chr1:3000-6000", "+")]     # not a nest-outer: untouched
+    cls = tmp_path / "x_r1.bounded.fa.cls.tsv"
+    _cls(cls, rows)
+    own = {"chr1:1000-9000": set(), "chr1:20000-29000": {"-"},
+           "chr1:40000-49000": {"-"}, "chr1:60000-69000": {"+"}}
+
+    assert detect.withdraw_inner_derived_strands(str(tmp_path), own) == 2
+
+    lines = cls.read_text().splitlines(keepends=True)
+    assert lines[0] == CLS_HEADER
+    got = [line.rstrip("\n").split("\t") for line in lines[1:]]
+    assert [(c[0], c[5]) for c in got] == [
+        ("chr1:1000-9000", "?"), ("chr1:20000-29000", "-"),
+        ("chr1:40000-49000", "?"), ("chr1:60000-69000", "?"),
+        ("chr1:3000-6000", "+")]
+    assert all(c[1:5] == ["LTR", "Copia", "Ale", "yes"] and c[6] == "RT|Ale"
+               for c in got)
+
+
+def test_withdrawn_strand_is_what_annotate_reads(tmp_path):
+    """ltrquest.annotate reads every *.cls.tsv of a round and lets a +/- in any
+    of them beat a '?', so TEsorter2's per-database table has to lose the
+    strand too, or the combined table's '?' is simply outvoted."""
+    from ltrquest.annotate import load_tesorter_strands
+
+    work = tmp_path / "x_r1.work"
+    work.mkdir()
+    rows = [(OUTER, "+"), (INNER, "+")]
+    _cls(work / "x_r1.bounded.fa.cls.tsv", rows)
+    _cls(work / "x_r1.bounded.fa.rexdb.cls.tsv", rows)
+
+    detect.withdraw_inner_derived_strands(str(work), {OUTER: set()})
+
+    strands = load_tesorter_strands("x", str(tmp_path))
+    assert strands[OUTER] not in ("+", "-")
+    assert strands[INNER] == "+"
+
+
 def test_assert_bounded_names_the_columns_a_truncated_row_lacks(tmp_path):
     hdr = "#" + "\t".join(kmer2ltr.COLUMNS) + "\n"
     p = tmp_path / "t.tsv"
