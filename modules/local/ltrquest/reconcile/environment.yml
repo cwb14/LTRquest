@@ -4,3 +4,7 @@ channels:
   - bioconda
 dependencies:
   - python=3.11
+  # rebuilding hosts a tenant split (ltrquest.rejoin) aligns and reads the genome
+  - pyfaidx
+  # `parasail` on Bioconda is the C library; `import parasail` needs this one.
+  - parasail-python

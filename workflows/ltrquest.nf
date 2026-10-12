@@ -54,10 +54,15 @@ workflow LTRQUEST {
         .groupTuple()
         .map { meta, per_round ->
             def ordered = per_round.sort { a, b -> a[0] <=> b[0] }
-            [ meta,
+            [ meta.id,
+              meta,
               ordered.collect { it[1] },
               ordered.collect { it[2] } ]
         }
+        // The genome too: a host a tenant in one of its LTRs split into two
+        // calls is rebuilt from the bases beyond that tenant.
+        .join(ch_samples.map { meta, genome, _proteins -> [ meta.id, genome ] })
+        .map { _id, meta, tsvs, fastas, genome -> [ meta, tsvs, fastas, genome ] }
 
     LTRQUEST_RECONCILE(ch_reconcile_in)
     ch_versions = ch_versions.mix(LTRQUEST_RECONCILE.out.versions)
@@ -116,9 +121,13 @@ workflow LTRQUEST {
         .map { f -> [ f.name.replaceFirst(/_depth\d+_clean_ltr\.(tsv|fa)$/, ''), f ] }
         .groupTuple()
 
+    // The rejoin map rides with the raw tables, so every stage that stages them
+    // (annotate, recover-strand) finds it beside them by name.
     ch_raw_by_id = LTRQUEST_RECONCILE.out.tsv.map { meta, files -> [ meta.id, files ] }
         .join(LTRQUEST_RECONCILE.out.fasta.map { meta, files -> [ meta.id, files ] })
-        .map { id, tsvs, fastas -> [ id, tsvs + fastas ] }
+        .join(LTRQUEST_RECONCILE.out.rejoined.map { meta, file -> [ meta.id, file ] })
+        .map { id, tsvs, fastas, rejoined -> [ id, tsvs + fastas + [ rejoined ] ] }
+    ch_rejoined_by_id = LTRQUEST_RECONCILE.out.rejoined.map { meta, file -> [ meta.id, file ] }
 
     ch_work_by_id = LTRQUEST_DETECT_ROUNDS.out.results
         .map { meta, _round, _tsv, _fasta, workdir -> [ meta.id, workdir ] }
@@ -242,9 +251,15 @@ workflow LTRQUEST {
             [ meta, workdirs, genome, cluster ]
         })
 
+    // The GFF3 stage reads the annotated tables, which do not carry the rejoin
+    // map, so it is added back: strand_source must name the same tier the
+    // annotator used.
     LTRQUEST_GFF3(
         ch_annotated.map { meta, tables, _fastas, workdirs, genome, cluster ->
-            [ meta, tables, workdirs, genome, cluster ]
+            [ meta.id, meta, tables, workdirs, genome, cluster ]
+        }.join(ch_rejoined_by_id).map { _id, meta, tables, workdirs, genome, cluster, rejoined ->
+            [ meta, (tables instanceof List ? tables : [ tables ]) + [ rejoined ],
+              workdirs, genome, cluster ]
         }.join(ch_recovery).join(ch_rbmap)
     )
     ch_versions = ch_versions.mix(LTRQUEST_GFF3.out.versions)

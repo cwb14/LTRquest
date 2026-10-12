@@ -482,9 +482,13 @@ def parse_alignment_file(path, subtract_nested=True):
 
             ltr5_end = as_int(cols.get(parts, "ltr5_end"))
             ltr3_start = as_int(cols.get(parts, "ltr3_start"))
-            internal_len = (max(0, ltr3_start - ltr5_end - 1 - nested_bp)
-                            if ltr5_end is not None and ltr3_start is not None
-                            else None)
+            internal_len = None
+            if ltr5_end is not None and ltr3_start is not None:
+                # only what is nested in the internal region: a tenant can sit in an LTR
+                nested_int = (nested_span_bp(parts[index], chrom, start + ltr5_end,
+                                             start + ltr3_start - 1)
+                              if subtract_nested and 0 <= index < len(parts) else 0)
+                internal_len = max(0, ltr3_start - ltr5_end - 1 - nested_int)
 
             k2p = as_float(cols.get(parts, "k2p"))
 

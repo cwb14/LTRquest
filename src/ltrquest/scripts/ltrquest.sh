@@ -1075,7 +1075,10 @@ detection_settings() {
             --setting "detect_args=${directives}"
             --setting "fp_mask_threshold=${FP_MASK_THRESHOLD}"
             --setting "strand_recovery=${STRAND_RECOVERY}"
-            --setting "strand_recovery_ppt=${STRAND_RECOVERY_PPT}" )
+            --setting "strand_recovery_ppt=${STRAND_RECOVERY_PPT}"
+            # reconcile rebuilds hosts a tenant in one LTR split; a genome
+            # reconciled before that cannot share a pool with one after it
+            --setting "rejoin=1" )
   if [[ "$RUN_SDUST" == true ]]; then
     _ds_out+=( --setting "sdust_args=${SDUST_ARGS}"
                --setting "max_dust_frac=${MAX_DUST_FRAC}" )
@@ -1849,7 +1852,9 @@ if (( ${#completed_round_prefixes[@]} > 0 )); then
   "${RECONCILE[@]}" \
     --out-prefix "$OUT_PREFIX" \
     --tsv "${recon_tsv_args[@]}" \
-    --fa  "${recon_fa_args[@]}"
+    --fa  "${recon_fa_args[@]}" \
+    --genome "$orig_genome" \
+    --tools-dir "$TOOLS_DIR"
   set +x
 fi
 

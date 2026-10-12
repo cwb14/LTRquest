@@ -199,6 +199,45 @@ awk '/^>/{if(s)print s; s=""; print; next}{gsub(/[^ACGTacgt]/,""); s=s $0}END{if
 
 `depth0` records contain no masked nest-ins, so this is only needed for depth ≥ 1.
 
+### 4.3 Hosts rebuilt around a tenant in one LTR: `<prefix>_rejoined.tsv`
+
+An element that inserts into another element's LTR splits it: `[1..p] TENANT
+[p+1..L]`. LTRharvest and LTR_FINDER pair the two near-side fragments, so on
+their own they report the host cut short at the tenant, with no TSD, and the
+tenant as a free element beside it. When two calls abut (within 20 bp),
+`ltrquest.reconcile` asks whether the bases beyond one continue the other's own
+LTR from the junction on: identity ≥ 0.70, E ≤ 1e-5, the alignment starting at
+both junctions. Where one side and only one does, the host is rebuilt to the end
+of that continuation, and the tenant becomes its `nest-inner`. Such a host's row
+differs from others in four ways:
+
+- the LTR interval holding the tenant (`ltr5_start..ltr5_end` or
+  `ltr3_start..ltr3_end`) spans it, and the record masks it like any other inner;
+- `ltr5_len` / `ltr3_len` count LTR bases only, not the tenant inside;
+- `tsd`, `tsd_offset`, `tsd_input` and `motif` are read at the rebuilt ends;
+- the divergence columns (`aln_len` … `k2p_time`) are Kmer2LTR's measurement on
+  the fragment pair it was called with: the same LTR pair, fewer sites.
+
+A pair is left as called when both sides continue, when the continuation would
+run through another call, when an element would be in two rejoins, or when a
+rebuilt LTR would be longer than 7 kb, the longest LTR the callers report. Past
+that length the "continuation" is the next unit of a tandem array. Such a host
+is never a re-boundarying target. The sidecar has one row per rebuilt host, and
+the strand stages use it to carry the call made on the detected fragment to the
+new key:
+
+| Column | Meaning |
+|---|---|
+| `old_key` | `chrom:start-end` as detected |
+| `new_key` | `chrom:start-end` as rebuilt |
+| `tenant` | the element inside the split LTR |
+| `ltr` | which LTR holds it, in genome orientation: `left` or `right` |
+| `remainder_bp` | bases of the split LTR found beyond the tenant |
+| `identity`, `evalue` | of that continuation |
+| `tsd` | at the rebuilt ends (`.` none, `NA` not searchable) |
+
+Reconciling without `--genome` rebuilds nothing and writes the header alone.
+
 ## 5. Multiple genomes: shared family names
 
 Pass several genomes to give closely-related species **one family vocabulary**,

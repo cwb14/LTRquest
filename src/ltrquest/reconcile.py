@@ -13,19 +13,25 @@ Outputs {out_prefix}_depth{N}_ltr.tsv and {out_prefix}_depth{N}_ltr.fa
 for every observed depth N (shadows the raw per-round files, which are
 left untouched).
 
+Before containment is resolved, a host that a tenant in one of its LTRs split
+into a truncated call and a free-looking neighbour is rebuilt around that tenant
+(ltrquest.rejoin, needs --genome); {out_prefix}_rejoined.tsv lists each one.
+
 Usage:
   python -m ltrquest.reconcile \
       --out-prefix mafft_update \
       --tsv mafft_update_r1_ltr.tsv mafft_update_r2_ltr.tsv ... \
-      --fa  mafft_update_r1_ltr.fa  mafft_update_r2_ltr.fa  ...
+      --fa  mafft_update_r1_ltr.fa  mafft_update_r2_ltr.fa  ... \
+      --genome genome.fa --tools-dir tools
 """
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .detect import (
     _is_contained,
@@ -34,6 +40,7 @@ from .detect import (
     iter_fasta,
     ltr_bounds_from_table,
 )
+from .annotate import REJOIN_SIDECAR_SUFFIX, write_rejoin_sidecar
 from .table import Columns, as_float, as_int, parse_header
 
 COORD_RE = re.compile(r"^([^:]+):(\d+)-(\d+)")
@@ -126,11 +133,17 @@ def parse_tsv(path: str, round_idx: int) -> Tuple[Optional[str], List[dict]]:
 
 
 def build_all_in(survivors: List[dict],
-                 ltr_bounds: Dict[str, Tuple[int, int, int, int]]
+                 ltr_bounds: Dict[str, Tuple[int, int, int, int]],
+                 tenant_in_ltr: Optional[Dict[str, Tuple[int, int]]] = None
                  ) -> Dict[str, List[str]]:
     """For each survivor, list all survivors strictly contained by it
     (distinct LTRs required). Returns dict key -> list of descendant keys.
+
+    `tenant_in_ltr` maps a host rebuilt around a tenant in one of its LTRs to that
+    tenant's span: the tenant and whatever it holds sit inside the host's LTR
+    interval without sharing that LTR, so they are nested all the same.
     """
+    tenant_in_ltr = tenant_in_ltr or {}
     all_in: Dict[str, List[str]] = defaultdict(list)
     by_chr: Dict[str, List[dict]] = defaultdict(list)
     for e in survivors:
@@ -151,7 +164,9 @@ def build_all_in(survivors: List[dict],
                     continue  # partial overlap, not containment
                 if _is_contained((y["s"], y["e"]), (x["s"], x["e"])) != "a_in_b":
                     continue
-                if _ltrs_shared(x["key"], y["key"], ltr_bounds):
+                span = tenant_in_ltr.get(x["key"])
+                in_tenant = span is not None and span[0] <= y["s"] and y["e"] <= span[1]
+                if not in_tenant and _ltrs_shared(x["key"], y["key"], ltr_bounds):
                     continue
                 all_in[x["key"]].append(y["key"])
     return all_in
@@ -355,7 +370,7 @@ def cross_round_dedup(pool: List[dict],
     return survivors, n_merged
 
 
-def main() -> None:
+def main(argv: Optional[Sequence[str]] = None) -> None:
     ap = argparse.ArgumentParser(
         description="Reconcile nested LTR-RT calls across rounds into "
                     "depth-bucketed libraries."
@@ -366,7 +381,14 @@ def main() -> None:
                     help="Per-round _ltr.fa files matching --tsv.")
     ap.add_argument("--out-prefix", required=True,
                     help="Output prefix for _depth{N}_ltr.{tsv,fa} files.")
-    args = ap.parse_args()
+    ap.add_argument("--genome", default=None,
+                    help="The genome the rounds were run on (.fa or .fa.gz). Needed to "
+                         "rebuild a host a tenant in one of its LTRs split; without it "
+                         "such pairs stay two adjacent calls.")
+    ap.add_argument("--tools-dir", default="./tools",
+                    help="Where a Kmer2LTR checkout lives if it is not installed "
+                         "(its TSD rule is read at rebuilt ends). Default: ./tools")
+    args = ap.parse_args(argv)
 
     if len(args.tsv) != len(args.fa):
         ap.error("--tsv and --fa must have the same number of entries")
@@ -419,8 +441,36 @@ def main() -> None:
     else:
         print("[reconcile] no cross-round shared-LTR merges", file=sys.stderr)
 
+    # Load FASTA records keyed by full header (col1 == "chrom:s-e#class"); a
+    # rebuilt host's record is built from its stored one in step 3b.
+    fa_seqs: Dict[str, str] = {}
+    for fa in args.fa:
+        for h, seq in iter_fasta(fa):
+            if h not in fa_seqs or len(seq) > len(fa_seqs[h]):
+                fa_seqs[h] = seq
+
+    # 3b. Rebuild hosts that a tenant in one of their LTRs split in two.
+    # Always written, a header alone when nothing was rebuilt, so the strand
+    # loaders never read one left by an earlier run.
+    rejoins = []
+    sidecar_rows: List[List[str]] = []
+    if args.genome and table_cols is not None:
+        # Imported here: it aligns (parasail, pyfaidx), and reconciling without
+        # --genome needs nothing beyond the standard library.
+        from . import kmer2ltr, rejoin
+        rejoins = rejoin.run(survivors, ltr_bounds, fa_seqs, table_cols, args.genome,
+                             kmer2ltr.genome_module(args.tools_dir),
+                             os.path.dirname(os.path.abspath(args.out_prefix)),
+                             lambda msg: print(f"[reconcile] {msg}", file=sys.stderr))
+        sidecar_rows = rejoin.sidecar_rows(rejoins, table_cols)
+    elif survivors:
+        print("[reconcile] WARNING: no --genome; a host split by a tenant in one of "
+              "its LTRs stays two adjacent calls", file=sys.stderr)
+    write_rejoin_sidecar(args.out_prefix + REJOIN_SIDECAR_SUFFIX, sidecar_rows)
+
     # 4. Containment graph
-    all_in = build_all_in(survivors, ltr_bounds)
+    tenant_in_ltr = {rj.key: (rj.tenant["s"], rj.tenant["e"]) for rj in rejoins}
+    all_in = build_all_in(survivors, ltr_bounds, tenant_in_ltr)
     children = build_direct_children(all_in)
 
     # 5. Inward-chain depth
@@ -438,14 +488,7 @@ def main() -> None:
         e["line_out"] = "\t".join(new_cols)
         buckets[d].append(e)
 
-    # 7. Load FASTA records keyed by full header (col1 == "chrom:s-e#class")
-    fa_seqs: Dict[str, str] = {}
-    for fa in args.fa:
-        for h, seq in iter_fasta(fa):
-            if h not in fa_seqs or len(seq) > len(fa_seqs[h]):
-                fa_seqs[h] = seq
-
-    # 8. Write outputs
+    # 7. Write outputs
     out_prefix = args.out_prefix
     any_written = False
     n_repainted = 0

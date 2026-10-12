@@ -369,12 +369,19 @@ def obstacle(m: Member, prop: Proposal, g: Genomes) -> Tuple[str, str]:
     return left, right
 
 
-def tsd_at(api, g: Genomes, m: Member, left: int, right: int, shift: int = 0) -> str:
-    """Kmer2LTR's TSD call for an element spanning left..right; `shift` displaces
-    the right flank."""
+def tsd_call(api, g: Genomes, m: Member, left: int, right: int,
+             shift: int = 0) -> Tuple[str, str]:
+    """Kmer2LTR's (tsd, tsd_offset) for an element spanning left..right, as its own
+    columns read them; `shift` displaces the right flank."""
     a, a0 = g.fetch(m.prefix, m.chrom, left - 10, left + 9)
     b, _ = g.fetch(m.prefix, m.chrom, right - 9 + shift, right + 10 + shift)
     if a0 != left - 10 or len(a) != 20 or len(b) != 20:
-        return "NA"
+        return "NA", "NA"
     hit = api.find_tsd(a + b, 10, 30, api.TSD_K, api.TSD_SHIFTS)
-    return hit[0] if hit else "."
+    return (hit[0], f"{hit[1]},{hit[2]}") if hit else (".", "NA")
+
+
+def tsd_at(api, g: Genomes, m: Member, left: int, right: int, shift: int = 0) -> str:
+    """Kmer2LTR's TSD call for an element spanning left..right; `shift` displaces
+    the right flank."""
+    return tsd_call(api, g, m, left, right, shift)[0]

@@ -164,6 +164,61 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Fixed
 
+- **An element inserted into another element's LTR came out as two adjacent free
+  elements.** The insertion splits the host's LTR into `[1..p] TENANT [p+1..L]`.
+  LTRharvest and LTR_FINDER pair the two near-side fragments, so the host was
+  called cut short at the tenant, with no TSD, and the tenant as a free element
+  beside it. The full host was beyond them: its LTR alignment is broken, and with
+  the tenant inside it is usually longer than their maximum LTR distance. Masking
+  between rounds could not help, since host and tenant are mostly found in the
+  same round. `ltrquest.reconcile` now rebuilds such hosts before it resolves
+  containment (`ltrquest.rejoin`). For two calls that abut within 20 bp, it asks
+  whether the bases beyond one continue the other's own LTR from the junction on:
+  identity ≥ 0.70, E ≤ 1e-5, starting at both junctions. Where one side and only
+  one does, the host is extended to the end of that continuation and the tenant
+  becomes its `nest-inner`. Such a host's record masks the tenant inside its LTR;
+  `ltr5_len`/`ltr3_len` count LTR bases only; and `motif` and the TSD columns are
+  read at the new ends. Its divergence columns stay Kmer2LTR's measurement of the
+  fragment pair it was called with: the same LTR pair, fewer sites. No rejoin is
+  made where both sides continue, where the continuation would run through
+  another call, where an element would be in two, or where a rebuilt LTR would be
+  longer than the callers' 7 kb maximum. Past that length the "continuation" is
+  the next unit of a tandem array, not an LTR. `<prefix>_rejoined.tsv` maps
+  each old key to its new one; the strand loaders read it, so a rebuilt host
+  keeps the TEsorter2 and pass-2 calls made on its fragment. Reconcile takes
+  `--genome` and `--tools-dir` (Kmer2LTR's TSD rule); without `--genome` it
+  rebuilds nothing and says so.
+
+  On six *Poa* assemblies, with detection unchanged:
+  - 692–1,631 hosts are rebuilt per genome, 10–12% of all nests.
+  - The rebuilt ends carry a TSD in 32–40% of hosts, against 1.0–1.3% with the
+    right end shifted 500 bp and 7–10% at the old, truncated ends.
+  - Tenant excised, the rebuilt LTRs align end to end: identity 0.97–0.99,
+    ≥ 90% coverage in 99.5% of hosts.
+  - LTR length relative to the family median goes from 0.64–0.75 as called to
+    1.03–1.05 rebuilt.
+  - The step takes 45 s to 3 min per genome.
+
+  On six PrinTE-simulated genomes (known truth, ≥ 90% reciprocal overlap):
+  - intact-element recall goes from 0.92–0.94 to 0.94–0.97, and precision from
+    0.89–0.91 to 0.91–0.93;
+  - hosts with a tenant in an LTR are recovered in 61–67% of cases instead of
+    15–21%; hosts with internal tenants only are unchanged (0.90–0.91);
+  - 88–92% of rebuilt hosts are exactly the true host with that tenant in its
+    LTR. At most 2 per genome replace a call that was already correct.
+
+  On telomere-to-telomere *A. thaliana* Col-CC (2,172 calls, two 45S rDNA
+  arrays): 6 hosts are rebuilt, none in either rDNA array. The LTR-length limit
+  refuses 2 centromeric "hosts" whose continuation ran 7–8 kb into the array.
+
+  Related changes:
+  - Re-boundarying no longer targets a call whose LTR holds a nested element, as
+    template selection already did.
+  - `plot_summary`'s internal length subtracts only what is nested in the
+    internal region.
+  - Genomes detected before this change record no `rejoin` setting. A run that
+    would pool them with new ones refuses them; re-detect them with
+    `--redetect`.
 - **A nested host could take its strand from its tenant.** Two paths copied it:
   - TEsorter2 classifies a round's elements (Step 9) before Step 9c masks the
     inners found in that same round, so a host still held its tenant's

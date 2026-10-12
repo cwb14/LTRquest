@@ -69,6 +69,15 @@ STRAND_TIERS = ("tesorter", "domain_order", "pass2", "homology", "ppt")
 RECOVERY_SIDECAR_SUFFIX = "_strand_recovery.tsv"
 RECOVERY_HEADER = ("locus", "strand", "source", "evidence")
 
+# The sidecar ltrquest.reconcile writes for every host it rebuilt around a tenant
+# in one of its LTRs (ltrquest.rejoin). The rebuilt host has a new key, while the
+# TEsorter and pass-2 tables in the round work dirs know it by the key it was
+# detected with; the loaders below read this map to carry those calls across.
+# Reconcile rewrites it on every run, so it is read by its exact name.
+REJOIN_SIDECAR_SUFFIX = "_rejoined.tsv"
+REJOIN_HEADER = ("old_key", "new_key", "tenant", "ltr", "remainder_bp", "identity",
+                 "evalue", "tsd")
+
 # Clade label for members whose name carries no '#Order/Superfamily/Clade'
 # suffix. Matches the token TEsorter itself writes for an unresolved clade, so
 # family compositions stay in one vocabulary.
@@ -252,6 +261,29 @@ def parse_domains_field(field: str) -> List[Tuple[str, int, int]]:
     return out
 
 
+def write_rejoin_sidecar(path: str, rows: Sequence[Sequence[str]]) -> None:
+    """The sidecar, one REJOIN_HEADER row per rebuilt host; a header alone without."""
+    with open(path, "w") as fh:
+        fh.write("#" + "\t".join(REJOIN_HEADER) + "\n")
+        for row in rows:
+            fh.write("\t".join(row) + "\n")
+
+
+def load_rejoin_map(prefix: str, indir: str = ".") -> Dict[str, str]:
+    """Detection-time key -> rebuilt key, from reconcile's sidecar; {} without one."""
+    path = os.path.join(indir, prefix + REJOIN_SIDECAR_SUFFIX)
+    out: Dict[str, str] = {}
+    if not os.path.isfile(path):
+        return out
+    with open(path) as fh:
+        for line in fh:
+            cols = line.rstrip("\n").split("\t")
+            if line.startswith("#") or len(cols) < 2:
+                continue
+            out[cols[0]] = cols[1]
+    return out
+
+
 # -----------------------------
 # Strand: tier 1 (TEsorter2)
 # -----------------------------
@@ -294,6 +326,11 @@ def load_tesorter_strands(prefix: str, indir: str = ".",
     if n_conflict:
         warn(f"{n_conflict} element(s) had conflicting strands across rounds; "
              f"kept the last one seen")
+    # A rebuilt host keeps the call made on its detected fragment, which did not
+    # hold the tenant. Copied, not moved: the old key still names a pass-2 target.
+    for old, new in load_rejoin_map(prefix, indir).items():
+        if old in strands:
+            strands.setdefault(new, strands[old])
     if verbose:
         resolved = sum(1 for v in strands.values() if v in FLIP)
         log(f"tesorter: {resolved}/{len(strands)} stranded from "
@@ -393,6 +430,14 @@ def load_pass2_links(prefix: str, indir: str = ".", verbose: bool = False,
                 if score > best_score.get(pair, -1):
                     best_score[pair] = score
                     orientation[pair] = cols[4]
+
+    # A rebuilt host inherits its detected fragment's link (see load_tesorter_strands).
+    for old, new in load_rejoin_map(prefix, indir).items():
+        if old in target_of:
+            target_of.setdefault(new, target_of[old])
+            pair = (old, target_of[old])
+            if pair in orientation:
+                orientation.setdefault((new, pair[1]), orientation[pair])
 
     if target_of and not orientation and warn_missing:
         warn("pass-2 links found but no usable pass2.paf (expected with "

@@ -213,6 +213,27 @@ class Api(NamedTuple):
     TSD_SHIFTS: tuple
 
 
+def genome_module(tools_dir):
+    """Kmer2LTR's `genome` module (its TSD rule), an installed package first, else a
+    checkout in tools_dir.
+
+    It needs only the standard library, so unlike `api` it asks nothing of the
+    Kmer2LTR found beyond being importable, and it never clones: every stage that
+    calls this runs after detection, which has already put Kmer2LTR in place.
+    """
+    try:
+        return importlib.import_module("kmer2ltr.genome")
+    except ImportError as err:
+        src_dir = Path(tools_dir) / "Kmer2LTR" / "src"
+        if not _importable(src_dir):
+            raise RuntimeError(
+                f"Kmer2LTR is not importable and {src_dir} holds no checkout. Install "
+                f"it (pip install kmer2ltr) or point --tools-dir at a Kmer2LTR clone.") from err
+        sys.path.insert(0, str(src_dir))
+        sys.modules.pop("kmer2ltr", None)
+        return importlib.import_module("kmer2ltr.genome")
+
+
 class IncompatibleKmer2LTR(RuntimeError):
     """The Kmer2LTR found cannot do what re-boundarying needs of it."""
 

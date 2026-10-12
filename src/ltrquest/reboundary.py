@@ -60,6 +60,7 @@ from .reboundary_io import (
     merge_partner,
     mutual_conflicts,
     nested_index,
+    record_matches,
     rewrite,
     sanitize,
     sidecar_text,
@@ -218,16 +219,6 @@ def _unpaired(cigar: str) -> Tuple[int, int]:
     lead = int(ops[0][0]) if ops and ops[0][1] == "I" else 0
     tail = int(ops[-1][0]) if ops and ops[-1][1] == "D" else 0
     return lead, tail
-
-
-def record_matches(fwd: str, genomic: str) -> bool:
-    """Whether a stored record, turned to the forward frame, is the genome at its called
-    span wherever it is not masked (a depth letter stands for a nested element). Case
-    is ignored: detection keeps a soft-masked genome's lowercase."""
-    if fwd == genomic:
-        return True
-    return len(fwd) == len(genomic) and all(
-        a == b for a, b in zip(fwd.upper(), genomic.upper()) if a in "ACGT")
 
 
 def arbitrate(args) -> Verdict:

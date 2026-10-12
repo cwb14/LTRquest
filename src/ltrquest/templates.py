@@ -45,6 +45,13 @@ def _nested_spans(m: Member) -> List[Tuple[str, int, int]]:
     return out
 
 
+def ltr_holds_nest(m: Member) -> bool:
+    """Whether an element the table says is nested in `m` reaches into one of its LTRs."""
+    ltrs = ((m.start, m.l1), (m.r0, m.end))
+    return any(c == m.chrom and a <= hi and b >= lo
+               for c, a, b in _nested_spans(m) for lo, hi in ltrs)
+
+
 def ltr_seqs(m: Member, g: Genomes) -> Tuple[str, str]:
     """(genomic-left LTR, genomic-right LTR), forward frame, as called."""
     return (g.fetch(m.prefix, m.chrom, m.start, m.l1)[0],
@@ -62,9 +69,7 @@ def trusted(members: Iterable[Member], g: Genomes) -> List[Member]:
     for m in members:
         if not _found(m.tsd) or m.tsd_offset != "0,0":
             continue
-        ltrs = ((m.start, m.l1), (m.r0, m.end))
-        if any(c == m.chrom and a <= hi and b >= lo
-               for c, a, b in _nested_spans(m) for lo, hi in ltrs):
+        if ltr_holds_nest(m):
             continue
         left, right = ltr_seqs(m, g)
         if "N" in left or "N" in right:
@@ -101,8 +106,13 @@ def cap_per_family(templates: Sequence[Member], cap: int) -> List[Member]:
 
 
 def targets(members: Iterable[Member]) -> List[Member]:
-    """Calls with no TSD at their called ends: the ones re-boundarying may move."""
-    return [m for m in members if not _found(m.tsd)]
+    """Calls with no TSD at their called ends: the ones re-boundarying may move.
+
+    Not a call whose LTR holds a nested element (a host reconcile rebuilt around a
+    tenant in its LTR): its LTR sequence carries the other TE into the search, and a
+    re-measure of that LTR would be of the tenant, not the pair.
+    """
+    return [m for m in members if not _found(m.tsd) and not ltr_holds_nest(m)]
 
 
 def models_for(t: Member, rel: str, g: Genomes) -> Tuple[str, str]:

@@ -9,11 +9,14 @@ process LTRQUEST_RECONCILE {
     container 'ghcr.io/cwb14/ltrquest:1.0.1'
 
     input:
-    tuple val(meta), path(tsvs, stageAs: 'round_*/*'), path(fastas, stageAs: 'round_*/*')
+    tuple val(meta), path(tsvs, stageAs: 'round_*/*'), path(fastas, stageAs: 'round_*/*'), path(genome)
 
     output:
     tuple val(meta), path("${prefix}_depth*_ltr.tsv", arity: '1..*'), emit: tsv
     tuple val(meta), path("${prefix}_depth*_ltr.fa", arity: '1..*') , emit: fasta
+    // Always written (a header alone when no host was rebuilt): the strand
+    // loaders of the annotate, recover-strand and GFF3 stages read it by name.
+    tuple val(meta), path("${prefix}_rejoined.tsv")                 , emit: rejoined
     path "versions.yml"                              , emit: versions
 
     when:
@@ -34,6 +37,8 @@ process LTRQUEST_RECONCILE {
         --out-prefix ${prefix} \\
         --tsv ${tsv_list} \\
         --fa ${fa_list} \\
+        --genome ${genome} \\
+        --tools-dir \${LTRQUEST_TOOLS_DIR:-/opt/ltrquest/tools} \\
         ${args}
 
     cat <<-END_VERSIONS > versions.yml
@@ -51,6 +56,7 @@ process LTRQUEST_RECONCILE {
     # gets, would otherwise read straight past.
     printf 'chr1:1000-6000#LTR/Gypsy/Tekay\\t5001\\tpass\\t1\\t500\\t4502\\t5001\\t500\\t500\\t0\\t0\\t500\\t500\\t8\\t4\\t0\\t0.9760\\t0.0240\\t0.0244\\t0.0070\\t900.0\\t12.5\\t500=\\ttg...ca\\t406667\\t+\\tTGCAA\\t0,0\\tTGCAA\\tGAG|Tekay@1600-2200;RT|Tekay@2500-3400\\t.\\n' >> ${prefix}_depth0_ltr.tsv
     printf '>chr1:1000-6000#LTR/Gypsy/Tekay\\nACGT\\n' > ${prefix}_depth0_ltr.fa
+    printf '#old_key\\tnew_key\\ttenant\\tltr\\tremainder_bp\\tidentity\\tevalue\\ttsd\\n' > ${prefix}_rejoined.tsv
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":

@@ -128,6 +128,16 @@ def forward(record: str, orientation: str) -> str:
     return record if orientation != "-" else revcomp_record(record)
 
 
+def record_matches(fwd: str, genomic: str) -> bool:
+    """Whether a stored record, turned to the forward frame, is the genome at its called
+    span wherever it is not masked (a depth letter stands for a nested element). Case
+    is ignored: detection keeps a soft-masked genome's lowercase."""
+    if fwd == genomic:
+        return True
+    return len(fwd) == len(genomic) and all(
+        a == b for a, b in zip(fwd.upper(), genomic.upper()) if a in "ACGT")
+
+
 def stored(fwd: str, orientation: str) -> str:
     return fwd if orientation != "-" else revcomp_record(fwd)
 

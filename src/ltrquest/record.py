@@ -40,7 +40,8 @@ SUFFIX = ".detect.json"
 _CHUNK = 1 << 20
 
 # Names detection writes for a genome, after its '<prefix>_'.
-_OUTPUTS = r"r\d+(_ltr\.(tsv|fa)|\.work)|depth\d+_ltr\.(tsv|fa)|strand_recovery\.tsv"
+_OUTPUTS = (r"r\d+(_ltr\.(tsv|fa)|\.work)|depth\d+_ltr\.(tsv|fa)|rejoined\.tsv"
+            r"|strand_recovery\.tsv")
 _CLEAN = r"depth\d+_clean_ltr\.(tsv|fa)"
 
 
@@ -64,8 +65,9 @@ def detection_outputs(indir: str, prefix: str) -> List[str]:
     """What detection leaves for the pooled stages to read, and nothing they rewrite.
 
     The per-round tables and FASTAs, the round work directories (TEsorter2 calls,
-    pass-2 alignments, the miniprot GFF), the reconciled depth tables, and the
-    strand-recovery sidecar when there is one. The _clean_ tables, GFF3s, logs
+    pass-2 alignments, the miniprot GFF), the reconciled depth tables with the
+    map of the hosts reconcile rebuilt, and the strand-recovery sidecar when
+    there is one. The _clean_ tables, GFF3s, logs
     and plots are regenerated from these on every run.
     """
     return _named(indir, prefix, _OUTPUTS)

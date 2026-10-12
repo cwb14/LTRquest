@@ -76,6 +76,16 @@ def test_targets_are_exactly_the_calls_without_a_tsd(fx, mem):
                             *TRUNCATED])
 
 
+def test_a_call_whose_ltr_holds_a_nested_element_is_not_a_target():
+    # a host rebuilt around a tenant in its right LTR: its LTR sequence carries
+    # the tenant, so neither a BLAST query nor a re-measure of it means anything
+    in_ltr = _m(start=1000, l1=1400, r0=3000, end=9000, tsd=".",
+                nest_status="nest-outer:chrT:3250-8590")
+    in_internal = _m(start=10000, l1=10400, r0=13000, end=13400, tsd=".",
+                     nest_status="nest-outer:chrT:11000-12000")
+    assert tp.targets([in_ltr, in_internal]) == [in_internal]
+
+
 def test_a_high_copy_family_is_capped_to_its_youngest_plus_a_seeded_draw():
     fam = [_m(start=100 * i, end=100 * i + 50, family="big", k2p=i / 1000) for i in range(1, 31)]
     small = [_m(start=5000 + 100 * i, end=5050 + 100 * i, family="small") for i in range(3)]
