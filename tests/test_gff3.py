@@ -293,6 +293,7 @@ class TestBuildElementBlocksColumnLookups:
         assert "tsd_offset=0,0" in attrs
         assert ("nest_status=nest-outer:chr1:200-300,"
                 "nest-inner:chr1:50-900") in attrs
+        assert "confidence=medium" in attrs       # a TSD at its ends, but no TG..CA motif
 
 
 class TestEscapeReporting:

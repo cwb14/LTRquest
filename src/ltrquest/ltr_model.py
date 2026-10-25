@@ -11,6 +11,9 @@ which is how the depth tables store them even for minus-strand elements.
 
 from __future__ import annotations
 
+import gzip
+import os
+import shutil
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -83,29 +86,64 @@ class Member:
         return self.tsd not in ("", ".", "NA")
 
 
-class Genomes:
-    """Random access to each genome by prefix. Nothing is ever read whole."""
+def is_gzip(path: str) -> bool:
+    """Sniff the magic bytes: the driver stages every genome as '.fa', compressed or not."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(2) == b"\x1f\x8b"
+    except OSError:
+        return False
 
-    def __init__(self, paths: Dict[str, str]):
+
+class Genomes:
+    """Random access to each genome by prefix. Nothing is ever read whole.
+
+    pyfaidx seeks only in plain or BGZF FASTA, and the driver accepts any gzip. Given a
+    `workdir`, `index` expands each gzipped genome into it once and `paths` names the
+    copy from then on, so workers built from `paths` open the copy; `discard_copies`
+    removes them. Without a `workdir`, a gzipped genome is refused at `index`.
+    """
+
+    def __init__(self, paths: Dict[str, str], workdir: Optional[str] = None):
         self.paths = dict(paths)
+        self.workdir = workdir
         self._open: Dict[str, pyfaidx.Fasta] = {}
 
     def __getstate__(self):
-        return {"paths": self.paths}
+        return {"paths": self.paths, "workdir": self.workdir}
 
     def __setstate__(self, state):
         self.paths = state["paths"]
+        self.workdir = state.get("workdir")
         self._open = {}
 
     def index(self) -> None:
-        """Build any missing or stale .fai now, in this one process.
+        """Expand any gzipped genome, then build any missing or stale .fai now, in this
+        one process.
 
         Call before a pool starts. Workers open genomes lazily and all at once,
         and pyfaidx locks per process: left to them, every worker rebuilds the
         same .fai, and some read it while another has it truncated.
         """
-        for path in self.paths.values():
-            pyfaidx.Fasta(path).close()
+        for prefix, path in list(self.paths.items()):
+            if is_gzip(path):
+                if self.workdir is None:
+                    raise ValueError(f"{path} is gzipped; random access needs it expanded "
+                                     f"into a work directory, and none was given")
+                os.makedirs(self.workdir, exist_ok=True)
+                plain = os.path.join(self.workdir, f"{prefix}.fa")
+                with gzip.open(path, "rb") as fin, open(plain, "wb") as fout:
+                    shutil.copyfileobj(fin, fout, 1 << 20)
+                self.paths[prefix] = plain
+            pyfaidx.Fasta(self.paths[prefix]).close()
+
+    def discard_copies(self) -> None:
+        """Close every handle and remove the expanded copies `index` made."""
+        for fa in self._open.values():
+            fa.close()
+        self._open = {}
+        if self.workdir is not None:
+            shutil.rmtree(self.workdir, ignore_errors=True)
 
     def _fasta(self, prefix: str) -> pyfaidx.Fasta:
         fa = self._open.get(prefix)

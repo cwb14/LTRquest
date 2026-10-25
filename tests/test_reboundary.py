@@ -225,6 +225,8 @@ def test_rewritten_rows_come_from_kmer2ltr_and_keep_the_annotation(ran):
     assert row["flank5_len"] == row["flank3_len"] == "0" and row["status"] == "pass"
     assert row["orientation"] == "+" and row["strand"] == "+" and row["family"] == e.family
     assert row["tsd"] not in (".", "NA") and row["cigar"] not in (".", "")
+    # moved onto its true ends, TG..CA with their TSD: the stale `medium` is recomputed
+    assert (row["tsd_offset"], row["motif"], row["confidence"]) == ("0,0", "tg...ca", "high")
 
 
 def test_a_minus_record_is_stored_reverse_complemented(ran):
@@ -373,6 +375,22 @@ def test_a_second_run_moves_nothing_and_the_cli_works(tmp_path, k2l_api, blastn)
     assert sum(r["decision"] == "moved" for r in sidecar(fx).values()) == len(MOVED_KINDS)
     counts = rb.run(str(fx.indir), [fx.prefix], [str(fx.genome)], rb.Settings(threads=2), TOOLS)
     assert counts.get("moved", 0) == 0 and counts.get("merged", 0) == 0
+
+
+def test_a_plain_gzip_genome_is_re_boundaried_like_the_plain_one(tmp_path, k2l_api, blastn):
+    # pyfaidx seeks only in BGZF: a plain `gzip`ped genome, which the driver accepts and
+    # hands to this stage unchanged, once failed here and the run fell back to the calls
+    # as detected. It is expanded into the run directory for the stage and removed after.
+    import gzip
+    fx = build(tmp_path / "syn_gz")
+    gz = fx.genome.parent / (fx.genome.name + ".gz")
+    with open(fx.genome, "rb") as fin, gzip.open(gz, "wb") as fout:
+        shutil.copyfileobj(fin, fout)
+    os.remove(fx.genome)
+    counts = rb.run(str(fx.indir), [fx.prefix], [str(gz)], rb.Settings(threads=2), TOOLS)
+    assert counts.get("moved", 0) == len(MOVED_KINDS)
+    assert not os.path.exists(f"{gz}.fai")
+    assert [p for p in os.listdir(fx.indir) if "genome" in p] == [gz.name]
 
 
 def test_a_prefix_with_no_clean_tables_is_skipped_not_fatal(tmp_path, k2l_api, blastn):

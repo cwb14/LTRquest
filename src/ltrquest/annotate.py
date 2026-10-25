@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Add `strand` and `family` columns to the depth-bucketed LTR-RT tables written by
-ltrquest.reconcile (and FP-purged by ltrquest.flag_fp).
+"""Add `strand`, `family` and `confidence` columns to the depth-bucketed LTR-RT tables
+written by ltrquest.reconcile (and FP-purged by ltrquest.flag_fp).
 
 Both {prefix}_depth{N}_ltr.tsv and {prefix}_depth{N}_clean_ltr.tsv are rewritten
-in place, gaining two columns immediately before `domains`:
+in place, gaining three columns immediately before `domains`:
 
-    ... tsd | tsd_offset | tsd_input | strand | family | domains | nest_status
+    ... tsd | tsd_offset | tsd_input | strand | family | confidence | domains | nest_status
 
 `nest_status` being last is a hard invariant elsewhere -- ltrquest.reconcile
-writes it last and refuses to run against a table that doesn't -- so `strand`
-and `family` go before `domains` rather than at the end, keeping it last.
+writes it last and refuses to run against a table that doesn't -- so the three
+go before `domains` rather than at the end, keeping it last.
+
+`confidence` counts the hallmarks of an insertion at the element's reported ends
+(ltrquest.ends.confidence): `high` for TG..CA termini with an exact TSD, `medium`
+for one of the two, `low` for neither.
 
 Strand is resolved by a cascade, most authoritative first:
 
@@ -35,7 +39,7 @@ Usage:
 
 Missing inputs degrade rather than abort: with no .work directories every element
 gets strand '.', with no cluster table every element gets family '.'. A non-zero
-exit means a real fault. Re-running is safe -- existing strand/family columns are
+exit means a real fault. Re-running is safe -- existing strand/family/confidence columns are
 replaced, not duplicated.
 """
 from __future__ import annotations
@@ -50,11 +54,14 @@ import tempfile
 from collections import defaultdict
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
+from .ends import confidence
 from .table import Columns
 
 # Columns this script manages, and the column they are inserted before.
 STRAND_COL = "strand"
 FAMILY_COL = "family"
+CONFIDENCE_COL = "confidence"
+ANNOTATION_COLS = (STRAND_COL, FAMILY_COL, CONFIDENCE_COL)
 DOMAINS_COL = "domains"
 
 UNKNOWN = "."
@@ -714,7 +721,7 @@ def load_families(prefix: str, indir: str = ".", verbose: bool = False,
 # Table rewriting
 # -----------------------------
 def annotation_insert_index(names: Sequence[str]) -> int:
-    """Where `strand`/`family` go: right before `domains`.
+    """Where `strand`/`family`/`confidence` go: right before `domains`.
 
     Falls back to the end of the row when `domains` is absent, so a header
     that has been stripped down to something minimal still gets an index
@@ -725,19 +732,19 @@ def annotation_insert_index(names: Sequence[str]) -> int:
     if DOMAINS_COL in names:
         return names.index(DOMAINS_COL)
     warn(f"no {DOMAINS_COL!r} column in the table header; appending "
-         f"{STRAND_COL} and {FAMILY_COL} at the end of each row instead")
+         f"{', '.join(ANNOTATION_COLS)} at the end of each row instead")
     return len(names)
 
 
 def strip_annotation_columns(header: Optional[List[str]], rows: List[List[str]]
                              ) -> Tuple[Optional[List[str]], List[List[str]]]:
-    """Remove previously-written strand/family columns so a rerun replaces them.
+    """Remove previously-written annotation columns so a rerun replaces them.
 
     Indices are converted to offsets from the end of the row before deletion, so
     rows that are shorter than the header still lose the right fields.
     """
     names = header_names(header)
-    targets = [names.index(c) for c in (STRAND_COL, FAMILY_COL) if c in names]
+    targets = [names.index(c) for c in ANNOTATION_COLS if c in names]
     if not header or not targets:
         return header, rows
 
@@ -773,7 +780,7 @@ def lookup_family(name: str, key: Optional[str],
 
 
 def load_unannotated(path: str) -> Tuple[Optional[List[str]], List[List[str]]]:
-    """Read a depth table with any previously-written strand/family removed.
+    """Read a depth table with any previously-written annotation columns removed.
 
     Every consumer of a table's field offsets must go through this, so that a
     rerun sees the same layout as a first run. Reading the raw file instead
@@ -790,15 +797,17 @@ def write_annotated_table(table: DepthTable,
                           family_by_name: Dict[str, Family],
                           family_by_coord: Dict[str, Family],
                           verbose: bool = False) -> Tuple[int, int]:
-    """Insert strand and family into already-stripped rows and rewrite the file.
+    """Insert strand, family and confidence into already-stripped rows and rewrite
+    the file.
 
     Returns (rows written, rows whose element name was unparseable).
     """
     names = header_names(header)
     insert_at = annotation_insert_index(names) if names else None
+    cols = Columns.of(names)
 
     if header is not None:
-        header = header[:insert_at] + [STRAND_COL, FAMILY_COL] + header[insert_at:]
+        header = header[:insert_at] + list(ANNOTATION_COLS) + header[insert_at:]
 
     skipped = 0
     for row in rows:
@@ -810,11 +819,13 @@ def write_annotated_table(table: DepthTable,
         values = [
             strand.get(key, UNKNOWN) if key else UNKNOWN,
             family.family_id if family else UNKNOWN,
+            confidence(cols.get(row, "tsd"), cols.get(row, "tsd_offset"),
+                       cols.get(row, "motif")) if names else UNKNOWN,
         ]
         # No header at all leaves no schema to locate `domains` in; fall back
         # to the historical trailing pair (domains, nest_status) so nest_status
         # -- a hard invariant elsewhere -- stays last even on this path. A row
-        # shorter than the header (malformed input) still gets both columns
+        # shorter than the header (malformed input) still gets the columns
         # inserted at its own end rather than mis-inserted mid-row.
         at = max(0, len(row) - 2) if insert_at is None else min(insert_at, len(row))
         row[at:at] = values
@@ -889,7 +900,7 @@ def annotate(prefix: str, indir: str = ".", verbose: bool = False,
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Add strand and family columns to the depth-bucketed "
+        description="Add strand, family and confidence columns to the depth-bucketed "
                     "LTR-RT tables produced by ltrquest.")
     parser.add_argument("--prefix", required=True,
                         help="Wrapper output prefix, e.g. Athal_tair10_chr2_LTRs")

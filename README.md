@@ -310,6 +310,12 @@ inside it — `nest-outer` on the host points at its tenant, `nest-inner` on the
 tenant points back. In the `depth1` FASTA the host record carries that insertion
 hard-masked as `N`, so the host's own sequence stays contiguous.
 
+Each element also carries a `confidence`: `high` when its reported ends are
+TG…CA with an exact target-site duplication, the two hallmarks every insertion
+is born with, `medium` with one of them, `low` with neither. A young element
+keeps both, so a young `low` call is very likely wrong; for a high-precision
+set, keep `high`.
+
 Full column and GFF3 reference: **[docs/outputs.md](docs/outputs.md)**.
 Every flag: `ltrquest --help`.
 

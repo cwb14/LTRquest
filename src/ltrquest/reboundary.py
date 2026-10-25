@@ -37,6 +37,7 @@ from dataclasses import dataclass, field, replace
 from multiprocessing import Pool
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from . import ends
 from . import kmer2ltr as k2l
 from . import templates as tp
 from .kmer2ltr import COLUMNS
@@ -75,6 +76,7 @@ from .reconcile import IUPAC_DEPTH_SEQ
 # ends -- the templates chose them -- so it is a constant, not a knob.
 CREDIT_BITS = 1e6
 EXIT_INCOMPATIBLE_KMER2LTR = 3
+GENOME_COPIES_SUFFIX = "_reboundary.genomes"
 _I = {c: i for i, c in enumerate(COLUMNS)}
 _CIGAR = re.compile(r"(\d+)([=XID])")
 
@@ -251,6 +253,11 @@ def arbitrate(args) -> Verdict:
     if res.status != "pass":
         return Verdict(m.uid, "kmer2ltr_not_pass", None, res.status, "NA", "NA")
     row = _API.format_row(res).split("\t")
+    # Kmer2LTR looks for 5-6 bp TSDs, shifted ends included; on canonical new ends the
+    # TSD is read there, any length, as detection reads it.
+    canon = ends.tsd_between(lambda lo, hi: _G.fetch(m.prefix, m.chrom, lo, hi), p.left, p.right)
+    if canon:
+        row[_I["tsd"]], row[_I["tsd_offset"]] = canon, "0,0"
     tsd, k2p = row[_I["tsd"]], row[_I["k2p"]]
     if res.flank5_len or res.flank3_len:       # cannot happen with credit + known spans
         return Verdict(m.uid, "kmer2ltr_moved_ends", None, res.status, tsd, k2p)
@@ -365,7 +372,6 @@ def _dump(path: str, props: Dict[str, Proposal], rows: Dict[str, Dict[str, str]]
 def run(indir: str, prefixes: Sequence[str], genomes: Sequence[str], s: Settings,
         tools_dir: str, dump: Optional[str] = None, verbose: bool = False) -> Dict[str, int]:
     t0 = time.time()
-    vlog = log if verbose else (lambda msg: None)
     check_prefixes(prefixes)
     check_indir(indir)
     if len(prefixes) != len(genomes):
@@ -384,11 +390,24 @@ def run(indir: str, prefixes: Sequence[str], genomes: Sequence[str], s: Settings
         raise SystemExit(f"reboundary: no _clean_ depth tables for any prefix in {indir}")
     prefixes, genomes = [p for p, _ in kept], [g for _, g in kept]
     tables = {p: tables_by_prefix[p] for p in prefixes}
+    # A gzipped genome is expanded here for the stage and removed after it, however
+    # the stage ends.
+    g = Genomes(dict(zip(prefixes, genomes)),
+                workdir=os.path.join(indir, prefixes[0] + GENOME_COPIES_SUFFIX))
+    try:
+        g.index()          # once, here: workers left to it race to build one .fai
+        return _rebound(indir, prefixes, tables, g, s, tools_dir, blastn, dump, verbose, t0)
+    finally:
+        g.discard_copies()
+
+
+def _rebound(indir: str, prefixes: Sequence[str], tables, g: Genomes, s: Settings,
+             tools_dir: str, blastn: str, dump: Optional[str], verbose: bool,
+             t0: float) -> Dict[str, int]:
+    vlog = log if verbose else (lambda msg: None)
     members = [m for p in prefixes for m in members_from(p, tables[p])]
     by_uid = {m.uid: m for m in members}
-    paths = dict(zip(prefixes, genomes))
-    g = Genomes(paths)
-    g.index()              # once, here: workers left to it race to build one .fai
+    paths = g.paths        # the expanded copies, where a genome was gzipped
     trusted = tp.trusted(members, g)
     templates = tp.cap_per_family(trusted, s.max_templates_per_family)
     targets = tp.targets(members)

@@ -22,7 +22,7 @@ one element called twice:
                        true right end (one element, two staggered calls)
 
 Every copy has a 5 bp TSD at its true ends except `decayed`, an intact copy whose
-TSD was broken. Tables carry LTRquest's 33 columns; FASTAs store minus-oriented
+TSD was broken. Tables carry LTRquest's 34 columns; FASTAs store minus-oriented
 records reverse-complemented and mask the host's nested inner with `N` (depth 0).
 """
 
@@ -39,7 +39,7 @@ from ltrquest.kmer2ltr import COLUMNS
 CHROM = "chrS"
 FAMILY = "syn_fam00001"
 LTR_LEN, INT_LEN, SPACER = 400, 2000, 1500
-TAIL = ["strand", "family", "domains", "nest_status"]
+TAIL = ["strand", "family", "confidence", "domains", "nest_status"]
 _COMP = str.maketrans("ACGT", "TGCA")
 
 
@@ -322,6 +322,7 @@ def _row(e: Element) -> List[str]:
         "tsd_input": e.tsd,
         "strand": e.strand,
         "family": e.family,
+        "confidence": "high" if e.tsd != "." else "medium",
         "domains": ".",
         "nest_status": e.nest_status,
     }

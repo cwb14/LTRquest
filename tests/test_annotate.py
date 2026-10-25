@@ -12,7 +12,9 @@ from ltrquest.annotate import (
     clade_composition,
     clade_of,
     element_key,
+    header_names,
     infer_strand_from_domains,
+    load_unannotated,
     parse_domains_field,
     read_table,
     superfamily_of,
@@ -200,7 +202,7 @@ class TestTableRoundTrip:
 
 
 class TestWriteAnnotatedTable:
-    def test_headerless_rows_get_strand_and_family_before_the_trailing_pair(self, tmp_path):
+    def test_headerless_rows_get_the_annotation_before_the_trailing_pair(self, tmp_path):
         # No header means no schema to find `domains` in, but nest_status must
         # still end up last -- the same invariant the with-header path keeps.
         path = tmp_path / "depth0_ltr.tsv"
@@ -219,12 +221,12 @@ class TestWriteAnnotatedTable:
         header, written_rows = read_table(str(path))
         assert header is None
         assert written_rows == [
-            ["chr1:1-100#LTR/Copia/Ale", "+", "fam00001", "RT|Ale@10-20", "."]
+            ["chr1:1-100#LTR/Copia/Ale", "+", "fam00001", ".", "RT|Ale@10-20", "."]
         ]
 
 
-def test_strand_and_family_land_before_domains():
-    from ltrquest.annotate import FAMILY_COL, STRAND_COL, annotation_insert_index
+def test_the_annotation_lands_before_domains():
+    from ltrquest.annotate import ANNOTATION_COLS, annotation_insert_index
     from ltrquest.detect import DETECT_COLUMNS, ELEMENT_COLUMNS
 
     i = annotation_insert_index(DETECT_COLUMNS)
@@ -232,7 +234,7 @@ def test_strand_and_family_land_before_domains():
     assert DETECT_COLUMNS[i - 1] == "tsd_input"
 
     widened = list(DETECT_COLUMNS)
-    widened[i:i] = [STRAND_COL, FAMILY_COL]
+    widened[i:i] = list(ANNOTATION_COLS)
     assert widened == ELEMENT_COLUMNS
 
 
@@ -240,3 +242,26 @@ def test_annotation_insert_index_falls_back_to_the_end():
     from ltrquest.annotate import annotation_insert_index
 
     assert annotation_insert_index(["name", "tsd"]) == 2
+
+
+def test_confidence_counts_the_hallmarks_at_each_rows_ends(tmp_path):
+    from ltrquest.detect import DETECT_COLUMNS
+
+    def row(locus, tsd, off, motif):
+        v = dict.fromkeys(DETECT_COLUMNS, ".")
+        v.update(seq_id=locus, tsd=tsd, tsd_offset=off, motif=motif)
+        return [v[c] for c in DETECT_COLUMNS]
+
+    path = tmp_path / "depth0_clean_ltr.tsv"
+    path.write_text("")
+    rows = [row("c:1-900", "AATGC", "0,0", "tg...ca"), row("c:2000-2900", "AATGC", "1,0", "tg...ca"),
+            row("c:4000-4900", ".", "NA", "ga...ct")]
+    write_annotated_table(DepthTable(str(path), 0, "clean"), ["#" + DETECT_COLUMNS[0]]
+                          + DETECT_COLUMNS[1:], rows, {}, {}, {})
+    header, written = read_table(str(path))
+    i = header_names(header).index("confidence")
+    assert [r[i] for r in written] == ["high", "medium", "low"]
+    # A rerun replaces the column rather than adding a second one.
+    again_header, again_rows = load_unannotated(str(path))
+    assert "confidence" not in header_names(again_header)
+    assert len(again_rows[0]) == len(DETECT_COLUMNS)

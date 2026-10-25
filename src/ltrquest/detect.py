@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple, TypeVar
 
 from . import kmer2ltr as k2l
-from .table import Columns, as_float, as_int, is_missing
+from .table import Columns, as_int, is_missing
 
 # Kmer2LTR's table is the element table: detection appends what it learns on
 # top of it rather than restating any of it, and `ltrquest.annotate` inserts
@@ -44,7 +44,7 @@ from .table import Columns, as_float, as_int, is_missing
 # schemas are stated together so the insertion point stays visible.
 DETECT_COLUMNS = k2l.COLUMNS + ["domains", "nest_status"]
 DETECT_HEADER = "#" + "\t".join(DETECT_COLUMNS) + "\n"
-ELEMENT_COLUMNS = k2l.COLUMNS + ["strand", "family", "domains", "nest_status"]
+ELEMENT_COLUMNS = k2l.COLUMNS + ["strand", "family", "confidence", "domains", "nest_status"]
 ELEMENT_HEADER = "#" + "\t".join(ELEMENT_COLUMNS) + "\n"
 
 T = TypeVar("T")
@@ -2317,6 +2317,17 @@ def _parse_interval_from_kmer2ltr_col1(col1: str) -> Optional[Tuple[str, int, in
     return chrom, start, end
 
 
+def passes_length_gates(ltr5: int, ltr3: int, aln: int, ltrrt_len: int,
+                        min_ltr_len: int = 100, min_aln_len: int = 90,
+                        min_len_ratio: float = 0.65, min_ltrrt_len: int = 300) -> bool:
+    """Detection's size floors on one bounded pair; `ltrrt_len` is end - start."""
+    hi = max(ltr5, ltr3, aln)
+    if hi <= 0:
+        return False
+    return (min(ltr5, ltr3) >= min_ltr_len and aln >= min_aln_len
+            and min(ltr5, ltr3, aln) / hi >= min_len_ratio and ltrrt_len >= min_ltrrt_len)
+
+
 def filter_kmer2ltr_in_place(kmer2ltr_tsv: str,
                              min_ltr_len: int = 100,
                              min_aln_len: int = 90,
@@ -2365,16 +2376,8 @@ def filter_kmer2ltr_in_place(kmer2ltr_tsv: str,
                 n_malformed += 1
                 continue
 
-            hi = max(ltr5, ltr3, aln)
-            if hi <= 0:
-                n_dropped += 1
-                continue
-            len_ratio = min(ltr5, ltr3, aln) / hi
-
-            if (min(ltr5, ltr3) >= min_ltr_len and
-                    aln >= min_aln_len and
-                    len_ratio >= min_len_ratio and
-                    ltrrt_len >= min_ltrrt_len):
+            if passes_length_gates(ltr5, ltr3, aln, ltrrt_len, min_ltr_len, min_aln_len,
+                                   min_len_ratio, min_ltrrt_len):
                 fout.write(raw)
                 n_kept += 1
             else:
@@ -2397,93 +2400,6 @@ def tsd_names_from_kmer2ltr(kmer2ltr_tsv: str) -> Dict[str, str]:
             continue
         out[row["seq_id"].split("#", 1)[0]] = motif
     return out
-
-
-def pre_purge_tsd_dominated(
-    stitched_scn: str,
-    tsd_names: Set[str],
-    threshold: float,
-    ltr_bounds: Optional[Dict[str, Tuple[int, int, int, int]]] = None,
-) -> Set[str]:
-    """
-    Identify non-TSD SCN candidates whose genomic interval overlaps a TSD+
-    candidate at >= *threshold* (fraction of the shorter interval).
-
-    These candidates would be eliminated by Layer-1 of dedup anyway, so
-    removing them before TEsorter / Kmer2LTR saves runtime without
-    changing the final library.
-
-    Candidates that are fully contained within a TSD+ candidate AND have
-    distinct (non-overlapping) LTRs are protected as putative nested TEs.
-
-    Returns the set of 'chrom:start-end' keys to EXCLUDE.
-    """
-    by_chrom_tsd: Dict[str, List[Tuple[int, int]]] = {}
-    by_chrom_nontsd: Dict[str, List[Tuple[int, int, str]]] = {}
-    seen: Set[str] = set()
-
-    with open(stitched_scn) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = re.split(r"\s+", line)
-            if len(parts) < 12:
-                continue
-            sret_s, eret_s = parts[0], parts[1]
-            chrom = parts[-1]
-            if not (sret_s.isdigit() and eret_s.isdigit()):
-                continue
-            s, e = int(sret_s), int(eret_s)
-            if e < s:
-                s, e = e, s
-            key = f"{chrom}:{s}-{e}"
-            if key in seen:
-                continue
-            seen.add(key)
-
-            if key in tsd_names:
-                by_chrom_tsd.setdefault(chrom, []).append((s, e))
-            else:
-                by_chrom_nontsd.setdefault(chrom, []).append((s, e, key))
-
-    exclude: Set[str] = set()
-    for chrom, nontsd_intervals in by_chrom_nontsd.items():
-        tsd_intervals = by_chrom_tsd.get(chrom)
-        if not tsd_intervals:
-            continue
-        for s, e, key in nontsd_intervals:
-            # Check ALL overlapping TSD+ intervals before deciding.
-            # If the non-TSD is contained in any TSD+ interval, keep it
-            # (putative nested TE).  If it only partially overlaps, exclude.
-            is_contained_in_any = False
-            should_exclude = False
-            for ts, te in tsd_intervals:
-                if _overlap_fraction_of_shorter((s, e), (ts, te)) >= threshold:
-                    tsd_key = f"{chrom}:{ts}-{te}"
-                    if (_is_contained((s, e), (ts, te)) == "a_in_b"
-                            and not _ltrs_shared(key, tsd_key, ltr_bounds)):
-                        is_contained_in_any = True
-                    else:
-                        should_exclude = True
-            if is_contained_in_any:
-                print(f"[pre_purge] keeping contained candidate "
-                      f"{key} (putative nested TE, distinct LTRs)")
-            elif should_exclude:
-                exclude.add(key)
-
-    return exclude
-
-
-def _overlap_fraction_of_shorter(a: Tuple[int, int], b: Tuple[int, int]) -> float:
-    a0, a1 = a
-    b0, b1 = b
-    inter = min(a1, b1) - max(a0, b0) + 1
-    if inter <= 0:
-        return 0.0
-    lena = a1 - a0 + 1
-    lenb = b1 - b0 + 1
-    return inter / min(lena, lenb)
 
 
 def _is_contained(a: Tuple[int, int], b: Tuple[int, int]) -> str:
@@ -2538,71 +2454,6 @@ def _ltrs_shared(
     if _overlaps(a_rL_s, a_rL_e, b_rL_s, b_rL_e):
         return True
     return False
-
-
-def _sub_dedup_shared_ltr_group(
-    group: List[Dict[str, object]],
-    ratio_cap: float = 2.5,
-) -> Dict[str, object]:
-    """From a group of near-duplicate records (shared LTRs), keep the best one.
-
-    Uses Layer-2 scoring: matching-bases with ratio guard.
-    """
-    if len(group) == 1:
-        return group[0]
-
-    def _mb(rec):
-        return float(rec["aln"]) * (1.0 - float(rec["p"]))
-
-    best_score = max(group, key=lambda x: _mb(x))
-    best_pdist = min(group, key=lambda x: (float(x["p"]), -int(x["aln"])))
-
-    if best_score is best_pdist:
-        return best_score
-
-    p_hi  = max(float(best_score["p"]), 1e-10)
-    p_lo  = max(float(best_pdist["p"]), 1e-10)
-    aln_hi = max(int(best_score["aln"]), 1)
-    aln_lo = max(int(best_pdist["aln"]), 1)
-
-    if p_hi / p_lo > ratio_cap * (aln_hi / aln_lo):
-        return best_pdist
-    return best_score
-
-
-def load_scn_ltr_boundaries(
-    scn_path: str,
-) -> Dict[str, Tuple[int, int, int, int]]:
-    """Parse a merged SCN file and return per-element LTR boundaries.
-
-    Returns dict: "chrom:s(ret)-e(ret)" -> (s_lLTR, e_lLTR, s_rLTR, e_rLTR).
-    """
-    result: Dict[str, Tuple[int, int, int, int]] = {}
-    with open(scn_path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = re.split(r"\s+", line)
-            if len(parts) < 12:
-                continue
-            sret_s, eret_s = parts[0], parts[1]
-            chrom = parts[-1]
-            if not (sret_s.isdigit() and eret_s.isdigit()):
-                continue
-            try:
-                s_lLTR = int(parts[3])
-                e_lLTR = int(parts[4])
-                s_rLTR = int(parts[6])
-                e_rLTR = int(parts[7])
-            except (ValueError, IndexError):
-                continue
-            s, e = int(sret_s), int(eret_s)
-            if e < s:
-                s, e = e, s
-            key = f"{chrom}:{s}-{e}"
-            result[key] = (s_lLTR, e_lLTR, s_rLTR, e_rLTR)
-    return result
 
 
 def ltr_bounds_from_table(tsv: str) -> Dict[str, Tuple[int, int, int, int]]:
@@ -2697,34 +2548,37 @@ def _classify_from_clade_paths(clade_paths: List[str]) -> Optional[Tuple[str, st
     return (order, superfamily, clade)
 
 
-def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
-                       tsd_names: Optional[Dict[str, str]] = None,
+def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str,
                        gff3_domains: Optional[Dict[str, list]] = None,
                        ltr_bounds: Optional[Dict[str, Tuple[int, int, int, int]]] = None,
                        rename_map: Optional[Dict[str, str]] = None,
                        own_strands: Optional[Dict[str, Set[str]]] = None,
-                       ) -> None:
-    """
-    Dedup a Kmer2LTR output TSV, keeping the lowest p_dist.
-    Tie-breaker: if p_dist ties, keep the record with the largest aln_len.
+                       conflicts_tsv: Optional[str] = None,
+                       ) -> Tuple[int, int]:
+    """Resolve overlapping calls (ltrquest.overlaps) and write the survivors with their
+    domains and nesting appended.
 
-    For "extension" pairs — records sharing a start or end coordinate — one is a
-    truncation of the other.  The extension yields slightly higher p-distance but is
-    the more complete element.  Resolution order:
-      1. If tsd_names is provided and exactly one record has a TSD, keep the TSD record.
-      2. Otherwise fall back to lowest p-distance, but print a warning for pairs where
-         no TSD information is available so we can study the scale of the problem.
+    Two calls that overlap without one being properly nested in the other -- crossing,
+    sharing an LTR, or the same span twice -- cannot both be real insertions, so only
+    the one with the stronger structural evidence is kept. Nested pairs are both kept
+    and named in each other's `nest_status`. `conflicts_tsv`, when given, lists every
+    dropped call with the call it lost to.
 
     own_strands, when given, is filled with nest-outer key -> the strands of
     its domain hits that lie outside every inner (empty when all of them lie
     inside one); see `withdraw_inner_derived_strands`.
+
+    Returns (calls kept, calls dropped).
     """
+    from . import overlaps as ov
     in_path = Path(kmer2ltr_tsv)
     if not in_path.exists() or in_path.stat().st_size == 0:
         # No input means no columns to restate, and no rows a wrong header
         # could shift; the canonical empty table is what consumers expect.
         Path(out_tsv).write_text(DETECT_HEADER)
-        return
+        if conflicts_tsv:
+            Path(conflicts_tsv).write_text(ov.CONFLICTS_HEADER)
+        return 0, 0
 
     tmp_body = in_path.parent / (in_path.name + ".body.tmp")
     tmp_sorted = in_path.parent / (in_path.name + ".sorted.tmp")
@@ -2736,16 +2590,10 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
         shutil.copyfileobj(fin, fout)
     cols = Columns.from_line("#" + header if not header.startswith("#") else header)
     i_id = cols.require("seq_id")
-    i_aln = cols.require("aln_len")
-    i_p = cols.require("p_dist")
-    n_fields = max(i_id, i_aln, i_p) + 1
 
     with open(tmp_sorted, "w") as fh:
         subprocess.run(["sort", "-t:", "-k1,1V", "-k2,2n", str(tmp_body)],
                        stdout=fh, check=True)
-
-    cluster: List[Dict[str, object]] = []
-    cluster_chrom: Optional[str] = None
 
     # --- helpers for enriched output ---
 
@@ -2831,7 +2679,7 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
         key = _rec_key(rec)
 
         # Nest status
-        rels = nest_rels.get(id(rec), [])
+        rels = nest_rels.get(key, [])
         nest_val = ";".join(f"{r}:{k}" for r, k in rels) if rels else "."
 
         # Domains (for nest-outer, exclude domains inside inner boundaries)
@@ -2875,214 +2723,32 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
 
         handle.write(f"{line}\t{dom_val}\t{nest_val}\n")
 
-    def flush_cluster(out_handle):
-        if not cluster:
-            return
-        # nest_relationships: id(rec) -> list of (role, partner_key)
-        nest_rels: Dict[int, List[Tuple[str, str]]] = defaultdict(list)
+    def n_domains(key):
+        return len({d["gene"] for d in (gff3_domains or {}).get(key, [])})
 
-        if len(cluster) == 1:
-            _write_enriched(cluster[0], out_handle, nest_rels)
-            return
-
-        # --- Layer 1: TSD tiebreaker (all overlap pairs, not just extension pairs) ---
-        # Skip TSD domination for containment pairs — both elements are
-        # deferred to Layer 1.5 (nesting diagnostics) instead.
-        dominated: Set[int] = set()
-        for ii in range(len(cluster)):
-            for jj in range(ii + 1, len(cluster)):
-                ri, rj = cluster[ii], cluster[jj]
-                si, ei = int(ri['s']), int(ri['e'])
-                sj, ej = int(rj['s']), int(rj['e'])
-
-                key_i = f"{ri['chrom']}:{si}-{ei}"
-                key_j = f"{rj['chrom']}:{sj}-{ej}"
-
-                # Skip TSD domination for true nesting (contained + distinct LTRs)
-                if (_is_contained((si, ei), (sj, ej))
-                        and not _ltrs_shared(key_i, key_j, ltr_bounds)):
-                    continue
-                has_i = tsd_names is not None and key_i in tsd_names
-                has_j = tsd_names is not None and key_j in tsd_names
-                if has_i and not has_j:
-                    dominated.add(jj)
-                elif has_j and not has_i:
-                    dominated.add(ii)
-                # both have TSD or both lack TSD → no preference, fall through
-
-        survivors = [cluster[i] for i in range(len(cluster)) if i not in dominated]
-        if len(survivors) == 1:
-            _write_enriched(survivors[0], out_handle, nest_rels)
-            return
-
-        # --- Layer 1.5: Containment / nesting detection + diagnostics ---
-        def _matching_bases(rec):
-            return float(rec["aln"]) * (1.0 - float(rec["p"]))
-
-        def _format_domains(te_key):
-            """Format GFF3 domain entries for a TE as a concise string."""
-            if gff3_domains is None:
-                return "no_gff3"
-            entries = gff3_domains.get(te_key, [])
-            if not entries:
-                return "none"
-            parts = []
-            for d in entries:
-                parts.append(f"{d['gene']}|{d['clade']}@{d['start']}-{d['end']}")
-            return " ".join(parts)
-
-        def _outer_domains_inside_inner(outer_key, inner_s, inner_e):
-            """Count how many of the outer's GFF3 domains fall within inner bounds."""
-            if gff3_domains is None:
-                return "no_gff3", 0, 0
-            entries = gff3_domains.get(outer_key, [])
-            if not entries:
-                return "no_domains", 0, 0
-            inside = []
-            total = len(entries)
-            for d in entries:
-                if d["start"] >= inner_s and d["end"] <= inner_e:
-                    inside.append(d["gene"])
-            return " ".join(inside) if inside else "none", len(inside), total
-
-        nest_involved: Set[int] = set()
-        n_surv = len(survivors)
-        if n_surv >= 2:
-            for ii in range(n_surv):
-                for jj in range(ii + 1, n_surv):
-                    ri, rj = survivors[ii], survivors[jj]
-                    si, ei = int(ri['s']), int(ri['e'])
-                    sj, ej = int(rj['s']), int(rj['e'])
-                    containment = _is_contained((si, ei), (sj, ej))
-                    if not containment:
-                        continue
-
-                    if containment == "a_in_b":
-                        inner_rec, outer_rec = ri, rj
-                        inner_s, inner_e = si, ei
-                        outer_s, outer_e = sj, ej
-                    else:
-                        inner_rec, outer_rec = rj, ri
-                        inner_s, inner_e = sj, ej
-                        outer_s, outer_e = si, ei
-
-                    inner_key = f"{inner_rec['chrom']}:{inner_s}-{inner_e}"
-                    outer_key = f"{outer_rec['chrom']}:{outer_s}-{outer_e}"
-
-                    # True nesting requires distinct LTR pairs
-                    if _ltrs_shared(inner_key, outer_key, ltr_bounds):
-                        continue
-
-                    nest_involved.add(ii)
-                    nest_involved.add(jj)
-
-                    # Record nesting relationships
-                    nest_rels[id(inner_rec)].append(("nest-inner", outer_key))
-                    nest_rels[id(outer_rec)].append(("nest-outer", inner_key))
-
-                    inner_tsd = tsd_names.get(inner_key, ".") if tsd_names else "."
-                    outer_tsd = tsd_names.get(outer_key, ".") if tsd_names else "."
-                    inner_mb = _matching_bases(inner_rec)
-                    outer_mb = _matching_bases(outer_rec)
-
-                    inside_genes, n_inside, n_total = _outer_domains_inside_inner(
-                        outer_key, inner_s, inner_e)
-
-                    print("[dedup] NESTED_PAIR:")
-                    print(f"  outer: {outer_key} | aln={outer_rec['aln']} "
-                          f"p={float(outer_rec['p']):.6f} mbases={outer_mb:.1f} | "
-                          f"TSD={outer_tsd}")
-                    print(f"    domains: {_format_domains(outer_key)}")
-                    print(f"  inner: {inner_key} | aln={inner_rec['aln']} "
-                          f"p={float(inner_rec['p']):.6f} mbases={inner_mb:.1f} | "
-                          f"TSD={inner_tsd}")
-                    print(f"    domains: {_format_domains(inner_key)}")
-                    print(f"  outer_domains_inside_inner: "
-                          f"{n_inside}/{n_total} ({inside_genes})")
-
-        if nest_involved:
-            # Sub-dedup near-duplicates within nest_involved:
-            # group by shared LTRs (union-find), keep best per group.
-            ni_list = sorted(nest_involved)
-            parent = {i: i for i in ni_list}
-
-            def _uf_find(x):
-                while parent[x] != x:
-                    parent[x] = parent[parent[x]]
-                    x = parent[x]
-                return x
-
-            def _uf_union(a, b):
-                ra, rb = _uf_find(a), _uf_find(b)
-                if ra != rb:
-                    parent[ra] = rb
-
-            for idx_a in range(len(ni_list)):
-                for idx_b in range(idx_a + 1, len(ni_list)):
-                    ia, ib = ni_list[idx_a], ni_list[idx_b]
-                    ri, rj = survivors[ia], survivors[ib]
-                    ki = _rec_key(ri)
-                    kj = _rec_key(rj)
-                    if _ltrs_shared(ki, kj, ltr_bounds):
-                        _uf_union(ia, ib)
-
-            groups: Dict[int, List[int]] = defaultdict(list)
-            for i in ni_list:
-                groups[_uf_find(i)].append(i)
-
-            deduped_nest: List[int] = []
-            for members in groups.values():
-                if len(members) == 1:
-                    deduped_nest.append(members[0])
-                else:
-                    recs = [survivors[m] for m in members]
-                    best = _sub_dedup_shared_ltr_group(recs)
-                    for m in members:
-                        if survivors[m] is best:
-                            deduped_nest.append(m)
-                            break
-
-            # Prune stale partner references from nest_rels: nest-inner refs to deduped outer would be dangling pointers.
-            surviving_keys = {_rec_key(survivors[i]) for i in deduped_nest}
-            for rec_id in list(nest_rels.keys()):
-                nest_rels[rec_id] = [
-                    (role, pk) for role, pk in nest_rels[rec_id]
-                    if pk in surviving_keys
-#                   if pk in surviving_keys or role == "nest-inner"
-                ]
-
-            for i in sorted(deduped_nest):
-                _write_enriched(survivors[i], out_handle, nest_rels)
-            # Also write any non-involved survivors through Layer 2 below.
-            remaining = [survivors[i] for i in range(n_surv)
-                         if i not in nest_involved]
-            if not remaining:
-                return
-            survivors = remaining
-            if len(survivors) == 1:
-                _write_enriched(survivors[0], out_handle, nest_rels)
-                return
-
-        # --- Layer 2: Matching-bases score with ratio guard ---
-        RATIO_CAP = 2.5
-
-        best_score = max(survivors, key=lambda x: _matching_bases(x))
-        best_pdist = min(survivors, key=lambda x: (float(x["p"]), -int(x["aln"])))
-
-        if best_score is best_pdist:
-            best = best_score
-        else:
-            p_hi  = max(float(best_score["p"]), 1e-10)
-            p_lo  = max(float(best_pdist["p"]), 1e-10)
-            aln_hi = max(int(best_score["aln"]), 1)
-            aln_lo = max(int(best_pdist["aln"]), 1)
-
-            if p_hi / p_lo > RATIO_CAP * (aln_hi / aln_lo):
-                best = best_pdist
-            else:
-                best = best_score
-
-        _write_enriched(best, out_handle, nest_rels)
+    def flush_chrom(recs, out_handle, conflicts):
+        """Resolve one chromosome's calls and write the survivors in genomic order."""
+        calls = []
+        for rec in recs:
+            parts = rec["parts"]
+            key = _rec_key(rec)
+            calls.append(ov.Call(key, rec["chrom"], rec["s"], rec["e"],
+                                 (ltr_bounds or {}).get(key),
+                                 ov.evidence(cols.get(parts, "tsd"), cols.get(parts, "tsd_offset"),
+                                             cols.get(parts, "motif"), cols.get(parts, "bitscore"),
+                                             n_domains(key))))
+        kept, dropped = ov.resolve(calls)
+        nest_rels: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+        for inner, outer in ov.nest_pairs(kept):
+            nest_rels[inner.key].append(("nest-inner", outer.key))
+            nest_rels[outer.key].append(("nest-outer", inner.key))
+        kept_ids = {id(c) for c in kept}
+        for rec, call in zip(recs, calls):
+            if id(call) in kept_ids:
+                _write_enriched(rec, out_handle, nest_rels)
+        for loser, winner in dropped:
+            conflicts.append((loser, winner))
+        return len(kept), len(dropped)
 
     # Every row is copied through verbatim with two fields appended, so the
     # header has to be the input's own column names plus those two. Restating
@@ -3091,63 +2757,40 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str, threshold: float,
     # every by-name read downstream without shortening the header.
     out_header = "#" + "\t".join(cols.names + ["domains", "nest_status"]) + "\n"
 
+    n_kept = n_dropped = 0
+    conflicts: List[tuple] = []
     with open(tmp_sorted, "r") as fin, open(out_tsv, "w") as out:
         out.write(out_header)
+        recs: List[Dict[str, object]] = []
         for raw in fin:
             if not raw.strip():
                 continue
             parts = raw.rstrip("\n").split("\t")
-            if len(parts) < n_fields:
-                out.write(raw.rstrip("\n") + "\t.\t.\n")
-                continue
-
-            parsed = _parse_interval_from_kmer2ltr_col1(parts[i_id])
+            parsed = _parse_interval_from_kmer2ltr_col1(parts[i_id]) if len(parts) > i_id else None
             if parsed is None:
                 out.write(raw.rstrip("\n") + "\t.\t.\n")
                 continue
             chrom, s, e = parsed
+            if recs and recs[0]["chrom"] != chrom:
+                k, d = flush_chrom(recs, out, conflicts)
+                n_kept, n_dropped, recs = n_kept + k, n_dropped + d, []
+            recs.append({"chrom": chrom, "s": s, "e": e, "line": raw, "parts": parts})
+        if recs:
+            k, d = flush_chrom(recs, out, conflicts)
+            n_kept, n_dropped = n_kept + k, n_dropped + d
 
-            p = as_float(parts[i_p])
-            if p is None:
-                out.write(raw.rstrip("\n") + "\t.\t.\n")
-                continue
-
-            aln = as_int(parts[i_aln], 0)
-
-            rec = {"chrom": chrom, "s": s, "e": e, "p": p, "aln": aln, "line": raw}
-
-            if not cluster:
-                cluster = [rec]
-                cluster_chrom = chrom
-                continue
-
-            if chrom != cluster_chrom:
-                flush_cluster(out)
-                cluster = [rec]
-                cluster_chrom = chrom
-                continue
-
-            belongs = False
-            for rrec in cluster:
-                frac = _overlap_fraction_of_shorter((s, e), (int(rrec["s"]), int(rrec["e"])))  # type: ignore
-                if frac >= threshold:
-                    belongs = True
-                    break
-
-            if belongs:
-                cluster.append(rec)
-            else:
-                flush_cluster(out)
-                cluster = [rec]
-                cluster_chrom = chrom
-
-        flush_cluster(out)
+    if conflicts_tsv:
+        with open(conflicts_tsv, "w") as fh:
+            fh.write(ov.CONFLICTS_HEADER)
+            for loser, winner in conflicts:
+                fh.write("\t".join(ov.conflict_row(loser, winner)) + "\n")
 
     for tmp in (tmp_body, tmp_sorted):
         try:
             tmp.unlink()
         except OSError:
             pass
+    return n_kept, n_dropped
 
 
 def bounded_fasta(in_fa: str, k2l_tsv: str, out_fa: str,
@@ -3319,6 +2962,159 @@ def rebase_to_trimmed(tsv: str, rename: Dict[str, str]) -> None:
             fout.write("\t".join(parts) + "\n")
 
     tmp_path.replace(in_path)
+
+
+# -----------------------------
+# Step 8e: canonical ends
+# -----------------------------
+_SNAP_API = None
+
+
+def _snap_init(tools_dir: str) -> None:
+    global _SNAP_API
+    _SNAP_API = k2l.api(tools_dir)
+
+
+def _snap_measure(job):
+    """Kmer2LTR re-measures one moved element on the pair it was called with, the new
+    termini credited as its ends, as ltrquest.reboundary does (worker)."""
+    from .reboundary import CREDIT_BITS
+    old, name, seq, spans, window, mu = job
+    api = _SNAP_API
+    seq = re.sub(r"[^ACGT]", "N", seq.upper())
+    ctx = api.orient(seq, api.Window(*window))
+    res = api.classify(name, seq, period_rule="outermost", mutation_rate=mu,
+                       tsd_credit=CREDIT_BITS, spans=spans)
+    if ctx is not None:
+        res = api.annotate(res, seq, ctx, api.Options())
+    if res.status != "pass" or res.flank5_len or res.flank3_len:
+        return old, None
+    return old, api.format_row(res).split("\t")
+
+
+def snap_to_canonical_ends(k2l_tsv: str, bounded_fa: str, genome: str, tools_dir: str,
+                           threads: int, mutation_rate: float
+                           ) -> Tuple[Dict[str, str], Set[str], Counter]:
+    """Move each bounded element onto canonical ends within 2 bp (ltrquest.ends).
+
+    Kmer2LTR reports a TSD it found 1 bp off the called ends (`tsd_offset`) but leaves
+    the ends where they were, and its first hit is not always the element's ends.
+    Here every element whose ends are not TG..CA with an exact TSD is moved to the
+    nearest ends that are, if any lie within 2 bp, and Kmer2LTR re-measures it on its
+    called pair; one it no longer passes, or that fails detection's size floors, stays
+    as called. Every element on canonical ends gets that TSD in `tsd`, with
+    `tsd_offset` 0,0. A move onto ends another element keeps removes the mover: it is
+    that element, found twice.
+
+    The genome is read once, a chromosome at a time. Rewrites the table and the
+    bounded FASTA in place; returns ({old name: new name} for moved elements, the
+    names removed as duplicates, counts).
+    """
+    from . import ends
+    from .reboundary import trim_spans
+    counts: Counter = Counter()
+    try:
+        api = k2l.api(tools_dir)
+    except RuntimeError as exc:
+        api = None
+        print(f"[Step8e] WARNING: Kmer2LTR cannot re-measure a moved element ({exc}); "
+              f"elements 1-2 bp off canonical ends stay as called")
+    with open(k2l_tsv) as fh:
+        header = fh.readline()
+        rows = [line.rstrip("\n").split("\t") for line in fh if line.strip()]
+    cols = Columns.from_line(header if header.startswith("#") else "#" + header)
+    i_id, i_tsd, i_off = cols.require("seq_id"), cols.require("tsd"), cols.require("tsd_offset")
+    by_chrom: Dict[str, List[Tuple[int, int, int]]] = defaultdict(list)
+    for i, row in enumerate(rows):
+        parsed = _parse_interval_from_kmer2ltr_col1(row[i_id])
+        if parsed is not None:
+            by_chrom[parsed[0]].append((i, parsed[1], parsed[2]))
+
+    canonical: Dict[int, str] = {}       # row -> the TSD at its ends, once they are canonical
+    movers: Dict[int, tuple] = {}        # row -> (Ends, left, right, bases added 5', 3', window)
+    for chrom, seq in iter_fasta(genome):
+        for i, start, end in by_chrom.get(chrom, ()):
+            hit = ends.snap(*ends.end_windows(seq, start, end))
+            if hit is None:
+                continue
+            if (hit.d5, hit.d3) == (0, 0):
+                canonical[i] = hit.tsd
+                continue
+            if api is None:
+                counts["kept_as_called"] += 1
+                continue
+            left, right = start + hit.d5, end - hit.d3
+            window = tuple(w.upper() for w in (
+                seq[max(0, left - 1 - api.PAD):left - 1], seq[left - 1:left - 1 + api.PROBE],
+                seq[max(0, right - api.PROBE):right], seq[right:right + api.PAD]))
+            movers[i] = (hit, left, right, seq[left - 1:start - 1], seq[end:right], window)
+
+    mover_names = {rows[i][i_id] for i in movers}
+    records = {n: q for n, q in iter_fasta(bounded_fa) if n in mover_names}
+    jobs, new_seq = [], {}
+    for i, (hit, left, right, add5, add3, window) in movers.items():
+        name = rows[i][i_id]
+        _, start, end = _parse_interval_from_kmer2ltr_col1(name)
+        rec = records.get(name)
+        if rec is None or len(rec) != end - start + 1:
+            continue
+        cut5, cut3 = max(0, hit.d5), max(0, hit.d3)
+        new_seq[name] = add5 + rec[cut5:len(rec) - cut3] + add3
+        l1 = start + as_int(cols.get(rows[i], "ltr5_end")) - 1
+        r0 = start + as_int(cols.get(rows[i], "ltr3_start")) - 1
+        spans = trim_spans(cols.get(rows[i], "cigar"),
+                           (max(0, start - left), l1 - left, r0 - left,
+                            min(len(new_seq[name]) - 1, end - left)), cut5, cut3)
+        jobs.append((name, f"{name.split('#', 1)[0].rsplit(':', 1)[0]}:{left}-{right}",
+                     new_seq[name], spans, window, mutation_rate))
+    measured: Dict[str, Dict[str, str]] = {}
+    if jobs:
+        from multiprocessing import Pool
+        with Pool(max(1, threads), initializer=_snap_init, initargs=(tools_dir,)) as pool:
+            for old, fields in pool.imap_unordered(_snap_measure, jobs, chunksize=8):
+                if fields is None:
+                    continue
+                f = dict(zip(k2l.COLUMNS, fields))
+                if passes_length_gates(int(f["ltr5_len"]), int(f["ltr3_len"]),
+                                       int(f["aln_len"]), int(f["seq_len"]) - 1):
+                    measured[old] = f
+
+    # Elements that keep their names first, so a move can never land on one of them.
+    taken = {row[i_id] for row in rows if row[i_id] not in measured}
+    moved: Dict[str, str] = {}
+    removed: Set[str] = set()
+    removed_rows: Set[int] = set()
+    for i in sorted((i for i in movers if rows[i][i_id] in measured), key=lambda i: rows[i][i_id]):
+        name, f = rows[i][i_id], measured[rows[i][i_id]]
+        if f["seq_id"] in taken:
+            removed.add(name)
+            removed_rows.add(i)
+            continue
+        hit = movers[i][0]
+        f.update(tsd=hit.tsd, tsd_offset="0,0", tsd_input=cols.get(rows[i], "tsd_input"))
+        rows[i] = [f.get(c, v) for c, v in zip(cols.names, rows[i])]
+        taken.add(f["seq_id"])
+        moved[name] = f["seq_id"]
+        canonical[i] = hit.tsd
+        counts[f"shift {hit.d5},{hit.d3}"] += 1
+    for i, tsd in canonical.items():
+        rows[i][i_tsd], rows[i][i_off] = tsd, "0,0"
+    counts.update(canonical=len(canonical) - len(moved), moved=len(moved),
+                  duplicate=len(removed))
+    counts["kept_as_called"] += len(movers) - len(moved) - len(removed)
+
+    tmp = k2l_tsv + ".snap.tmp"
+    with open(tmp, "w") as out:
+        out.write(header)
+        for i, row in enumerate(rows):
+            if i not in removed_rows:
+                out.write("\t".join(row) + "\n")
+    os.replace(tmp, k2l_tsv)
+    tmp = bounded_fa + ".snap.tmp"
+    write_fasta(((moved.get(n, n), new_seq[n] if n in moved else q)
+                 for n, q in iter_fasta(bounded_fa) if n not in removed), tmp)
+    os.replace(tmp, bounded_fa)
+    return moved, removed, counts
 
 
 def subset_fasta_by_name_set(in_fa: str, out_fa: str, keep_names: set,
@@ -3851,11 +3647,9 @@ def main():
     ap.add_argument("--scn-max-int-len", type=int, default=0,
                     help="Max internal length filter on (l(ret)-l(lLTR)-l(rLTR)); 0 disables")
 
-    # Kmer2LTR + dedup controls
+    # Kmer2LTR controls
     ap.add_argument("--mutation-rate", type=float, default=3e-8,
                     help="neutral substitution rate per site per year; sets the k2p_time column (default: 3e-8)")
-    ap.add_argument("--dedup-threshold", type=float, default=0.80,
-                    help="Overlap threshold (fraction of shorter interval) for dedup (default: 0.80)")
 
     # TEBinSorter (drop-in replacement for TEsorter; --tesorter-* flag names
     # retained for backward compatibility with callers/wrappers).
@@ -4432,9 +4226,6 @@ def main():
         flank_min=args.nested_flank_min,
     )
 
-    # Load LTR boundaries from SCN for nesting validation
-    ltr_bounds = load_scn_ltr_boundaries(merged_scn)
-
     # Step 8: Kmer2LTR calls each element's termini and reports how far the
     # candidate over-reaches them, so the boundaries every later stage uses are
     # measured rather than inherited from the detectors. It can cut the FASTA
@@ -4477,39 +4268,31 @@ def main():
     print(f"[Step8b] Kmer2LTR reported a TSD for {len(tsd_seqs)} of the "
           f"{n_kept} retained candidate(s)")
 
-    # Step 8c: a non-TSD candidate overlapping a TSD+ one at >= the dedup
-    # threshold would be eliminated by Layer-1 of dedup anyway, so dropping it
-    # here spares the classifier the work. Contained candidates with distinct
-    # LTRs are protected (putative nested TEs). Only retained elements may
-    # purge: merged_scn still holds every candidate to purge from, but an
-    # element the round has already dropped must not take a neighbour with it.
-    purge_set: Set[str] = set()
-    if args.use_tesorter and tsd_seqs:
-        purge_set = pre_purge_tsd_dominated(
-            merged_scn, set(tsd_seqs),
-            threshold=args.dedup_threshold,
-            ltr_bounds=ltr_bounds,
-        )
-        if purge_set:
-            print(f"[Step8c] pre-purge: {len(purge_set)} TSD-dominated "
-                  "candidate(s) identified for exclusion")
-
     bounded_fa = str(workdir / f"{out_prefix}.bounded.fa")
-    rename = bounded_fasta(k2l_in_fa, k2l_tsv, bounded_fa, exclude=purge_set)
+    rename = bounded_fasta(k2l_in_fa, k2l_tsv, bounded_fa)
     print(f"[Step8d] bounded FASTA: {len(rename)} elements -> {Path(bounded_fa).name}")
 
-    # tsd_seqs (Step8b) was captured against the untrimmed loci, ahead of this
-    # line, on purpose: rebase_to_trimmed is where the element table itself
-    # crosses into the bounded frame, and rekey_through carries it across the
-    # same rename, so every stage past this point shares the one frame and
-    # the one set of names.
+    # rebase_to_trimmed is where the element table crosses into the bounded frame,
+    # so every stage past this point shares the one frame and the one set of names.
     rebase_to_trimmed(k2l_tsv, rename)
     # Every downstream coordinate -- GFF3 sub-features, nest intervals, the
     # masked genome the next round reads -- is built on the assumption that
     # this table is Kmer2LTR-bounded from here on; catch a violation at its
     # source rather than as corrupted output several stages later.
     assert_bounded(k2l_tsv)
-    tsd_after_trim = rekey_through(tsd_seqs, rename, "Kmer2LTR TSDs")
+
+    # Step 8e: onto canonical ends (TG..CA with an exact TSD) where they lie within
+    # 2 bp of Kmer2LTR's, before anything else reads the ends.
+    snapped, duplicates, snap_counts = snap_to_canonical_ends(
+        k2l_tsv, bounded_fa, args.genome, str(tools_dir), args.threads, args.mutation_rate)
+    rename = {old: snapped.get(new, new) for old, new in rename.items() if new not in duplicates}
+    shifts = ", ".join(f"{k.split(' ', 1)[1]}: {n}" for k, n in sorted(snap_counts.items())
+                       if k.startswith("shift "))
+    print(f"[Step8e] canonical ends: {snap_counts['canonical']} as called, "
+          f"{snap_counts['moved']} moved 1-2 bp (d5,d3 {shifts or 'none'}), "
+          f"{snap_counts['kept_as_called']} left as called, "
+          f"{snap_counts['duplicate']} removed as the same element twice")
+    tsd_after_trim = tsd_names_from_kmer2ltr(k2l_tsv)
 
     # Step 8f: seed pass-2 with the elements Kmer2LTR found a TSD for. A TSD is
     # independent evidence of a real insertion, so these anchor the homology
@@ -4602,7 +4385,7 @@ def main():
     # Step 9b: dedup
     _t0 = time.monotonic()
     k2l_dedup_out = f"{out_prefix}_ltr.tsv"
-    print(f"[Step9b] deduping Kmer2LTR output -> {k2l_dedup_out}")
+    print(f"[Step9b] resolving overlapping calls -> {k2l_dedup_out}")
 
     # Load per-domain hit positions for nesting diagnostics. TEBinSorter's
     # pipeline.py does not emit a TEsorter-style .dom.gff3, but the same
@@ -4630,10 +4413,12 @@ def main():
               f"coordinates and will be treated as sharing no LTRs with "
               f"anything")
     own_strands: Dict[str, Set[str]] = {}
-    dedup_kmer2ltr_tsv(k2l_tsv, k2l_dedup_out, threshold=args.dedup_threshold,
-                       tsd_names=tsd_after_trim or None, gff3_domains=gff3_dom_data,
-                       ltr_bounds=ltr_bounds_for_dedup,
-                       rename_map=nest_rename_map, own_strands=own_strands)
+    conflicts_tsv = str(workdir / f"{out_prefix}.conflicts.tsv")
+    n_kept, n_dropped = dedup_kmer2ltr_tsv(
+        k2l_tsv, k2l_dedup_out, gff3_domains=gff3_dom_data, ltr_bounds=ltr_bounds_for_dedup,
+        rename_map=nest_rename_map, own_strands=own_strands, conflicts_tsv=conflicts_tsv)
+    print(f"[Step9b] kept {n_kept} call(s); dropped {n_dropped} that overlapped a stronger "
+          f"call without being nested in it -> {Path(conflicts_tsv).name}")
 
     if nest_rename_map:
         print(f"[Step9b] reclassified {len(nest_rename_map)} element(s) from TEBinSorter "

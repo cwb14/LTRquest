@@ -82,11 +82,11 @@ def test_fasta_records_are_the_called_spans_stored_as_the_tables_say(fx):
         assert stored == (revcomp_record(fwd) if e.strand == "-" else fwd), e.kind
 
 
-def test_the_tables_carry_the_33_columns_and_the_nesting(fx):
+def test_the_tables_carry_the_34_columns_and_the_nesting(fx):
     rows = (fx.indir / f"{fx.prefix}_depth0_clean_ltr.tsv").read_text().splitlines()
     assert rows[0].startswith("#seq_id\tseq_len\tstatus")
     assert rows[0].endswith("nest_status")
-    assert len(rows[0].split("\t")) == 33
+    assert len(rows[0].split("\t")) == 34
     host = fx.kind("host")
     inner = fx.kind("nested_del_left")
     assert host.depth == 1

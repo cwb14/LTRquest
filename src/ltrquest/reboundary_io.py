@@ -29,6 +29,7 @@ from typing import (Callable, Dict, FrozenSet, Iterable, Iterator, List, NamedTu
 
 from .annotate import discover_depth_tables, element_key, header_names, read_table, target_mode
 from .detect import revcomp as revcomp_record
+from .ends import confidence
 from .kmer2ltr import COLUMNS
 from .ltr_model import Member
 from .table import Columns, as_float, as_int
@@ -639,6 +640,9 @@ def rewrite(tables: Sequence[CleanTable], accepted: Dict[str, Accepted], letters
                 continue
             if k in accepted:
                 row = list(accepted[k].fields) + row[len(COLUMNS):]
+                if "confidence" in t.cols:          # a table annotated before it existed has none
+                    row[t.cols.require("confidence")] = confidence(
+                        *(t.cols.get(row, c) for c in ("tsd", "tsd_offset", "motif")))
             else:
                 row = list(row)
             row[i_nest] = rekey_nest(drop_nest(row[i_nest], retired), old2new)

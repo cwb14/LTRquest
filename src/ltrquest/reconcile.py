@@ -33,15 +33,15 @@ import sys
 from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from . import overlaps as ov
+from .annotate import REJOIN_SIDECAR_SUFFIX, write_rejoin_sidecar
 from .detect import (
     _is_contained,
     _ltrs_shared,
-    _sub_dedup_shared_ltr_group,
     iter_fasta,
     ltr_bounds_from_table,
 )
-from .annotate import REJOIN_SIDECAR_SUFFIX, write_rejoin_sidecar
-from .table import Columns, as_float, as_int, parse_header
+from .table import Columns, parse_header
 
 COORD_RE = re.compile(r"^([^:]+):(\d+)-(\d+)")
 
@@ -51,21 +51,20 @@ COORD_RE = re.compile(r"^([^:]+):(\d+)-(\d+)")
 # V is reserved for the wrapper's far-character and is NOT in this list.
 IUPAC_DEPTH_SEQ = ("N", "R", "D", "Y", "S", "W", "K", "M", "B", "H")
 
-# The columns cross_round_dedup scores survivors on. Neither is fatal to
-# reading a table, but both defaulting is.
-ROUND_TSV_FIELDS = ("p_dist", "aln_len")
+# The columns resolve_conflicts ranks calls on (ltrquest.overlaps). None is
+# fatal to reading a table, but all of them defaulting is.
+ROUND_TSV_FIELDS = ("tsd", "tsd_offset", "motif", "bitscore")
 
 
 def _check_round_columns(path: str, cols: Columns) -> None:
-    """Confirm a round table's header names the columns dedup scores on, once
-    per file and before any row of it is used.
+    """Confirm a round table's header names the columns conflicts are ranked on,
+    once per file and before any row of it is used.
 
-    Neither present means there is no header to key off of at all -- every
-    record would come back with p_dist 0 and aln_len 0, which is not a failure
-    the caller can see: the score `aln * (1 - p)` is then uniformly zero and
-    the survivor of each duplicate group is whichever record sorted first.
-    That file is refused outright. One of the two present is still a usable
-    table; it is read, but the defaulted field is named so it is on the record.
+    None present means there is no header to key off of at all -- every record
+    would rank the same, which is not a failure the caller can see: the survivor
+    of each conflict is then whichever record sorted first. That file is refused
+    outright. Some present is still a usable table; it is read, but the defaulted
+    fields are named so they are on the record.
     """
     present = [name for name in ROUND_TSV_FIELDS if name in cols]
     if not present:
@@ -77,16 +76,16 @@ def _check_round_columns(path: str, cols: Columns) -> None:
     missing = [name for name in ROUND_TSV_FIELDS if name not in cols]
     if missing:
         print(f"[reconcile] WARNING: {path}: header has no "
-              f"{', '.join(missing)}; missing column(s) default to zero for "
-              f"every row", file=sys.stderr)
+              f"{', '.join(missing)}; missing column(s) count as no evidence "
+              f"for every row", file=sys.stderr)
 
 
 def parse_tsv(path: str, round_idx: int) -> Tuple[Optional[str], List[dict]]:
     """Return (header_line_or_None, list_of_record_dicts).
 
-    `p` (p_dist) and `aln` (aln_len) feed _sub_dedup_shared_ltr_group's
-    matching-bases score, so they are read by name rather than position, and a
-    file that names neither is refused rather than scored on defaults.
+    `rank` is the call's structural evidence (ltrquest.overlaps.evidence), read by
+    name rather than position, and a file that names none of its columns is
+    refused rather than ranked on defaults.
     """
     header: Optional[str] = None
     cols_spec = Columns.of([])
@@ -115,8 +114,9 @@ def parse_tsv(path: str, round_idx: int) -> Tuple[Optional[str], List[dict]]:
                 continue
             chrom, s, e = m.group(1), int(m.group(2)), int(m.group(3))
             key = f"{chrom}:{s}-{e}"
-            p = as_float(cols_spec.get(cols, "p_dist"), default=0.0)
-            aln = as_int(cols_spec.get(cols, "aln_len"), default=0)
+            rank = ov.evidence(cols_spec.get(cols, "tsd"), cols_spec.get(cols, "tsd_offset"),
+                               cols_spec.get(cols, "motif"), cols_spec.get(cols, "bitscore"),
+                               ov.n_domains(cols_spec.get(cols, "domains")))
             recs.append({
                 "key": key,
                 "chrom": chrom,
@@ -126,8 +126,7 @@ def parse_tsv(path: str, round_idx: int) -> Tuple[Optional[str], List[dict]]:
                 "col1": cols[0],
                 "line": line,
                 "cols": cols,
-                "p": p,
-                "aln": aln,
+                "rank": rank,
             })
     return header, recs
 
@@ -317,57 +316,18 @@ def apply_depth_masking(outer_seq: str,
     return "".join(chars)
 
 
-def cross_round_dedup(pool: List[dict],
+def resolve_conflicts(pool: List[dict],
                       ltr_bounds: Dict[str, Tuple[int, int, int, int]]
                       ) -> Tuple[List[dict], int]:
-    """Union-find across the pool: any two records (from different rounds)
-    that share LTR boundaries are merged; keep the best per group via
-    _sub_dedup_shared_ltr_group. Returns (survivors, n_merged_groups).
+    """Pooled over the rounds, any two calls that overlap without one being properly
+    nested in the other keep only the stronger (ltrquest.overlaps), as detection does
+    within a round. Returns (survivors in pool order, n dropped).
     """
-    n = len(pool)
-    parent = list(range(n))
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    by_chr: Dict[str, List[int]] = defaultdict(list)
-    for i, e in enumerate(pool):
-        by_chr[e["chrom"]].append(i)
-
-    for _chrom, idxs in by_chr.items():
-        m = len(idxs)
-        for ii in range(m):
-            i = idxs[ii]
-            for jj in range(ii + 1, m):
-                j = idxs[jj]
-                if pool[i]["round"] == pool[j]["round"]:
-                    continue
-                if _ltrs_shared(pool[i]["key"], pool[j]["key"], ltr_bounds):
-                    union(i, j)
-
-    groups: Dict[int, List[int]] = defaultdict(list)
-    for i in range(n):
-        groups[find(i)].append(i)
-
-    survivors: List[dict] = []
-    n_merged = 0
-    for members in groups.values():
-        if len(members) == 1:
-            survivors.append(pool[members[0]])
-        else:
-            n_merged += 1
-            recs = [pool[m] for m in members]
-            best = _sub_dedup_shared_ltr_group(recs)
-            survivors.append(best)
-    return survivors, n_merged
+    calls = [ov.Call(r["key"], r["chrom"], r["s"], r["e"], ltr_bounds.get(r["key"]), r["rank"])
+             for r in pool]
+    kept, dropped = ov.resolve(calls)
+    kept_ids = {id(c) for c in kept}
+    return [r for r, c in zip(pool, calls) if id(c) in kept_ids], len(dropped)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -433,13 +393,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
               f"have no usable LTR coordinates and will be treated as sharing "
               f"no LTRs with anything", file=sys.stderr)
 
-    # 3. Cross-round dedup (shared-LTR collapse)
-    survivors, n_merged = cross_round_dedup(pool, ltr_bounds)
-    if n_merged:
-        print(f"[reconcile] cross-round shared-LTR merges: {n_merged} groups",
-              file=sys.stderr)
-    else:
-        print("[reconcile] no cross-round shared-LTR merges", file=sys.stderr)
+    # 3. Calls from different rounds that overlap without proper nesting
+    survivors, n_dropped = resolve_conflicts(pool, ltr_bounds)
+    print(f"[reconcile] dropped {n_dropped} call(s) overlapping a stronger call from "
+          f"another round without being nested in it", file=sys.stderr)
 
     # Load FASTA records keyed by full header (col1 == "chrom:s-e#class"); a
     # rebuilt host's record is built from its stored one in step 3b.

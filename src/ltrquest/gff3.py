@@ -57,6 +57,7 @@ from .annotate import (
     resolve_strands,
     select_annotation_set,
 )
+from .ends import confidence
 from .reboundary_io import Rebound, read_map
 
 SOURCE = "LTRquest"
@@ -408,6 +409,8 @@ def build_element_blocks(prefix: str, tables, ranker: SeqidRanker,
                 ("motif", _field(row, names, "motif")),
                 ("tsd", _field(row, names, "tsd")),
                 ("tsd_offset", list_value(_field(row, names, "tsd_offset"))),
+                ("confidence", confidence(*(_field(row, names, c)
+                                            for c in ("tsd", "tsd_offset", "motif")))),
                 ("boundary_source", "templates" if rb else ""),
                 ("boundary_shift", list_value(f"{rb.ext5},{rb.ext3}") if rb else ""),
                 ("strand_source", source_label),

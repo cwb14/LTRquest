@@ -274,46 +274,47 @@ class TestIupacInvariants:
 
 
 class TestParseTsv:
-    """p (p_dist) and aln (aln_len) feed the cross-round dedup score, so a
-    misread here does not crash -- it just picks the wrong survivor."""
+    """The ranking columns feed the cross-round conflict rule, so a misread here
+    does not crash -- it just picks the wrong survivor."""
 
-    def test_reads_p_dist_and_aln_len_by_name(self, tmp_path):
+    def test_reads_the_ranking_columns_by_name(self, tmp_path):
         from ltrquest.detect import DETECT_COLUMNS
 
         header = "#" + "\t".join(DETECT_COLUMNS)
         row = ["."] * len(DETECT_COLUMNS)
         row[DETECT_COLUMNS.index("seq_id")] = "chr1:100-500#LTR/Copia/Ale"
-        row[DETECT_COLUMNS.index("aln_len")] = "220"
-        row[DETECT_COLUMNS.index("p_dist")] = "0.05"
+        row[DETECT_COLUMNS.index("tsd")] = "AATGC"
+        row[DETECT_COLUMNS.index("tsd_offset")] = "0,0"
+        row[DETECT_COLUMNS.index("motif")] = "tg...ca"
+        row[DETECT_COLUMNS.index("bitscore")] = "220"
+        row[DETECT_COLUMNS.index("domains")] = "RT|Ale@200-300;RH|Ale@320-380"
         path = tmp_path / "r1_ltr.tsv"
         path.write_text(header + "\n" + "\t".join(row) + "\n")
 
         parsed_header, recs = parse_tsv(str(path), round_idx=1)
         assert parsed_header == header
         assert len(recs) == 1
-        assert recs[0]["aln"] == 220
-        assert recs[0]["p"] == pytest.approx(0.05)
+        assert recs[0]["rank"] == (3, 220.0, 2)
 
-    def test_refuses_a_table_that_names_neither_column(self, tmp_path):
-        """Without a header both fields default, the score `aln * (1 - p)` is
-        uniformly zero, and the survivor of every duplicate group is whichever
-        record happened to sort first -- a silent wrong answer, so it raises."""
+    def test_refuses_a_table_that_names_no_ranking_column(self, tmp_path):
+        """Without a header every call ranks the same and the survivor of every
+        conflict is whichever record happened to sort first -- a silent wrong
+        answer, so it raises."""
         path = tmp_path / "r1_ltr.tsv"
         path.write_text("chr1:100-500#LTR/Copia/Ale\t.\t.\n")
 
-        with pytest.raises(ValueError, match="p_dist, aln_len"):
+        with pytest.raises(ValueError, match="tsd, tsd_offset, motif, bitscore"):
             parse_tsv(str(path), round_idx=1)
 
-    def test_warns_but_reads_a_table_naming_only_one(self, tmp_path, capsys):
+    def test_warns_but_reads_a_table_naming_only_some(self, tmp_path, capsys):
         path = tmp_path / "r1_ltr.tsv"
-        path.write_text("#seq_id\tp_dist\n"
-                        "chr1:100-500#LTR/Copia/Ale\t0.05\n")
+        path.write_text("#seq_id\tbitscore\n"
+                        "chr1:100-500#LTR/Copia/Ale\t95\n")
 
         _header, recs = parse_tsv(str(path), round_idx=1)
         assert len(recs) == 1
-        assert recs[0]["p"] == pytest.approx(0.05)
-        assert recs[0]["aln"] == 0
-        assert "aln_len" in capsys.readouterr().err
+        assert recs[0]["rank"] == (0, 95.0, 0)
+        assert "tsd, tsd_offset, motif" in capsys.readouterr().err
 
     def test_accepts_an_empty_table(self, tmp_path):
         """A round that found nothing writes no rows; there is nothing to
@@ -323,3 +324,27 @@ class TestParseTsv:
 
         header, recs = parse_tsv(str(path), round_idx=1)
         assert (header, recs) == (None, [])
+
+
+class TestResolveConflicts:
+    """Calls from different rounds obey the same overlap rule as one round's calls."""
+
+    @staticmethod
+    def rec(key, rnd, rank):
+        chrom, span = key.split(":")
+        s, e = (int(x) for x in span.split("-"))
+        return {"key": key, "chrom": chrom, "s": s, "e": e, "round": rnd, "rank": rank}
+
+    def test_a_cross_round_crossing_keeps_the_stronger(self):
+        from ltrquest.reconcile import resolve_conflicts
+        a = self.rec("c:1000-6000", 1, (1, 900.0, 0))
+        b = self.rec("c:4500-9500", 2, (3, 300.0, 0))
+        survivors, n = resolve_conflicts([a, b], {})
+        assert survivors == [b] and n == 1
+
+    def test_a_cross_round_nest_keeps_both(self):
+        from ltrquest.reconcile import resolve_conflicts
+        inner = self.rec("c:3000-6000", 1, (3, 300.0, 0))
+        outer = self.rec("c:1000-9000", 2, (0, 100.0, 0))
+        bounds = {"c:3000-6000": (3000, 3299, 5701, 6000), "c:1000-9000": (1000, 1299, 8701, 9000)}
+        assert resolve_conflicts([inner, outer], bounds) == ([inner, outer], 0)

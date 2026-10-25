@@ -115,6 +115,32 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Changed
 
+- **Overlapping calls follow one rule.** Detection used to compare only calls
+  overlapping by >= 80% of the shorter (`--dedup-threshold`), and then kept every
+  call that took part in a nesting, so 8.8-9.5% of the *Poa* clean calls crossed
+  another call (98.8% of them from the same round), although real insertions are
+  only ever disjoint or nested. Now any two calls that overlap without one lying
+  strictly inside the other with its own LTR pair conflict, and only the stronger
+  is kept: hallmarks at its own ends (TSD and TG..CA, then TSD, then TG..CA), then
+  the LTR pair's `bitscore`, then its distinct protein domains (`ltrquest.overlaps`).
+  The same rule replaces the cross-round shared-LTR merge in `ltrquest-reconcile`.
+  Each round writes the calls it dropped to `<prefix>.conflicts.tsv` in its work
+  directory. Scored against empty sites in related genomes (an independent test of
+  a real insertion) on 1,087 crossing pairs with exactly one confirmed partner in
+  three *Poa* genomes, the rule keeps the confirmed call 95% of the time (95.2,
+  94.7, 94.8%), against 71-76% for the LTR alignment score alone. Re-detecting
+  *P. supina* with and without the change (with the TSD fix below): crossing calls
+  8.4% -> 0.09%, canonical calls 51.6% -> 63.2%, at a recall cost of 0.3 points on
+  EDTA-confirmed insertions (95.6 -> 95.3%). The cost is partial calls that
+  re-boundarying used to extend to the element's true ends, now dropped before it
+  runs.
+- **The element table gains a `confidence` column** (34 columns; before
+  `domains`), and the GFF3 a `confidence` attribute: `high` when the reported
+  ends are TG..CA with an exact TSD, `medium` with one of the two, `low` with
+  neither. A young real insertion keeps both, so in a young element `low` marks a
+  call that is very likely wrong; in *Poa*, 44% of calls were non-canonical and,
+  among young ones, an empty site confirmed them 12-21% of the time against 73-78%
+  for canonical calls of the same age.
 - `ltrquest-plots`' `--min_ltr_aln` is renamed `--min_ltr_len`, and
   `flagged_false_positives.tsv`'s `aln_len_raw` column is renamed
   `ltr3_len_raw`. Both hold a 3' LTR length, not an alignment length; the
@@ -139,6 +165,10 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Removed
 
+- `ltrquest-detect --dedup-threshold` and the pre-classification purge that used
+  the same 80% threshold; see *Overlapping calls follow one rule* above. Dropping
+  the purge sends ~18% more candidates through TEsorter2 (about a minute on a
+  1.2 Gb genome).
 - Six flags that had nothing left to forward to once Kmer2LTR's internals
   changed underneath them: `--wfa-align` (the new tool always aligns with
   WFA, so there is no MAFFT default left to opt out of), `--kmer2ltr-max-win-
@@ -164,6 +194,23 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Fixed
 
+- **Ends 1-2 bp off a canonical boundary were reported where they were called.**
+  Kmer2LTR records a TSD it finds after moving a boundary 1 bp (`tsd_offset`) but
+  leaves the boundary, and detection never applied the shift, so 6.5-7.9% of *Poa*
+  calls kept ends 1-2 bp off TG..CA-with-TSD in their ids, LTR coordinates, GFF3
+  and FASTA (*P. supina* `Ps1B:542705-550914` for `Ps1B:542706-550914`). Its first
+  hit was also not always the element's ends: a call 1 bp wide carries an exact
+  4-bp TSD at the wrong ends, and a 5-mer matches by chance 1 bp off a correct call
+  about one time in four. Each round now moves every element onto the nearest
+  ends within 2 bp that are TG..CA with an exact 4-6 bp TSD (`ltrquest.ends`),
+  re-measures it with Kmer2LTR, and removes a second call that reaches the same
+  ends; elements already on such ends get that TSD in `tsd` with `tsd_offset`
+  `0,0`, which also makes them re-boundarying templates. Re-boundarying and host
+  rejoining read the TSD on canonical ends the same way.
+- **`--reboundary` failed on a plain-gzip genome.** Its genome access used pyfaidx,
+  which reads only BGZF, so `UnsupportedCompressionFormat` stopped the stage and the
+  driver kept the calls as detected with a one-line warning. A gzipped genome is
+  now expanded into the run directory for the stage and removed after it.
 - **An element inserted into another element's LTR came out as two adjacent free
   elements.** The insertion splits the host's LTR into `[1..p] TENANT [p+1..L]`.
   LTRharvest and LTR_FINDER pair the two near-side fragments, so the host was

@@ -12,10 +12,11 @@ K2L = textwrap.dedent("""\
     """).format(header="\t".join(kmer2ltr.COLUMNS))
 
 
-def test_element_header_is_thirtythree_columns():
-    assert len(detect.ELEMENT_COLUMNS) == 33
+def test_element_header_is_thirtyfour_columns():
+    assert len(detect.ELEMENT_COLUMNS) == 34
     assert detect.ELEMENT_COLUMNS[:29] == kmer2ltr.COLUMNS
-    assert detect.ELEMENT_COLUMNS[29:] == ["strand", "family", "domains", "nest_status"]
+    assert detect.ELEMENT_COLUMNS[29:] == ["strand", "family", "confidence", "domains",
+                                           "nest_status"]
     assert detect.ELEMENT_HEADER.startswith("#seq_id\t")
     assert detect.ELEMENT_HEADER.rstrip("\n").endswith("nest_status")
 
@@ -226,49 +227,6 @@ def test_bounded_fasta_keeps_one_record_per_bounded_span(tmp_path):
 
 # A good element and a short TSD+ neighbour that overlaps it almost exactly and
 # shares both LTRs, so the pre-purge has nothing to protect it as a nested TE.
-SCN = ("1000 3000 2001 1000 1200 201 2800 3000 201 95.0 0 chr1\n"
-       "1050 2950 1901 1050 1200 151 2800 2950 151 95.0 0 chr1\n")
-
-
-def _pair_table(tmp_path):
-    i = kmer2ltr.COLUMNS.index
-
-    def row(name, seq_len, ltr_len, tsd):
-        cols = ["NA"] * len(kmer2ltr.COLUMNS)
-        cols[i("seq_id")], cols[i("seq_len")], cols[i("status")] = name, str(seq_len), "pass"
-        cols[i("ltr5_len")] = cols[i("ltr3_len")] = cols[i("aln_len")] = str(ltr_len)
-        cols[i("tsd")] = tsd
-        return "\t".join(cols)
-
-    p = tmp_path / "k.tsv"
-    p.write_text("\n".join([K2L.splitlines()[0],
-                            row("chr1:1000-3000", 2001, 201, "."),      # keeps
-                            row("chr1:1050-2950", 1901, 80, "AAGCT")])  # too short
-                 + "\n")
-    return p
-
-
-def test_a_purger_the_length_filter_drops_cannot_take_a_neighbour_with_it(tmp_path):
-    scn = tmp_path / "s.scn"
-    scn.write_text(SCN)
-    bounds = detect.load_scn_ltr_boundaries(str(scn))
-    tsv = _pair_table(tmp_path)
-
-    # Unfiltered, the short TSD+ element dominates its good neighbour.
-    unfiltered = detect.tsd_names_from_kmer2ltr(str(tsv))
-    assert detect.pre_purge_tsd_dominated(
-        str(scn), set(unfiltered), threshold=0.80, ltr_bounds=bounds
-    ) == {"chr1:1000-3000"}
-
-    # Gating on the retained elements leaves nothing able to purge it.
-    detect.filter_kmer2ltr_in_place(str(tsv))
-    retained = detect.tsd_names_from_kmer2ltr(str(tsv))
-    assert retained == {}
-    assert detect.pre_purge_tsd_dominated(
-        str(scn), set(retained), threshold=0.80, ltr_bounds=bounds
-    ) == set()
-
-
 BOUNDED_FA = (">chr1:120-2070\n" + "AC" * 1000 + "A\n"
               ">chr1:9000-9400\n" + "TA" * 200 + "T\n")
 
@@ -403,7 +361,7 @@ def test_dedup_header_describes_the_rows_it_wrote(tmp_path):
     whose every column means what the header says it means."""
     src = _wide_k2l(tmp_path)
     out = tmp_path / "dedup.tsv"
-    detect.dedup_kmer2ltr_tsv(str(src), str(out), threshold=0.8)
+    detect.dedup_kmer2ltr_tsv(str(src), str(out))
 
     lines = out.read_text().splitlines()
     names = lines[0].lstrip("#").split("\t")
@@ -418,7 +376,7 @@ def test_dedup_header_describes_the_rows_it_wrote(tmp_path):
 
 def test_dedup_of_an_absent_table_writes_the_canonical_header(tmp_path):
     out = tmp_path / "dedup.tsv"
-    detect.dedup_kmer2ltr_tsv(str(tmp_path / "missing.tsv"), str(out), threshold=0.8)
+    detect.dedup_kmer2ltr_tsv(str(tmp_path / "missing.tsv"), str(out))
     assert out.read_text() == detect.DETECT_HEADER
 
 
@@ -451,7 +409,7 @@ def test_dedup_reports_the_strands_of_a_nest_outers_own_hits(tmp_path):
             INNER: [_hit(3500, 3800, "+")]}
     own = {}
     detect.dedup_kmer2ltr_tsv(str(_nest_k2l(tmp_path)), str(tmp_path / "d.tsv"),
-                              threshold=0.8, gff3_domains=doms, own_strands=own)
+                              gff3_domains=doms, own_strands=own)
     # Only the outer is a nest-outer, and the hit inside the inner is not its own.
     assert own == {OUTER: {"-"}}
 
@@ -461,7 +419,7 @@ def test_dedup_reports_no_own_strand_when_every_hit_is_the_inners(tmp_path):
             INNER: [_hit(3500, 3800, "+"), _hit(4000, 4300, "+")]}
     own = {}
     detect.dedup_kmer2ltr_tsv(str(_nest_k2l(tmp_path)), str(tmp_path / "d.tsv"),
-                              threshold=0.8, gff3_domains=doms, own_strands=own)
+                              gff3_domains=doms, own_strands=own)
     assert own == {OUTER: set()}
 
 
@@ -525,3 +483,58 @@ def test_assert_bounded_names_the_columns_a_truncated_row_lacks(tmp_path):
     msg = str(e.value)
     assert "chr1:1-100" in msg
     assert "ltr5_start" in msg and "flank5_len" in msg
+
+
+def _calls_k2l(tmp_path, calls):
+    """A bounded Kmer2LTR table: (locus, tsd, tsd_offset, motif, bitscore) per call,
+    300-bp LTRs."""
+    lines = ["#" + "\t".join(kmer2ltr.COLUMNS)]
+    for locus, tsd, off, motif, bits in calls:
+        s, e = (int(x) for x in locus.split(":")[1].split("-"))
+        n = e - s + 1
+        v = dict.fromkeys(kmer2ltr.COLUMNS, "NA")
+        v.update(seq_id=locus, seq_len=str(n), status="pass", ltr5_start="1", ltr5_end="300",
+                 ltr3_start=str(n - 299), ltr3_end=str(n), aln_len="300", p_dist="0.01",
+                 tsd=tsd, tsd_offset=off, motif=motif, bitscore=bits)
+        lines.append("\t".join(v[c] for c in kmer2ltr.COLUMNS))
+    p = tmp_path / "k.tsv"
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+def _dedup(tmp_path, calls):
+    src = _calls_k2l(tmp_path, calls)
+    out, conflicts = tmp_path / "d.tsv", tmp_path / "c.tsv"
+    counts = detect.dedup_kmer2ltr_tsv(str(src), str(out), ltr_bounds=detect.ltr_bounds_from_table(
+        str(src)), conflicts_tsv=str(conflicts))
+    lines = out.read_text().splitlines()
+    head = lines[0].lstrip("#").split("\t")
+    kept = {r["seq_id"]: r for r in (dict(zip(head, l.split("\t"))) for l in lines[1:])}
+    return counts, kept, conflicts.read_text().splitlines()
+
+
+def test_a_crossing_pair_keeps_only_the_call_with_hallmarks_at_its_ends(tmp_path):
+    # Overlapping by 30% of the shorter call: the old 80% rule never compared them.
+    (n_kept, n_dropped), kept, conflicts = _dedup(tmp_path, [
+        ("chr1:1000-6000", ".", "NA", "tg...ca", "900"),
+        ("chr1:4500-9500", "AATGC", "0,0", "tg...ca", "500")])
+    assert list(kept) == ["chr1:4500-9500"] and (n_kept, n_dropped) == (1, 1)
+    assert conflicts[1].split("\t")[:4] == ["chr1:1000-6000", "chr1:4500-9500", "crossing", "TG..CA"]
+
+
+def test_a_nested_pair_is_kept_and_named_in_both_rows(tmp_path):
+    (_n, n_dropped), kept, _ = _dedup(tmp_path, [
+        ("chr1:1000-9000", "AATGC", "0,0", "tg...ca", "900"),
+        ("chr1:3000-6000", ".", "NA", "ga...ct", "100")])
+    assert n_dropped == 0
+    assert kept["chr1:1000-9000"]["nest_status"] == "nest-outer:chr1:3000-6000"
+    assert kept["chr1:3000-6000"]["nest_status"] == "nest-inner:chr1:1000-9000"
+
+
+def test_a_call_sharing_an_ltr_with_its_container_is_a_conflict_not_a_nest(tmp_path):
+    (_n, _d), kept, conflicts = _dedup(tmp_path, [
+        ("chr1:1000-9000", ".", "NA", "tg...ca", "900"),
+        ("chr1:1100-6000", ".", "NA", "tg...ca", "400")])
+    assert list(kept) == ["chr1:1000-9000"]
+    assert kept["chr1:1000-9000"]["nest_status"] == "."
+    assert conflicts[1].split("\t")[2] == "shared_ltr"

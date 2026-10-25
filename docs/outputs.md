@@ -99,12 +99,12 @@ Athal_tair10_chr2_LTRs_depth1_clean_ltr.fa
 
 ### 4.1 `depth<N>_clean_ltr.tsv` format
 
-Tab-separated, one row per element, 33 named columns (`#`-prefixed header
-line). Columns 1–29 are Kmer2LTR's own output, carried through unchanged:
-Kmer2LTR runs ahead of classification, so its boundary calls, divergence
-figures and TSDs are the round's single source of truth. LTRquest appends the
-last four — `strand`, `family`, `domains`, `nest_status` — once
-classification and clustering have run.
+Tab-separated, one row per element, 34 named columns (`#`-prefixed header
+line). Columns 1–29 are Kmer2LTR's own output: Kmer2LTR runs ahead of
+classification, so its boundary calls, divergence figures and TSDs are the
+round's single source of truth, with one correction (see *Canonical ends*
+below). LTRquest appends the last five — `strand`, `family`, `confidence`,
+`domains`, `nest_status` — once classification and clustering have run.
 
 | # | Column | Meaning |
 |---|---|---|
@@ -134,13 +134,42 @@ classification and clustering have run.
 | 24 | `motif` | The two terminal dinucleotides, lowercased, e.g. `tg...ca`. Read off the called boundary, never used to find it |
 | 25 | `k2p_time` | `round(k2p / (2 × mutation_rate))`, years since insertion; set by `--mutation-rate` (default `3e-8`) |
 | 26 | `orientation` | Whether the record is stored reverse-complemented relative to its own header interval, as written to `{prefix}_ltr.fa`: `-` means the library holds the reverse complement, `+` means it holds the interval as read off the genome. A storage fact, not biology, and always known — see `strand` below |
-| 27 | `tsd` | Target-site duplication at the called boundary. `.` = searched and absent; `NA` = could not be searched |
-| 28 | `tsd_offset` | `d5,d3` — how far each boundary had to move for `tsd` to appear, positive meaning *into* the element. `NA` whenever `tsd` carries no sequence, whether that is `.` or `NA` |
+| 27 | `tsd` | Target-site duplication at the called boundary. `.` = searched and absent; `NA` = could not be searched. On TG..CA ends it is the exact 4–6 bp duplication at those ends |
+| 28 | `tsd_offset` | `d5,d3` — how far each boundary had to move for `tsd` to appear, positive meaning *into* the element. `0,0` on canonical ends. `NA` whenever `tsd` carries no sequence, whether that is `.` or `NA` |
 | 29 | `tsd_input` | The same measurement at the record's termini as originally supplied, before re-bounding |
 | 30 | `strand` | The element's biological orientation, resolved by LTRquest from classification, domain order and pass-2 homology, and from strand recovery when `--strand-recovery` was given: `+`, `-`, or `.` if none of those resolved it |
 | 31 | `family` | Family id from the pooled consensus-LTR clustering, `<prefix>_fam00001` … — see section 5 |
-| 32 | `domains` | Protein domains with genomic coordinates: `GENE\|clade@start-end;...`, or `.` |
-| 33 | `nest_status` | `nest-outer:chrom:s-e` (that element is inside me) and/or `nest-inner:chrom:s-e` (I am inside that element), `;`-joined, or `.` if un-nested |
+| 32 | `confidence` | Hallmarks of an insertion at the reported ends: `high` = TG..CA termini and an exact TSD (`tsd` with `tsd_offset` `0,0`), `medium` = one of the two, `low` = neither — see below |
+| 33 | `domains` | Protein domains with genomic coordinates: `GENE\|clade@start-end;...`, or `.` |
+| 34 | `nest_status` | `nest-outer:chrom:s-e` (that element is inside me) and/or `nest-inner:chrom:s-e` (I am inside that element), `;`-joined, or `.` if un-nested |
+
+**Canonical ends.** An LTR-RT is integrated into a staggered cut, which leaves
+the same few target bases on both sides (the TSD; 5 bp in most elements, 4–6 in
+general), and integrase leaves TG at its 5′ end and CA at its 3′ end. Kmer2LTR
+reports a TSD it finds 1 bp off the called ends but does not move them, and its
+first hit is not always the element's ends (`X1..X5|TG…CA|X1..X5` called 1 bp
+wide carries an exact 4-bp TSD at the wrong ends). So right after Kmer2LTR, each
+round moves every element whose ends are not TG..CA with an exact TSD onto the
+nearest ends that are, if any lie within 2 bp of each end (fewest bases moved
+first), and Kmer2LTR re-measures it on the pair it was called with. Two calls
+that reach the same ends are one element; the second is removed.
+
+**Overlapping calls.** Real insertions are disjoint or nested: a nested element
+lies strictly inside its host with its own LTR pair. Any other overlap — two
+calls crossing, one inside another but sharing an LTR, the same span twice —
+means at most one of them is right, and only the call with the stronger
+structural evidence is kept: first the hallmarks at its own ends (both, then a
+TSD alone, then TG..CA alone, then neither), then the LTR pair's `bitscore`, then
+the number of distinct protein domains. The rule is applied within each round and
+again when the rounds are pooled. Each round's dropped calls, and what they lost to,
+are in `<prefix>_r<N>.work/<prefix>_r<N>.conflicts.tsv`.
+
+**`confidence`.** A real insertion is born with both hallmarks. Its TSD copies and
+termini then mutate like the rest of the element, so an old element can lose
+them, but a young one keeps them: in a young element (`identity` ≥ 0.99, say)
+`low` marks a call that is very likely wrong, while in an old one it is
+expected. Species whose elements do not end TG..CA reach at most `medium`; filter
+on `tsd` there instead.
 
 Three things this table will burn you on if you skim it:
 
@@ -345,6 +374,8 @@ Notes:
   `tesorter`, `domain_order`, `pass2`, `homology` or `ppt` from strand
   recovery, `none` where the strand is `.`, or `table` if the strand in the
   element table is not one the cascade would reach — a hand-edited table, say.
+- `confidence` (`high`, `medium`, `low`) is the table's column of the same name,
+  computed from the same `tsd`, `tsd_offset` and `motif` (section 4.1).
 
 ## 7. Strand recovery (`--strand-recovery`)
 

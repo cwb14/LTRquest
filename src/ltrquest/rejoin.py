@@ -29,6 +29,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from . import ends
 from .detect import _ltrs_shared
 from .ltr_model import Member
 from .ltr_place import local, tsd_call
@@ -299,6 +300,9 @@ def _apply(rj: Rejoin, fwd: str, bounds, records: Dict[str, str], cols: Columns,
     s, e = rj.start, rj.end
     left_bp, right_bp = rj.ltr_bases
     tsd, offset = tsd_call(genome_api, g, _member(h, bounds[h["key"]]), s, e)
+    canon = ends.tsd_between(lambda lo, hi: g.fetch("", chrom, lo, hi), s, e)
+    if canon:
+        tsd, offset = canon, "0,0"
     suffix = h["col1"].split("#", 1)[1] if "#" in h["col1"] else None
     name = f"{chrom}:{s}-{e}" + (f"#{suffix}" if suffix is not None else "")
     row = list(h["cols"])
