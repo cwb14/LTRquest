@@ -50,10 +50,12 @@ requirements:
     - blast
     - minimap2
     - miniprot
-    # Resolved from PATH before any source build is attempted. TRF-mod, which
-    # runs by default, has no conda package yet and is still compiled on first
-    # use -- so a conda install also wants git, make and a compiler present, or
-    # `--no-trf`.
+    # Resolved from PATH before any source build is attempted. TRF-mod (on by
+    # default) and FastLTR (built the first time a run caps its LTR callers or
+    # asks for `--fastltr all`) have no conda package and are compiled on first
+    # use, FastLTR from a pinned FASTAN clone plus LTRquest's own FastLTR.c --
+    # so a conda install also wants git, make, a compiler and zlib present, or
+    # `--no-trf` / `--no-fastltr`.
     - sdust
     # --- pulled in by the bundled Kmer2LTR / TEsorter2 helpers ---
     - pyfaidx

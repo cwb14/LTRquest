@@ -37,6 +37,11 @@ def helpMessage() {
                               is flagged (default: ${params.fp_mask_threshold})
       --skip_tandem_filter    Keep calls cut from tandem arrays (rDNA,
                               satellites) in the _clean_ tables
+      --fastltr               Third LTR caller (FastLTR): rescue|all|off
+                              (default: ${params.fastltr}); rescue runs it only on
+                              chunks --ltr_timeout cut the other two short on
+      --ltr_timeout           Seconds per chunk per LTR caller, 0 = no cap
+                              (default: ${params.ltr_timeout})
       --family_prefix         Names the shared family namespace (default: ${params.family_prefix})
       --strand_recovery       Recover strand for the LTR-RTs the annotator leaves
                               unstranded: conservative|balanced|sensitive

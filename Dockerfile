@@ -2,7 +2,7 @@
 #
 # LTRquest — hermetic image.
 #
-# The detector normally fetches and builds four helper repos into --tools-dir on
+# The detector normally fetches and builds five helper repos into --tools-dir on
 # first use. That is convenient on a workstation and wrong in a container: it
 # makes the image's behaviour depend on what GitHub served that morning. Here
 # they are cloned at pinned commits during the build, and LTRQUEST_TOOLS_DIR
@@ -29,6 +29,11 @@ ARG KMER2LTR_REF=2c7e7f8d43697939dece93029e554418821d494a
 ARG TESORTER2_REF=cc9b195ca25dbe63555d45af2b3e9380b697080b
 ARG TRFMOD_REF=3e891db310124f7e5f7a630a1c006650be9d1f3a
 ARG SDUST_REF=89c42cb41ba598e9cfa07c2ef99ae8c08f769b3e
+ARG FASTAN_REF=843d0ed28b93b05ad428995d986312f02468afcd
+
+# LTRquest's adaptation of FastLTR, compiled against the pinned FASTAN sources
+# below; ltrquest.fastltr builds it the same way outside the container.
+COPY src/ltrquest/fastltr/FastLTR.c /tmp/FastLTR.c
 
 ENV TOOLS=/opt/ltrquest/tools
 RUN mkdir -p "$TOOLS" \
@@ -42,8 +47,15 @@ RUN mkdir -p "$TOOLS" \
  && git clone https://github.com/lh3/sdust.git "$TOOLS/sdust" \
  && git -C "$TOOLS/sdust" checkout --quiet "$SDUST_REF" \
  && make -C "$TOOLS/sdust" \
+ && git clone https://github.com/thegenemyers/FASTAN.git "$TOOLS/FASTAN" \
+ && git -C "$TOOLS/FASTAN" checkout --quiet "$FASTAN_REF" \
+ && cp /tmp/FastLTR.c "$TOOLS/FASTAN/FastLTR.c" \
+ && cd "$TOOLS/FASTAN" \
+ && gcc -O3 -fno-strict-aliasing -o FastLTR FastLTR.c alncode.c align.c ANO.c GDB.c gene_core.c ONElib.c -lm -lz -lpthread \
+ && cd / \
  && find "$TOOLS" -name .git -type d -prune -exec rm -rf {} + \
- && test -x "$TOOLS/TRF-mod/trf-mod" && test -x "$TOOLS/sdust/sdust"
+ && test -x "$TOOLS/TRF-mod/trf-mod" && test -x "$TOOLS/sdust/sdust" \
+ && "$TOOLS/FASTAN/FastLTR" 2>&1 | grep -q "LTRquest adaptation"
 
 # --------------------------------------------------------------- runtime stage
 FROM mambaorg/micromamba:1.5.10-jammy
@@ -90,6 +102,7 @@ RUN ltrquest --help > /dev/null \
     done \
  && test -f "$LTRQUEST_TOOLS_DIR/Kmer2LTR/src/kmer2ltr/cli.py" \
  && test -x "$LTRQUEST_TOOLS_DIR/TRF-mod/trf-mod" \
+ && test -x "$LTRQUEST_TOOLS_DIR/FASTAN/FastLTR" \
  && test -x /opt/ltrquest/bin/ltrquest-container
 
 # All three ways the entry point is reached, asserted here so a dispatch

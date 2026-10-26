@@ -81,6 +81,8 @@ process LTRQUEST_DETECT {
         --nested-base-min 800 \\
         --same-round-inner-char ${round_char} \\
         --mutation-rate ${params.mutation_rate} \\
+        --fastltr ${params.fastltr} \\
+        --ltr-timeout ${params.ltr_timeout} \\
         ${pass2_opt} \\
         ${args}
 

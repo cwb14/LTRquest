@@ -33,6 +33,13 @@ workflow LTRQUEST {
     if (params.strand_recovery_ppt && !params.strand_recovery) {
         error "--strand_recovery_ppt has no effect without --strand_recovery"
     }
+    if (!(params.fastltr in ['all', 'rescue', 'off'])) {
+        error "--fastltr must be all, rescue or off (got '${params.fastltr}')"
+    }
+    if (!(params.ltr_timeout instanceof Integer) || params.ltr_timeout < 0) {
+        error "--ltr_timeout must be a whole number of seconds, 0 for no cap " +
+              "(got '${params.ltr_timeout}')"
+    }
 
     ch_versions = Channel.empty()
 

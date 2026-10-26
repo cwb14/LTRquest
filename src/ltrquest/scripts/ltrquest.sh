@@ -8,6 +8,7 @@
 #   ltrquest --genome genome.fa [genome2.fa ...] [--proteins prot.fa] [--terminate_count 100]
 #       [--max-rounds N] [--threads 20] [--out_prefix PREFIX]
 #       [--run-sdust] [--detect-args "KEY=VALUE ..."] [--detect-args-from-round N "KEY=VALUE ..."]
+#       [--fastltr rescue|all|off]
 #
 # Notes:
 # - Runs Round 1 on the original genome, then masks the ORIGINAL genome each round to build genome_r{N}.fa for next round.
@@ -24,8 +25,10 @@
 # - Builds temp_ltr_2pass_lib.fa by concatenating *all prior* libraries (r1..rK) and cleaning to A/T/C/G only.
 # - Deletes temp_ltr_2pass_lib.fa at end.
 # - Rounds 2+ automatically add --exclude-run-char V.
+# - LTR callers per 500 kb chunk: LTRharvest and LTR_FINDER, plus FastLTR (--fastltr):
+#   by default only on chunks where --detect-args "ltr-timeout=N" cut the other two short.
 # - --run-sdust (off by default) adds a low-complexity gate to every round: right
-#   after the LTRharvest/LTRfinder merge and before TEsorter2, each full-length
+#   after the LTR callers' merge and before TEsorter2, each full-length
 #   candidate is run through sdust and dropped when >= --max-dust-frac of its ACGT
 #   bases come back masked. Nested inners arrive IUPAC-masked in the round genome
 #   and sdust treats any non-ACGT base as a hard break, so neither the numerator
@@ -148,6 +151,8 @@ MAX_ROUNDS_OVERRIDE=""   # empty = use IUPAC_SEQ length (10)
 THREADS=20
 OUT_PREFIX=""
 RUN_TRF=true
+FASTLTR_MODE=rescue        # --fastltr rescue|all|off: the third LTR caller
+FASTLTR_ARGS=""            # --fastltr-args: passed through; empty = detect's default
 RUN_SDUST=false
 SDUST_ARGS="-w 64 -t 15"
 MAX_DUST_FRAC="0.55"
@@ -267,8 +272,20 @@ Optional:
                         genome always keeps its own <basename>_LTRs prefix.
   --run-trf             Run TRF tandem-repeat masking (default: on)
   --no-trf              Disable TRF tandem-repeat masking
+  --fastltr MODE        Third LTR caller next to LTRharvest and LTR_FINDER:
+                        LTRquest's adaptation of FastLTR (FASTAN), built in the
+                        tools directory on first use. It does not stall on
+                        satellite, telomere or rDNA arrays, so with
+                        --detect-args "ltr-timeout=N" a chunk the other two are
+                        cut short on is still searched. MODE: rescue (default;
+                        only chunks where the timeout cut LTRharvest or
+                        LTR_FINDER short, so without a cap it never runs), all
+                        (every chunk: more elements elsewhere too, at lower
+                        precision), off.
+  --no-fastltr          Same as --fastltr off.
+  --fastltr-args        Quoted args for FastLTR (default: '-d100 -D20000 -w8').
   --run-sdust           Filter LTR-RT candidates through sdust after the
-                        LTRharvest/LTRfinder merge and before TEsorter2,
+                        LTR callers' merge and before TEsorter2,
                         dropping those made mostly of low-complexity sequence
                         (default: off). Nested inner elements are excluded
                         from the calculation.
@@ -1083,6 +1100,13 @@ detection_settings() {
     _ds_out+=( --setting "sdust_args=${SDUST_ARGS}"
                --setting "max_dust_frac=${MAX_DUST_FRAC}" )
   fi
+  # Off is how every genome was detected before FastLTR existed, so a record
+  # without the key still matches a run that turns it off -- or that asks for
+  # rescue without a cap, where FastLTR never runs.
+  if [[ "$FASTLTR_MODE" == all || ( "$FASTLTR_MODE" == rescue && "$directives" == *ltr-timeout* ) ]]; then
+    _ds_out+=( --setting "fastltr=${FASTLTR_MODE}"
+               --setting "fastltr_args=${FASTLTR_ARGS}" )
+  fi
 }
 
 # Decide, before any work, which genomes an earlier run in this directory
@@ -1365,6 +1389,9 @@ while [[ $# -gt 0 ]]; do
     --out_prefix) OUT_PREFIX="${2:-}"; shift 2;;
     --run-trf) RUN_TRF=true; shift;;
     --no-trf) RUN_TRF=false; shift;;
+    --fastltr) FASTLTR_MODE="${2:-}"; shift 2;;
+    --no-fastltr) FASTLTR_MODE=off; shift;;
+    --fastltr-args) FASTLTR_ARGS="${2:-}"; shift 2;;
     --run-sdust) RUN_SDUST=true; shift;;
     --sdust-args) SDUST_ARGS="${2:-}"; shift 2;;
     --max-dust-frac) MAX_DUST_FRAC="${2:-}"; shift 2;;
@@ -1408,6 +1435,11 @@ GENOME="${GENOMES[0]}"
 if [[ -n "$PROTEINS" ]]; then
   [[ -f "$PROTEINS" ]] || die_missing_input "$PROTEINS" "Proteins"
 fi
+
+case "$FASTLTR_MODE" in
+  rescue|all|off) ;;
+  *) die "--fastltr must be all, rescue or off (got '$FASTLTR_MODE')";;
+esac
 
 # Validate FP-correction knobs.
 [[ "$FP_MASK_THRESHOLD" =~ ^[0-9]*\.?[0-9]+$ ]] \
@@ -1606,6 +1638,9 @@ else
   TRF_OPTS=(--no-trf)
 fi
 
+FASTLTR_OPTS=(--fastltr "$FASTLTR_MODE")
+[[ -n "$FASTLTR_ARGS" ]] && FASTLTR_OPTS+=(--fastltr-args "$FASTLTR_ARGS")
+
 SDUST_OPTS=()
 if [[ "$RUN_SDUST" == true ]]; then
   SDUST_OPTS=(--sdust --sdust-args "$SDUST_ARGS" --max-dust-frac "$MAX_DUST_FRAC")
@@ -1733,6 +1768,7 @@ for (( round=1; round<=MAX_ROUNDS; round++ )); do
     --ltrharvest-args "$ltrharvest_args" \
     --ltrfinder-args "$ltrfinder_args" \
     "${TRF_OPTS[@]}" \
+    "${FASTLTR_OPTS[@]}" \
     "${SDUST_OPTS[@]}" \
     --size "$SIZE" \
     --overlap "$overlap" \

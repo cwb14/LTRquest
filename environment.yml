@@ -21,7 +21,8 @@ dependencies:
   - sdust                           # --run-sdust; found on PATH, so never built
   # --- building the helpers that nobody packages ---
   # TEsorter2 is cloned on first use; TRF-mod is cloned *and* compiled, and it
-  # runs by default (--no-trf turns it off). Kmer2LTR is a Python package now:
+  # runs by default (--no-trf turns it off). FastLTR is compiled from a FASTAN
+  # clone the first time a run needs it (--fastltr). Kmer2LTR is a Python package now:
   # resolved from PATH if it is already installed there, and otherwise cloned
   # to --tools-dir and run via PYTHONPATH -- no compiler involved either way.
   # Without git or a compiler the first real run still dies on
@@ -31,8 +32,8 @@ dependencies:
   # this environment installs.
   - git
   - make
-  - c-compiler                      # provides $CC; TRF-mod and sdust are C
-  - zlib                            # -lz, if sdust ever has to be built here
+  - c-compiler                      # provides $CC; TRF-mod, FastLTR and sdust are C
+  - zlib                            # -lz: FastLTR, and sdust if it ever has to be built here
   # --- python libraries ---
   - numpy
   - matplotlib-base

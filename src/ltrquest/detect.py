@@ -3,8 +3,10 @@
 
     1. Mask genes and non-LTR TEs (miniprot protein alignment, optional TRF
        tandem-repeat and sdust low-complexity gates).
-    2. Run LTRharvest and LTRfinder over overlapping chunks; merge and stitch
-       the two candidate sets.
+    2. Run LTRharvest, LTRfinder and FastLTR over overlapping chunks; merge and
+       stitch the three candidate sets. FastLTR (`ltrquest.fastltr`) does not
+       stall on tandem arrays, so a chunk the other two time out on is still
+       searched.
     3. Short-list candidates carrying a TSD, an LTR-RT protein domain, or
        homology to a candidate that has either; classify with TEsorter2.
     4. Measure 5'-LTR / 3'-LTR divergence with Kmer2LTR and date the insertion.
@@ -35,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple, TypeVar
 
+from . import fastltr as fl
 from . import kmer2ltr as k2l
 from .table import Columns, as_int, is_missing
 
@@ -418,6 +421,19 @@ def build_suffixerator_index(gt_path: str, chunk_fa: str, indexname: str, verbos
     if r.returncode != 0:
         raise RuntimeError(f"gt suffixerator failed for {chunk_fa}:\n{(r.stderr or '').strip()}")
 
+def fastltr_active(mode: str, ltr_timeout: int) -> bool:
+    """Whether FastLTR can run at all: always with "all"; with "rescue" only
+    when a cap can fire, since it acts on capped chunks alone."""
+    return mode == "all" or (mode == "rescue" and bool(ltr_timeout) and ltr_timeout > 0)
+
+
+def _timeout_text(te: subprocess.TimeoutExpired) -> str:
+    """What a killed call had written to stdout. On POSIX subprocess hands it
+    back as bytes even under text=True, which write_text would refuse."""
+    out = te.stdout or ""
+    return out.decode(errors="replace") if isinstance(out, bytes) else out
+
+
 def run_ltrharvest_scn_and_gff3(
     gt_path: str,
     indexname: str,
@@ -426,11 +442,12 @@ def run_ltrharvest_scn_and_gff3(
     ltrharvest_args: List[str],
     timeout_s: int = 0,
     verbose: bool = False,
-):
+) -> bool:
     """
     - SCN/tabular output is stdout (with -tabout yes)
     - GFF3 output goes to gff3_path (with -gff3 <file>)
     - If timeout occurs, salvage partial stdout to scn_path and keep any partial gff3 file.
+    Returns True when the call was cut short by the timeout.
     """
     cmd = [gt_path, "ltrharvest", "-index", indexname] + ltrharvest_args + ["-tabout", "yes", "-gff3", gff3_path]
 
@@ -448,14 +465,15 @@ def run_ltrharvest_scn_and_gff3(
         if r.returncode != 0:
             raise RuntimeError(f"gt ltrharvest failed for index {indexname}:\n{(r.stderr or '').strip()}")
         Path(scn_path).write_text(r.stdout or "")
+        return False
 
     except subprocess.TimeoutExpired as te:
-        partial = te.stdout or ""
-        Path(scn_path).write_text(partial)
+        Path(scn_path).write_text(_timeout_text(te))
         gp = Path(gff3_path)
         if not gp.exists():
             gp.touch()
-        print(f"[WARN] ltrharvest timeout for index {indexname} after {timeout_s}s; salvaged partial SCN/GFF3.", file=sys.stderr)
+        print(f"[WARN] ltrharvest timeout for index {indexname} after {timeout_s}s; kept its partial output, if any.", file=sys.stderr)
+        return True
 
 def process_one_chunk(
     gt_path: str,
@@ -471,14 +489,23 @@ def process_one_chunk(
     trf_timeout_s: int = 0,
     trf_min_copy: float = 0.0,
     verbose: bool = False,
-) -> Tuple[ChunkInfo, Optional[str], Optional[str], Optional[str]]:
+    fastltr_bin: Optional[str] = None,
+    fastltr_args: Optional[List[str]] = None,
+    fastltr_min_ltr: int = fl.DEFAULT_MIN_LTR,
+    split_char: Optional[str] = None,
+    fastltr_mode: str = "all",
+) -> Tuple[ChunkInfo, Optional[str], Optional[str], Optional[str], Optional[str], Set[str], dict]:
     """
     Returns:
       (chunk,
        ltrharvest_scn_path or None,
        ltrharvest_gff3_path or None,
-       ltrfinder_scn_path (converted) or None)
+       ltrfinder_scn_path (converted) or None,
+       fastltr_scn_path or None,
+       names of the callers --ltr-timeout cut short on this chunk,
+       FastLTR counts: {"periodic": pairs dropped as tandem-array units})
     """
+    capped: Set[str] = set()
     wdir = mkdirp(Path(work_dir) / chunk.chunk_id)
     local_fa = str(wdir / Path(chunk.fasta_path).name)
     shutil.copyfile(chunk.fasta_path, local_fa)
@@ -511,32 +538,47 @@ def process_one_chunk(
 
         harvest_scn_path = str(wdir / f"{chunk.chunk_id}.ltrharvest.scn")
         harvest_gff3_path = str(wdir / f"{chunk.chunk_id}.ltrharvest.gff3")
-        run_ltrharvest_scn_and_gff3(
-            gt_path, indexname, harvest_scn_path, harvest_gff3_path, ltrharvest_args,
-            timeout_s=ltr_timeout_s, verbose=verbose,
-        )
+        if run_ltrharvest_scn_and_gff3(
+                gt_path, indexname, harvest_scn_path, harvest_gff3_path, ltrharvest_args,
+                timeout_s=ltr_timeout_s, verbose=verbose):
+            capped.add("LTRharvest")
 
     if ltr_tools in ("both", "ltr_finder"):
         raw_path = str(wdir / f"{chunk.chunk_id}.ltr_finder.raw.scn")
         conv_path = str(wdir / f"{chunk.chunk_id}.ltr_finder.ltrharvest_like.scn")
 
-        run_ltrfinder_raw(ltrfinder_path, local_fa, raw_path, ltrfinder_args, timeout_s=ltr_timeout_s, verbose=verbose)
+        if run_ltrfinder_raw(ltrfinder_path, local_fa, raw_path, ltrfinder_args,
+                             timeout_s=ltr_timeout_s, verbose=verbose):
+            capped.add("LTR_FINDER")
         raw_text = Path(raw_path).read_text() if Path(raw_path).exists() else ""
         ltrfinder_w2_to_ltrharvest_scn(raw_text, conv_path)
 
         finder_scn_path = conv_path
 
-    return chunk, harvest_scn_path, harvest_gff3_path, finder_scn_path
+    # Same masked chunk as the other two, same per-call cap. FastLTR finishes in
+    # seconds where they stall, so a capped chunk still yields candidates;
+    # "rescue" runs it only there.
+    fastltr_scn_path = None
+    fastltr_stats: dict = {}
+    if fastltr_bin and (fastltr_mode == "all" or capped):
+        fastltr_scn_path = str(wdir / f"{chunk.chunk_id}.fastltr.scn")
+        fl.run_chunk(fastltr_bin, local_fa, str(wdir), fastltr_scn_path,
+                     fastltr_args or [], min_ltr=fastltr_min_ltr, timeout_s=ltr_timeout_s,
+                     split_char=split_char, verbose=verbose, stats=fastltr_stats)
+
+    return (chunk, harvest_scn_path, harvest_gff3_path, finder_scn_path, fastltr_scn_path,
+            capped, fastltr_stats)
 
 # -----------------------------
 # Step 5b: ltr_finder per chunk + convert to ltrharvest-style SCN
 # -----------------------------
 
-def run_ltrfinder_raw(ltrfinder_path: str, chunk_fa: str, raw_out_path: str, ltrfinder_args: List[str], timeout_s: int = 0, verbose: bool = False):
+def run_ltrfinder_raw(ltrfinder_path: str, chunk_fa: str, raw_out_path: str, ltrfinder_args: List[str], timeout_s: int = 0, verbose: bool = False) -> bool:
     """
     Runs ltr_finder on chunk_fa. Captures stdout to raw_out_path.
     If timeout occurs, salvages partial stdout to raw_out_path.
     NOTE: -w 2 is required (user stated); enforced elsewhere.
+    Returns True when the call was cut short by the timeout.
     """
     cmd = [ltrfinder_path] + ltrfinder_args + [chunk_fa]
 
@@ -554,11 +596,12 @@ def run_ltrfinder_raw(ltrfinder_path: str, chunk_fa: str, raw_out_path: str, ltr
         if r.returncode != 0:
             raise RuntimeError(f"ltr_finder failed:\n{(r.stderr or '').strip()}")
         Path(raw_out_path).write_text(r.stdout or "")
+        return False
 
     except subprocess.TimeoutExpired as te:
-        partial = te.stdout or ""
-        Path(raw_out_path).write_text(partial)
-        print(f"[WARN] ltr_finder timeout after {timeout_s}s on {chunk_fa}; salvaged partial stdout.", file=sys.stderr)
+        Path(raw_out_path).write_text(_timeout_text(te))
+        print(f"[WARN] ltr_finder timeout after {timeout_s}s on {chunk_fa}; kept its partial output, if any.", file=sys.stderr)
+        return True
 
 def ltrfinder_w2_to_ltrharvest_scn(raw_text: str, out_scn_path: str):
     """
@@ -836,6 +879,14 @@ def stitch_scn(chunk_triplets: List[Tuple[ChunkInfo, str, str]], stitched_out: s
 def stitch_scn_from_pairs(pairs: List[Tuple[ChunkInfo, str]], stitched_out: str):
     triplets = [(c, scn, "") for (c, scn) in pairs]
     stitch_scn(triplets, stitched_out)
+
+def _count_scn_rows(path: str) -> int:
+    p = Path(path)
+    if not p.exists():
+        return 0
+    with p.open() as fh:
+        return sum(1 for line in fh if line.strip() and not line.startswith("#"))
+
 
 def merge_stitched_scns(stitched_scns: List[str], merged_out: str):
     """
@@ -3755,7 +3806,7 @@ def main():
         dest="use_sdust",
         action="store_true",
         default=False,
-        help="Run sdust on each full-length LTR-RT candidate after the LTRharvest/LTRfinder "
+        help="Run sdust on each full-length LTR-RT candidate after the LTR callers' "
              "merge and drop those dominated by low-complexity sequence, before TEBinSorter "
              "ever sees them (default: disabled)."
     )
@@ -3798,6 +3849,23 @@ def main():
     ap.add_argument("--ltrfinder", default="ltr_finder",
                     help="Path to ltr_finder v1.07 executable")
 
+    ap.add_argument("--fastltr", default="rescue", choices=["rescue", "all", "off"],
+                    help="Third caller: FastLTR (LTRquest's adaptation, built in --tools-dir). "
+                         "It does not stall on satellite, telomere or rDNA arrays. 'rescue' runs "
+                         "it only on chunks where --ltr-timeout cut LTRharvest or LTR_FINDER "
+                         "short (so without a cap it never runs); 'all' on every chunk, which "
+                         "adds elements elsewhere too but at lower precision; 'off' never.")
+    ap.add_argument("--no-fastltr", dest="fastltr", action="store_const", const="off",
+                    default=argparse.SUPPRESS, help="Same as --fastltr off.")
+    ap.add_argument("--fastltr-args", default=fl.DEFAULT_ARGS,
+                    help="Quoted args for FastLTR: -d/-D least/greatest spacing of the two LTR "
+                         "starts (-D at most 20000; masked bases are removed first, so a "
+                         "nested outer is measured without its masked inner), -w count seeds "
+                         "over +-w diagonals, -s a spacing d needs > d>>s seeds.")
+    ap.add_argument("--fastltr-min-ltr", type=int, default=fl.DEFAULT_MIN_LTR,
+                    help="Drop FastLTR pairs with a copy shorter than this many bp "
+                         "(LTRharvest's -minlenltr).")
+
     ap.add_argument(
         "--require-run-chars",
         default=None,
@@ -3831,7 +3899,10 @@ def main():
         "--ltr-timeout",
         type=int,
         default=0,
-        help="Max seconds allowed per chunk per LTR tool call (0 = no timeout). Timed-out chunks salvage partial outputs."
+        help="Max seconds per chunk for each LTR caller (0 = no cap). LTRharvest and LTR_FINDER "
+             "write their results only when they finish, so a capped call loses that chunk's "
+             "candidates; --fastltr rescue (default) searches such chunks with FastLTR, which "
+             "keeps the pairs it found before its own cap."
     )
 
     ap.add_argument(
@@ -3902,6 +3973,15 @@ def main():
     if args.ltr_tools in ("both", "ltr_finder"):
         which_or_die(args.ltrfinder)
 
+    fastltr_bin = None
+    fastltr_args: List[str] = []
+    args.use_fastltr = fastltr_active(args.fastltr, args.ltr_timeout)
+    if args.use_fastltr:
+        if args.fastltr_min_ltr < 1:
+            ap.error("--fastltr-min-ltr must be >= 1")
+        fastltr_bin = fl.ensure(tools_dir)
+        fastltr_args = args.fastltr_args.strip().split()
+
     lf_args = args.ltrfinder_args.strip().split()
     if args.ltr_tools in ("both", "ltr_finder"):
         if "-w" not in lf_args:
@@ -3918,6 +3998,9 @@ def main():
         print(f"  workdir:       {workdir}", file=sys.stderr)
         print(f"  threads:       {args.threads}", file=sys.stderr)
         print(f"  ltr_tools:     {args.ltr_tools}", file=sys.stderr)
+        print(f"  fastltr:       {args.fastltr}"
+              + (f" ({args.fastltr_args}; min copy {args.fastltr_min_ltr} bp)"
+                 if args.use_fastltr else ""), file=sys.stderr)
         print(f"  tebinsorter:   {args.use_tesorter}", file=sys.stderr)
         print(f"  trf masking:   {args.use_trf}", file=sys.stderr)
         print(f"  sdust filter:  {args.use_sdust}"
@@ -4037,6 +4120,9 @@ def main():
     harvest_pairs: List[Tuple[ChunkInfo, str]] = []
     harvest_gffs: List[Tuple[ChunkInfo, str, str]] = []
     finder_pairs: List[Tuple[ChunkInfo, str]] = []
+    fastltr_pairs: List[Tuple[ChunkInfo, str]] = []
+    capped_counts: Counter = Counter()
+    fastltr_periodic = 0
 
     failures = 0
     total = len(chunks)
@@ -4059,6 +4145,11 @@ def main():
                 args.trf_timeout,
                 args.trf_min_copy,
                 verbose,
+                fastltr_bin,
+                fastltr_args,
+                args.fastltr_min_ltr,
+                exclude_run_char,
+                args.fastltr,
             ): c
             for c in chunks
         }
@@ -4068,7 +4159,10 @@ def main():
             completed += 1
 
             try:
-                chunk, h_scn, h_gff, f_scn = fut.result()
+                chunk, h_scn, h_gff, f_scn, fl_scn, capped, fl_stats = fut.result()
+                for name in capped:
+                    capped_counts[name] += 1
+                fastltr_periodic += fl_stats.get("periodic", 0)
 
                 if h_scn:
                     harvest_pairs.append((chunk, h_scn))
@@ -4076,6 +4170,8 @@ def main():
                     harvest_gffs.append((chunk, h_scn, h_gff))
                 if f_scn:
                     finder_pairs.append((chunk, f_scn))
+                if fl_scn:
+                    fastltr_pairs.append((chunk, fl_scn))
 
             except Exception as e:
                 failures += 1
@@ -4093,6 +4189,16 @@ def main():
 
     if failures:
         print(f"[WARN] {failures} chunks failed; stitching continues using successes only.")
+    if args.use_fastltr:
+        print(f"[Step5] FastLTR searched {len(fastltr_pairs)} chunk(s); dropped "
+              f"{fastltr_periodic} pair(s) whose copy recurs one spacing further out "
+              f"(tandem-array units)")
+    if args.ltr_timeout:
+        print(f"[Step5] --ltr-timeout {args.ltr_timeout}s cut short: "
+              f"LTRharvest on {capped_counts['LTRharvest']} chunk(s), "
+              f"LTR_FINDER on {capped_counts['LTR_FINDER']} chunk(s); "
+              f"FastLTR searched {len(fastltr_pairs)} chunk(s)"
+              + (f" (--fastltr {args.fastltr})" if args.use_fastltr else " (--fastltr off)"))
 
     # Chunk FASTAs are no longer needed once LTR calling is done
     _clean_path(chunks_dir, verbose)
@@ -4101,6 +4207,7 @@ def main():
     stitched_gff3 = str(workdir / f"{out_prefix}.ltrharvest.stitched.gff3")
     stitched_harvest_scn = str(workdir / f"{out_prefix}.ltrharvest.stitched.scn")
     stitched_finder_scn  = str(workdir / f"{out_prefix}.ltrfinder.stitched.scn")
+    stitched_fastltr_scn = str(workdir / f"{out_prefix}.fastltr.stitched.scn")
 
     # Merged SCN stored inside workdir (edit 6)
     merged_scn = str(workdir / f"{out_prefix}.ltrtools.stitched.scn")
@@ -4121,19 +4228,30 @@ def main():
     else:
         Path(stitched_finder_scn).touch()
 
+    if args.use_fastltr:
+        print(f"[Step6] stitching SCN  (FastLTR) -> {stitched_fastltr_scn}")
+        stitch_scn_from_pairs(fastltr_pairs, stitched_fastltr_scn)
+
     to_merge = []
     if args.ltr_tools in ("both", "ltrharvest"):
         to_merge.append(stitched_harvest_scn)
     if args.ltr_tools in ("both", "ltr_finder"):
         to_merge.append(stitched_finder_scn)
+    if args.use_fastltr:
+        to_merge.append(stitched_fastltr_scn)
 
     print(f"[Step6] merging stitched SCN(s) -> {merged_scn}")
     merge_stitched_scns(to_merge, merged_scn)
+    print("[Step6] candidates per caller: " + ", ".join(
+        f"{name} {_count_scn_rows(p)}" for name, p in
+        (("LTRharvest", stitched_harvest_scn), ("LTR_FINDER", stitched_finder_scn),
+         ("FastLTR", stitched_fastltr_scn)) if p in to_merge)
+        + f"; merged {_count_scn_rows(merged_scn)}")
 
     # Per-chunk run dirs are no longer needed after stitching
     _clean_path(ltr_work, verbose)
     if args.clean:
-        for _p in [stitched_harvest_scn, stitched_finder_scn, stitched_gff3]:
+        for _p in [stitched_harvest_scn, stitched_finder_scn, stitched_fastltr_scn, stitched_gff3]:
             _clean_path(_p, verbose)
 
     # Optional: size-based filtering of merged SCN
