@@ -129,7 +129,7 @@ mamba env remove -n ltrquest
 ```
 
 `environment.yml` carries `git`, `make` and a C compiler on purpose — mainly
-for TRF-mod, which is cloned *and* compiled and runs by default, so without a
+for TRF-mod and FastLTR, which are cloned *and* compiled, so without a
 compiler the first real run stops on `cc: not found`. Pass `--no-trf` if you
 would rather not have it at all. TEsorter2 is cloned the same way but never
 compiled. Kmer2LTR needs neither step, normally: it is an ordinary Python
@@ -163,12 +163,13 @@ pip install ltrquest
 ```
 
 You then have to supply the external binaries yourself; see
-[`environment.yml`](environment.yml) for the list. TEsorter2, TRF-mod and
-sdust are fetched into `--tools-dir` on first use — TRF-mod and sdust are then
-compiled, TEsorter2 is not. Kmer2LTR is an ordinary Python package: `pip
-install` it yourself, or let LTRquest fetch the same clone into `--tools-dir`,
-unbuilt either way. The container prepares all four during its own build and
-never reaches the network.
+[`environment.yml`](environment.yml) for the list. TEsorter2, TRF-mod, sdust
+and FASTAN are fetched into `--tools-dir` on first use — TRF-mod and sdust are
+then compiled, and FastLTR is compiled from FASTAN with LTRquest's own
+`FastLTR.c`; TEsorter2 is not compiled. Kmer2LTR is an ordinary Python
+package: `pip install` it yourself, or let LTRquest fetch the same clone into
+`--tools-dir`, unbuilt either way. The container prepares all five during its
+own build and never reaches the network.
 </details>
 
 ### One command, whichever route you took
@@ -319,6 +320,51 @@ set, keep `high`.
 Full column and GFF3 reference: **[docs/outputs.md](docs/outputs.md)**.
 Every flag: `ltrquest --help`.
 
+## Complete assemblies: capped chunks and FastLTR
+
+On a centromeric satellite, an rDNA array or a long telomere, LTRharvest and
+LTR_FINDER can run for tens of minutes on one 500 kb chunk.
+`--detect-args "ltr-timeout=30"` stops each call after 30 s, but neither tool
+writes anything before it finishes, so a chunk it is cut short on loses **all**
+of that caller's candidates, not just the satellite's.
+
+LTRquest therefore carries a third caller: its own adaptation of Gene Myers'
+FastLTR (from [FASTAN](https://github.com/thegenemyers/FASTAN), the detector
+behind [HiRepEat](https://github.com/AnantMaheshwari/HiRepEat)), built into the
+tools directory on first use. It counts 8-mer matches along the diagonals of
+32 kb windows and aligns only the promising ones; LTRquest's version marks each
+tandem alignment so it crosses an array once instead of once per spacing, and
+it searches the same LTR spacings as LTRharvest. It finishes any chunk in
+seconds.
+
+```bash
+ltrquest --genome t2t.fa --proteins prot.fa --threads 20 --detect-args "ltr-timeout=30"
+```
+
+`--fastltr rescue` (the default) runs FastLTR only on chunks the cap fired on;
+its candidates join the pool and pass through Kmer2LTR, TEsorter2 and every
+filter like the others'. A FastLTR pair whose copy recurs one spacing further
+out is a tandem-array unit, not an LTR pair, and is dropped first.
+`--fastltr all` runs it on every chunk, and `off` never. The log counts the
+capped chunks per caller at the end of each round's step 5.
+
+Against uncapped runs, on the chunks a 30 s cap cut both callers short on:
+
+| | *A. thaliana* T2T | rice T2T-NIP |
+|---|---|---|
+| curated-supported elements recovered, cap alone | 0 of 97 | 1 of 76 |
+| ... cap + `--fastltr rescue` | **66 of 97** | **65 of 76** |
+| elements kept where no cap fired | 97.7% | 99.6% |
+| wall time: cap / cap + rescue / uncapped | 0.33 / 0.37 / 1.48 h | 0.81 / 0.70 / 1.26 h |
+
+Inside rice's CENH3 centromeres the cap alone leaves 97 elements, rescue 150
+and the uncapped run 155. Of 401 LTR-RTs planted into real CEN180 and rDNA
+arrays, a 30 s cap finds 26%, with rescue 88%, uncapped 92%. In human rDNA
+arrays (43 kb units) rescue also brings back unit-copy calls the tandem filter
+does not recognize; see the benchmark page.
+
+Benchmarks and how to rerun them: [benchmarks/fastltr/](benchmarks/fastltr/README.md).
+
 ## Re-boundarying truncated calls
 
 LTRharvest and LTR_FINDER stop extending an LTR pair at the first indel or
@@ -382,7 +428,7 @@ deliberately differs from the CLI.
 ```
 ltrquest (driver)
   │
-  ├── round 1..N ──┬─ ltrquest.detect     LTRharvest + LTR_finder → Kmer2LTR → TEsorter2
+  ├── round 1..N ──┬─ ltrquest.detect     LTRharvest + LTR_finder (+ FastLTR) → Kmer2LTR → TEsorter2
   │                └─ ltrquest.mask       mask this round's hits → next round's genome
   │
   ├── ltrquest.reconcile                  pool rounds, resolve containment → depth buckets
@@ -412,6 +458,15 @@ LTRquest was extracted from [synLTR](https://github.com/cwb14/synLTR) and shares
 its false-positive family caller with
 [Kmer2LTR](https://github.com/cwb14/Kmer2LTR). If you use it, please cite this
 repository.
+
+The FastLTR caller is adapted from Gene Myers' FastLTR in
+[FASTAN](https://github.com/thegenemyers/FASTAN), under FASTAN's license
+([`src/ltrquest/fastltr/LICENSE.FASTAN`](src/ltrquest/fastltr/LICENSE.FASTAN)),
+and takes two fixes from [HiRepEat](https://github.com/AnantMaheshwari/HiRepEat).
+If your results rely on it, please also cite HiRepEat: Maheshwari A, Myers EW,
+et al. Efficient and precise discovery of LTR-retrotransposon families using
+HiRepEat. *bioRxiv* (2026),
+[doi:10.64898/2026.10.14.759201](https://doi.org/10.64898/2026.10.14.759201).
 
 ## License
 

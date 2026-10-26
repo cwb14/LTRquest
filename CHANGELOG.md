@@ -21,6 +21,52 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Added
 
+- **FastLTR, a third LTR caller** (`--fastltr rescue|all|off`, default `rescue`,
+  or `--no-fastltr`; `--fastltr-args`; `ltrquest-detect` also takes
+  `--fastltr-min-ltr`; Nextflow `--fastltr`, `--ltr_timeout`).
+  `--ltr-timeout` stops an LTRharvest or LTR_FINDER call that runs too long on a
+  chunk, and neither tool writes anything before it finishes, so a capped 500 kb
+  chunk lost every candidate of that caller, not only its satellite's: two CHM13
+  chunks capped at 30 s gave 0 candidates from either tool, and a 30 s cap fired
+  on 60 of 302 *A. thaliana* T2T chunks (its five centromeres and both NORs).
+  LTRquest now ships its own adaptation of Gene Myers' FastLTR (FASTAN, the
+  detector behind HiRepEat; `src/ltrquest/fastltr/FastLTR.c`, compiled against
+  FASTAN 843d0ed in `--tools-dir` on first use, and in the image at build time;
+  FASTAN's license ships beside it as `LICENSE.FASTAN`).
+  It searches LTR spacings of 100-20,000 bp (FastLTR's own floor of 3 kb, 2 kb in
+  HiRepEat's build, leaves out 63%, or 47%, of an earlier run's CHM13 calls; raw
+  recall of those calls rose from 20% to 63%, 82% of the high-confidence ones); a
+  tandem alignment marks the bases it covers so other spacings do not re-align
+  through the same array (a CHM13 p-arm chunk went from 212 s to 0.97 s); seeds
+  are counted over +-8 diagonals so indels between old LTRs do not hide them;
+  masked bases are deleted before the call and hits lifted back, so FastLTR sees
+  an outer's LTR pair once its inner is masked; and a pair whose copy recurs one
+  spacing further out is dropped as a tandem-array unit (FastLTR reports every
+  direct-repeat pair, where LTRharvest keeps the best of overlapping ones).
+  `rescue` runs it only on chunks a cap fired on (with no cap it never runs and is
+  not built); `all` runs it on every chunk. Its candidates join the pool before
+  Kmer2LTR, and every later stage treats them like the others'. Re-running a
+  directory whose genomes were detected with `ltr-timeout` before this change now
+  stops, as for any changed detection setting, since their records lack FastLTR:
+  pass `--no-fastltr` to reuse them as they were, or `--redetect`.
+
+  Against uncapped runs, a 30 s cap with rescue recovers 68% (*A. thaliana*) and
+  86% (rice T2T-NIP) of the curated-library-supported elements a 30 s cap alone
+  loses entirely in fully capped chunks (0% and 1%), keeps 98.4% and 99.7% of
+  those where no cap fired, and costs 0.37 h against 0.33 h for the cap alone and
+  1.48 h uncapped (*A. thaliana*). Inside rice's CENH3 centromeres it restores 150
+  elements (67 CRM; 120 curated-supported) where the cap alone leaves 97 and the
+  uncapped run finds 155 (116 supported). Of 401 library LTR-RTs planted into real
+  CEN180 and 45S rDNA arrays, cap plus rescue recovers 352 (88%) against 103 (26%).
+  `all` is not the default: in chunks no cap fired on, the elements it adds to an
+  uncapped rice run carry curated support 36% against that run's own 63% (rice:
+  +392 supported, +770 unsupported elements). On a simulated genome with no arrays
+  it is harmless (F1 0.951 against 0.946), so it stays available for maximum
+  recall. Known gap: arrays whose unit is longer than 20 kb (human 45S rDNA,
+  43 kb) escape both the array test and the tandem filter, and on CHM13 rescue
+  calls 375 `LTR/unknown` unit copies there (LTRquest 1.0.1 at a 300 s cap: 86).
+  Benchmarks: `benchmarks/fastltr/`.
+
 - A tandem-array filter, on by default (`--no-tandem-filter` turns it off).
   Complete assemblies include the rDNA arrays and centromeric satellites, and
   LTRharvest and LTR_FINDER pair any two copies of a repeat unit as "LTRs": the
@@ -193,6 +239,14 @@ the old one's, which forces the schema, flag and stage changes below.
   collected those files; the process no longer stages input it never reads.
 
 ### Fixed
+
+- **A capped call that had written output would have failed its chunk.** On a
+  timeout, Python's subprocess hands back what the killed call printed as bytes
+  even in text mode, and the salvage wrote it with `write_text`, which raises on
+  bytes. LTRharvest and LTR_FINDER print nothing before they finish, so the bug
+  never fired -- and "salvaged partial SCN" always salvaged nothing. The partial
+  output is now decoded; FastLTR, which prints each hit as it finds it, relies on
+  that.
 
 - **Ends 1-2 bp off a canonical boundary were reported where they were called.**
   Kmer2LTR records a TSD it finds after moving a boundary 1 bp (`tsd_offset`) but

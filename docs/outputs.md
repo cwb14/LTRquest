@@ -60,6 +60,8 @@ Occasionally useful:
 | `--run-sdust` | Drop candidates made mostly of low-complexity sequence, early. Off by default. |
 | `--no-tandem-filter` | Keep calls cut from tandem arrays (rDNA, satellites) in the `_clean_` outputs — see below. |
 | `--redetect` | Detect every genome again instead of reusing ones detected earlier in this directory — see [§5](#5-multiple-genomes-shared-family-names). |
+| `--detect-args "ltr-timeout=30"` | Cap each LTR caller at 30 s per 500 kb chunk — see **Capped chunks** below. |
+| `--fastltr rescue\|all\|off` | The third LTR caller, FastLTR (default `rescue`) — see **Capped chunks** below. |
 
 **Tandem arrays.** Complete (telomere-to-telomere) assemblies include the rDNA
 arrays and centromeric satellites, and an LTR caller pairs any two copies of a
@@ -74,6 +76,31 @@ keep these calls, `<prefix>_fpcheck.tandem.tsv` lists every call's two scores
 and verdict, and they never count toward the FP fraction that triggers
 masking. Detection is untouched, so a reused genome needs no `--redetect` to
 gain or lose the filter.
+
+**Capped chunks.** Each round cuts the genome into 500 kb chunks and runs
+LTRharvest and LTR_FINDER on every chunk, plus, where `--fastltr` says so, a
+third caller: FastLTR (LTRquest's adaptation of Gene Myers' FastLTR, from
+FASTAN). Their candidates are pooled before Kmer2LTR, and every later stage
+treats them alike. On a satellite, rDNA
+or telomere array LTRharvest and LTR_FINDER can run for tens of minutes per
+chunk. `--detect-args "ltr-timeout=N"` stops each such call after N seconds,
+but neither tool writes anything until it finishes, so a chunk it is cut short
+on loses all of that caller's candidates, not only the array's. FastLTR crosses
+an array in seconds, so it still searches those chunks: `--fastltr rescue` runs
+it only on chunks a cap fired on, `all` on every chunk, `off` never. The detector
+log names each capped chunk (`[WARN] ltrharvest timeout ...`) and counts them per
+caller at the end of step 5. FastLTR reports every non-overlapping direct-repeat
+pair, where LTRharvest keeps only the best of overlapping ones, so inside a
+degenerate tandem array it would pair each unit with the next; a FastLTR pair is
+dropped when either copy recurs one spacing further out (an LTR-RT has two
+copies, an array more), and step 5 counts those too. That test reaches 20 kb;
+an array whose unit is longer (human 45S rDNA, 43 kb) is recognized neither by it
+nor by the tandem filter above, and in human rDNA rescue calls copies of a
+structure inside the unit (`LTR/unknown`, low confidence), as LTRharvest and
+LTR_FINDER do when they finish such a chunk. Each round's work
+directory keeps every caller's candidates in LTRharvest's tabular layout,
+chromosome last:
+`<prefix>_r<N>.work/<prefix>_r<N>.{ltrharvest,ltrfinder,fastltr}.stitched.scn`.
 
 ## 4. Primary outputs: `depth<N>_clean_ltr.{tsv,fa}`
 
@@ -601,3 +628,8 @@ scored at ≥90% reciprocal overlap:
 |---|---|---|---|---|---|
 | **LTRquest** | **5:18** | 4,328 | 170 | 140 | **0.966** |
 | EDTA raw LTR module (LTR_retriever) | 20:28 | 2,085 | 0 | 2,383 | 0.64 |
+
+Feature benchmarks, with how to rerun them:
+[`benchmarks/fastltr/`](../benchmarks/fastltr/README.md) (capped chunks and
+FastLTR) and [`benchmarks/reboundary/`](../benchmarks/reboundary/README.md)
+(`--reboundary`).

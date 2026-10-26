@@ -57,7 +57,7 @@ re-run for all of them.
 |---|---|
 | `singularity` / `apptainer` | The published image, no root needed. The usual choice on a shared cluster. Everything is baked in; runs offline. |
 | `docker` | The same image, on a machine where you have root. |
-| `conda` | Builds the per-module environments. Kmer2LTR and TEsorter2 are not on Bioconda, so this path still fetches them on first use. |
+| `conda` | Builds the per-module environments. Kmer2LTR, TEsorter2, TRF-mod and FastLTR (FASTAN) are not on Bioconda, so this path still fetches them on first use and compiles the last two. |
 | `test` | Minimal wiring check. Pair with `-stub-run` and it needs no tools at all. |
 | `test_full` | The real *Arabidopsis* chr2 that ships with the repo, all rounds. |
 | `awsbatch` | AWS Batch against an S3 work directory — see below. |
@@ -190,7 +190,9 @@ calls, invoked the same way. The CLI's `--strand-recovery` and
 here, following the pipeline's own underscore convention, and its
 `--no-tandem-filter` is `--skip_tandem_filter`. `flag-fp` stages every sample's
 genome for the tandem-array purge, so each call is judged against its own
-flanks; its scores publish to `results/families/*_fpcheck.tandem.tsv`.
+flanks; its scores publish to `results/families/*_fpcheck.tandem.tsv`. The
+CLI's `--fastltr` is the same `--fastltr all|rescue|off` here, and its
+`--detect-args "ltr-timeout=N"` is `--ltr_timeout N`.
 
 ## Development
 
