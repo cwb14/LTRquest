@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import (Callable, Dict, FrozenSet, Iterable, Iterator, List, NamedTuple, Optional,
                     Sequence, Set, Tuple)
 
+from . import overlaps as ov
 from .annotate import discover_depth_tables, element_key, header_names, read_table, target_mode
 from .detect import revcomp as revcomp_record
 from .ends import confidence
@@ -385,6 +386,54 @@ def duplicate_moves(items: Sequence[Tuple[Member, int, int]]) -> Set[str]:
     return lost
 
 
+def ltr_conflicts(index: SpanIndex, by_uid: Dict[str, Member],
+                  moves: Dict[str, Tuple[int, int, int, int]],
+                  partner_of: Dict[str, str]) -> Set[str]:
+    """uids of moves whose re-measured call breaks the overlap rule (ltrquest.overlaps)
+    with a call it kept to as called.
+
+    The span checks cannot see this: only Kmer2LTR's re-measurement gives a moved call
+    its new LTRs, and one of them can come to overlap an LTR of a call nested in it or
+    hosting it, or the two can come to share an end. `moves`: uid -> the re-measured
+    LTRs (left LTR start, end, right LTR start, end); `partner_of`: uid -> the call its
+    move absorbs, which leaves with it. A pair in conflict before either call moved (a
+    tenant reconcile left in its host's LTR) is not the move's doing.
+
+    Each move is judged against every other call as it stands, as `conflict` judges
+    spans; then the moves left are judged against each other in `genome_order`, the
+    first keeping its claim, as in `mutual_conflicts`. A call whose move is refused there
+    stands as called, which the first pass already cleared against every move kept.
+    """
+    def called(m: Member) -> ov.Call:
+        return ov.Call(m.key, m.chrom, m.start, m.end, (m.start, m.l1, m.r0, m.end), ())
+
+    new = {u: ov.Call(by_uid[u].key, by_uid[u].chrom, ltrs[0], ltrs[3], ltrs, ())
+           for u, ltrs in moves.items()}
+
+    def made(u: str, v: str, theirs: ov.Call) -> bool:
+        return (ov.relation(new[u], theirs) == "conflict"
+                and ov.relation(called(by_uid[u]), called(by_uid[v])) != "conflict")
+
+    lost: Set[str] = set()
+    for u, x in new.items():
+        m = by_uid[u]
+        for _, _, key in index.overlapping(m.prefix, m.chrom, x.start, x.end):
+            v = f"{m.prefix}\t{key}"
+            if v not in (u, partner_of.get(u)) and made(u, v, called(by_uid[v])):
+                lost.add(u)
+                break
+    kept: Dict[Tuple[str, str, int], List[str]] = defaultdict(list)
+    for m in sorted((by_uid[u] for u in new if u not in lost), key=genome_order):
+        x = new[m.uid]
+        bins = [(m.prefix, m.chrom, b) for b in range(x.start // ov.BIN, x.end // ov.BIN + 1)]
+        if any(made(m.uid, v, new[v]) for b in bins for v in kept[b]):
+            lost.add(m.uid)
+            continue
+        for b in bins:
+            kept[b].append(m.uid)
+    return lost
+
+
 @dataclass(frozen=True)
 class Accepted:
     member: Member
@@ -395,6 +444,16 @@ class Accepted:
     right: int
     # host key -> ((genomic start, forward characters), ...) over trimmed bases
     restore: Dict[str, Tuple[Tuple[int, str], ...]] = field(default_factory=dict)
+
+
+_LTR_COLUMNS = [COLUMNS.index(c) for c in ("ltr5_start", "ltr5_end", "ltr3_start", "ltr3_end")]
+
+
+def new_ltrs(a: Accepted) -> Tuple[int, int, int, int]:
+    """The re-measured call's LTRs in genome coordinates: left LTR start, end, right LTR
+    start, end (its columns count from the new record's first base, `left`)."""
+    s5, e5, s3, e3 = (a.left + int(a.fields[i]) - 1 for i in _LTR_COLUMNS)
+    return s5, e5, s3, e3
 
 
 NEW_SUFFIX = ".new"

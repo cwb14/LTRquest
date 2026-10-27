@@ -12,9 +12,11 @@ same element that the move reaches is merged away. Kmer2LTR then re-measures the
 pair the element was called with, on the new record, with the templates' ends as
 external evidence: the outer ends stay where the templates put them, the other
 LTR's inner end follows real homology, and bases with no partner are gaps, so the
-divergence is not inflated. Only the `_clean_` tables and FASTAs are rewritten;
-`<prefix>_reboundary.tsv` records every candidate and why it was or was not moved,
-and doubles as the old->new key map for the GFF3.
+divergence is not inflated. A move whose re-measured LTRs would overlap those of a
+call nested in it or hosting it, or share an end with one, is refused: the overlap
+rule (ltrquest.overlaps) allows the two calls only as they were. Only the `_clean_`
+tables and FASTAs are rewritten; `<prefix>_reboundary.tsv` records every candidate
+and why it was or was not moved, and doubles as the old->new key map for the GFF3.
 
 Usage:
   ltrquest-reboundary --indir RUN --prefix P1 [P2 ...] --genome G1 [G2 ...] [options]
@@ -57,10 +59,12 @@ from .reboundary_io import (
     leftover_message,
     leftover_staging,
     load_clean_tables,
+    ltr_conflicts,
     members_from,
     merge_partner,
     mutual_conflicts,
     nested_index,
+    new_ltrs,
     record_matches,
     rewrite,
     sanitize,
@@ -423,6 +427,7 @@ def _rebound(indir: str, prefixes: Sequence[str], tables, g: Genomes, s: Setting
     props: Dict[str, Proposal] = {}
     verdicts: List[Verdict] = []
     partner_of: Dict[str, str] = {}              # survivor uid -> the uid it absorbs
+    refused = set()                              # re-measured, a move the overlap rule refuses
     if not templates:
         warn("no element carries an exact TSD at its called ends, so there are no templates; "
              "nothing was moved")
@@ -509,6 +514,8 @@ def _rebound(indir: str, prefixes: Sequence[str], tables, g: Genomes, s: Setting
                 vlog(f"  conflicts: {dict(lost)}; split calls to merge: {len(partner_of)}")
             log(f"re-measuring {len(arb)} element(s) with Kmer2LTR")
             verdicts = pool.map(arbitrate, arb, chunksize=8) if arb else []
+            refused = ltr_conflicts(index, by_uid, {v.uid: new_ltrs(v.accepted) for v in verdicts
+                                                    if v.accepted is not None}, partner_of)
             vlog(f"  Kmer2LTR status: {dict(Counter(v.k2l_status for v in verdicts))}; "
                  f"verdicts: {dict(Counter(v.status for v in verdicts))} "
                  f"({time.time() - t0:.0f} s)")
@@ -521,8 +528,8 @@ def _rebound(indir: str, prefixes: Sequence[str], tables, g: Genomes, s: Setting
         row = rows[v.uid]
         row["k2l_status"] = v.k2l_status
         pu = partner_of.get(v.uid)
-        if v.accepted is None:
-            row["reason"] = v.status
+        if v.accepted is None or v.uid in refused:
+            row["reason"] = v.status if v.accepted is None else "ltr_conflict"
             _unmerge(rows, pu)
             continue
         a = v.accepted

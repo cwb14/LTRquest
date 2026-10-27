@@ -348,3 +348,13 @@ class TestResolveConflicts:
         outer = self.rec("c:1000-9000", 2, (0, 100.0, 0))
         bounds = {"c:3000-6000": (3000, 3299, 5701, 6000), "c:1000-9000": (1000, 1299, 8701, 9000)}
         assert resolve_conflicts([inner, outer], bounds) == ([inner, outer], 0)
+
+    def test_two_inners_of_one_host_still_compete_across_rounds(self):
+        from ltrquest.reconcile import resolve_conflicts
+        first = self.rec("c:3000-6000", 1, (3, 300.0, 0))
+        host = self.rec("c:1000-20000", 2, (0, 100.0, 0))
+        other = self.rec("c:4500-8000", 2, (1, 900.0, 0))     # crosses the first inner
+        bounds = {"c:3000-6000": (3000, 3299, 5701, 6000),
+                  "c:1000-20000": (1000, 1299, 19701, 20000),
+                  "c:4500-8000": (4500, 4799, 7701, 8000)}
+        assert resolve_conflicts([first, host, other], bounds) == ([first, host], 1)

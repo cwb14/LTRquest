@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -94,6 +95,39 @@ def _clean_path(path, verbose: bool = False):
             pass
         if verbose:
             print(f"[CLEAN] removed file: {p}", file=sys.stderr)
+
+_background_removals: List[threading.Thread] = []
+
+
+def _clean_dir_in_background(path, verbose: bool = False) -> None:
+    """Remove a folder without waiting for it, as `_clean_path` would.
+
+    A round's per-chunk folders hold tens of thousands of files, and the round used
+    to stop while they went. The folder is renamed aside at once, so a run killed
+    mid-delete leaves `<name>.deleting.<pid>`, not a half-emptied folder under the
+    name a re-run reuses, and a thread then deletes it while the round goes on.
+    `_wait_for_background_removals` waits for it; Python waits before exiting anyway.
+    """
+    p = Path(path)
+    if not p.is_dir():
+        _clean_path(p, verbose)
+        return
+    trash = p.with_name(f"{p.name}.deleting.{os.getpid()}")
+    try:
+        p.rename(trash)
+    except OSError:
+        trash = p
+    t = threading.Thread(target=shutil.rmtree, args=(trash,), kwargs={"ignore_errors": True},
+                         name=f"remove {p.name}")
+    t.start()
+    _background_removals.append(t)
+    if verbose:
+        print(f"[CLEAN] removing dir in the background: {p}", file=sys.stderr)
+
+
+def _wait_for_background_removals() -> None:
+    while _background_removals:
+        _background_removals.pop().join()
 
 def _format_hms(seconds: float) -> str:
     if not seconds or seconds == float("inf"):
@@ -1703,25 +1737,7 @@ def load_tebinsorter_domains_from_db(db_path: str, pipeline_py_path: str,
         # rewrite the display name.
         gene_display = dt
 
-        elem_len = seq_lengths.get(bs, 0)
-        if sd == "+":
-            rel_start = (ef - 1) * 3 + fr + 1
-            rel_end   = et * 3 + fr
-        elif sd == "-":
-            rel_start = elem_len - (et * 3 + fr) + 1
-            rel_end   = elem_len - ((ef - 1) * 3 + fr)
-        else:
-            rel_start, rel_end = ef, et
-
-        # Element name encodes genome offset: "chrom:gs-ge".
-        genome_offset = 1
-        if ":" in bs and "-" in bs.split(":", 1)[1]:
-            try:
-                genome_offset = int(bs.split(":", 1)[1].split("-", 1)[0])
-            except ValueError:
-                genome_offset = 1
-        nuc_start = rel_start + genome_offset - 1
-        nuc_end   = rel_end   + genome_offset - 1
+        nuc_start, nuc_end = _hit_genome_span(bs, sd, fr, ef, et, seq_lengths.get(bs, 0))
 
         result.setdefault(bs, []).append({
             "gene": gene_display,
@@ -1734,6 +1750,74 @@ def load_tebinsorter_domains_from_db(db_path: str, pipeline_py_path: str,
             "coverage": f"{float(hmm_cov[i]):.1f}",
         })
 
+    return result
+
+
+def _hit_genome_span(base_seq: str, strand: str, frame: int, env_from: int, env_to: int,
+                     elem_len: int) -> Tuple[int, int]:
+    """One HMM hit's genomic (start, end), 1-based inclusive, from its AA envelope on
+    the translated element `base_seq` ('chrom:gs-ge', whose gs is the offset)."""
+    if strand == "+":
+        rel_start = (env_from - 1) * 3 + frame + 1
+        rel_end   = env_to * 3 + frame
+    elif strand == "-":
+        rel_start = elem_len - (env_to * 3 + frame) + 1
+        rel_end   = elem_len - ((env_from - 1) * 3 + frame)
+    else:
+        rel_start, rel_end = env_from, env_to
+
+    # Element name encodes genome offset: "chrom:gs-ge".
+    genome_offset = 1
+    if ":" in base_seq and "-" in base_seq.split(":", 1)[1]:
+        try:
+            genome_offset = int(base_seq.split(":", 1)[1].split("-", 1)[0])
+        except ValueError:
+            genome_offset = 1
+    return rel_start + genome_offset - 1, rel_end + genome_offset - 1
+
+
+def load_tebinsorter_hit_spans_from_db(db_path: str) -> Dict[str, List[Tuple[int, int]]]:
+    """The genomic (start, end) spans every HMM hit TEsorter2 recorded covers, per
+    element, overlapping hits merged.
+
+    The raw hits, any strand, not `load_tebinsorter_domains_from_db`'s one best hit
+    per gene: one hit of any kind is what admits an element at Step 9 (the weak-HMM
+    rows `_augment_cls_tsv_with_unknowns` adds), and keeping one hit per gene would
+    hide a host's own weaker hit behind the stronger one of the element nested in it.
+    Merging keeps a few spans per element instead of dozens of hits, and cannot
+    change whether every hit lies inside some inner: two kept inners never cross, so
+    overlapping hits inside two of them are inside the larger one. Hits that only
+    abut are left apart, as they may lie in two neighboring inners.
+    """
+    import sqlite3
+
+    result: Dict[str, List[Tuple[int, int]]] = {}
+    p = Path(db_path)
+    if not p.exists() or p.stat().st_size == 0:
+        return result
+    conn = sqlite3.connect(str(p))
+    try:
+        seq_lengths: Dict[str, int] = dict(conn.execute("SELECT name, length FROM sequences"))
+        for tbl in ("legacy_hits", "facet_hits"):
+            try:
+                rows = conn.execute(
+                    f"SELECT base_seq, strand, frame, env_from, env_to FROM {tbl}").fetchall()
+            except sqlite3.OperationalError:
+                continue
+            for bs, sd, fr, ef, et in rows:
+                result.setdefault(bs, []).append(
+                    _hit_genome_span(bs, sd, fr, ef, et, seq_lengths.get(bs, 0)))
+    finally:
+        conn.close()
+    for bs, spans in result.items():
+        spans.sort()
+        merged = [spans[0]]
+        for s, e in spans[1:]:
+            if s <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        result[bs] = merged
     return result
 
 
@@ -2605,6 +2689,9 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str,
                        rename_map: Optional[Dict[str, str]] = None,
                        own_strands: Optional[Dict[str, Set[str]]] = None,
                        conflicts_tsv: Optional[str] = None,
+                       hmm_spans: Optional[Dict[str, List[Tuple[int, int]]]] = None,
+                       pass2_seeds: Iterable[str] = (),
+                       withdrawn: Optional[Dict[str, List[str]]] = None,
                        ) -> Tuple[int, int]:
     """Resolve overlapping calls (ltrquest.overlaps) and write the survivors with their
     domains and nesting appended.
@@ -2614,6 +2701,19 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str,
     the one with the stronger structural evidence is kept. Nested pairs are both kept
     and named in each other's `nest_status`. `conflicts_tsv`, when given, lists every
     dropped call with the call it lost to.
+
+    hmm_spans, when given, is the spans TEsorter2's HMM hits cover per element
+    (`load_tebinsorter_hit_spans_from_db`), and holds a same-round nest-outer to the
+    Step 9 rule: TEsorter2 classified it on its whole sequence, its inners included,
+    so it may have reached this table on their hits alone. A cross-round outer
+    cannot -- its inners were masked before it was classified -- and neither can an
+    element with nothing nested in it. A nest-outer every one of whose hits lies
+    inside its inners is withdrawn unless it is in `pass2_seeds` (the TSD-bearing
+    elements Step 8f seeded into pass 2, which admits them whatever their hits), and
+    the chromosome's calls are resolved again without it, since a call it beat may now
+    stand. `withdrawn`, when given, is filled with each one's key -> its inners' keys.
+    Pass-2 homology is not re-tested on the outer's own sequence. Leave hmm_spans unset
+    when Step 9 admits every element (--keep-unclassified all).
 
     own_strands, when given, is filled with nest-outer key -> the strands of
     its domain hits that lie outside every inner (empty when all of them lie
@@ -2777,6 +2877,14 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str,
     def n_domains(key):
         return len({d["gene"] for d in (gff3_domains or {}).get(key, [])})
 
+    seeds = set(pass2_seeds)
+
+    def on_inners_alone(call, inners):
+        """Whether TEsorter2 hit `call` only inside `inners`, with no TSD to admit it."""
+        hits = (hmm_spans or {}).get(call.key)
+        return (bool(hits) and call.key not in seeds
+                and all(any(i.start <= s and e <= i.end for i in inners) for s, e in hits))
+
     def flush_chrom(recs, out_handle, conflicts):
         """Resolve one chromosome's calls and write the survivors in genomic order."""
         calls = []
@@ -2788,9 +2896,27 @@ def dedup_kmer2ltr_tsv(kmer2ltr_tsv: str, out_tsv: str,
                                  ov.evidence(cols.get(parts, "tsd"), cols.get(parts, "tsd_offset"),
                                              cols.get(parts, "motif"), cols.get(parts, "bitscore"),
                                              n_domains(key))))
-        kept, dropped = ov.resolve(calls)
+        pool = calls
+        while True:
+            kept, dropped = ov.resolve(pool)
+            pairs = ov.nest_pairs(kept)
+            inners: Dict[int, List[ov.Call]] = defaultdict(list)
+            for inner, outer in pairs:
+                inners[id(outer)].append(inner)
+            gone = [c for c in kept if id(c) in inners and on_inners_alone(c, inners[id(c)])]
+            if not gone:
+                break
+            # Innermost first: hits inside an inner withdrawn alongside would be the
+            # outer's own once that inner is gone.
+            gone_ids = {id(c) for c in gone}
+            gone = [c for c in gone if not any(id(i) in gone_ids for i in inners[id(c)])]
+            for c in gone:
+                if withdrawn is not None:
+                    withdrawn[c.key] = [i.key for i in inners[id(c)]]
+            gone_ids = {id(c) for c in gone}
+            pool = [c for c in pool if id(c) not in gone_ids]
         nest_rels: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
-        for inner, outer in ov.nest_pairs(kept):
+        for inner, outer in pairs:
             nest_rels[inner.key].append(("nest-inner", outer.key))
             nest_rels[outer.key].append(("nest-outer", inner.key))
         kept_ids = {id(c) for c in kept}
@@ -4201,7 +4327,7 @@ def main():
               + (f" (--fastltr {args.fastltr})" if args.use_fastltr else " (--fastltr off)"))
 
     # Chunk FASTAs are no longer needed once LTR calling is done
-    _clean_path(chunks_dir, verbose)
+    _clean_dir_in_background(chunks_dir, verbose)
 
     # Step 6 stitched outputs (inside workdir)
     stitched_gff3 = str(workdir / f"{out_prefix}.ltrharvest.stitched.gff3")
@@ -4249,7 +4375,7 @@ def main():
         + f"; merged {_count_scn_rows(merged_scn)}")
 
     # Per-chunk run dirs are no longer needed after stitching
-    _clean_path(ltr_work, verbose)
+    _clean_dir_in_background(ltr_work, verbose)
     if args.clean:
         for _p in [stitched_harvest_scn, stitched_finder_scn, stitched_fastltr_scn, stitched_gff3]:
             _clean_path(_p, verbose)
@@ -4416,6 +4542,7 @@ def main():
     # independent evidence of a real insertion, so these anchor the homology
     # search for candidates the HMMs miss.
     pass2_for_tebinsorter = args.pass2_classified_fasta
+    tsd_pass2_names: Dict[str, str] = {}
     if args.use_tesorter and args.tsd_pass2 and tsd_after_trim:
         tsd_pass2_fa = str(workdir / f"{out_prefix}.tsd_pass2.full_length.fa")
         # TEsorter2 reads a pass-2 seed's classification from its header, and
@@ -4530,13 +4657,31 @@ def main():
               f"{n_named - len(ltr_bounds_for_dedup)} have no usable LTR "
               f"coordinates and will be treated as sharing no LTRs with "
               f"anything")
+    # Step 9 admitted what TEsorter2 classified, and TEsorter2 saw a same-round
+    # outer with its inners still in it; dedup holds such outers to the rule
+    # on their own hits. With --keep-unclassified all, Step 9 also admitted what
+    # TEsorter2 left unclassified, so there is no rule to hold them to.
+    hmm_spans = None
+    if (args.keep_unclassified != "all" and tebinsorter_db_path
+            and Path(tebinsorter_db_path).exists()):
+        hmm_spans = load_tebinsorter_hit_spans_from_db(tebinsorter_db_path)
+    withdrawn: Dict[str, List[str]] = {}
     own_strands: Dict[str, Set[str]] = {}
     conflicts_tsv = str(workdir / f"{out_prefix}.conflicts.tsv")
     n_kept, n_dropped = dedup_kmer2ltr_tsv(
         k2l_tsv, k2l_dedup_out, gff3_domains=gff3_dom_data, ltr_bounds=ltr_bounds_for_dedup,
-        rename_map=nest_rename_map, own_strands=own_strands, conflicts_tsv=conflicts_tsv)
+        rename_map=nest_rename_map, own_strands=own_strands, conflicts_tsv=conflicts_tsv,
+        hmm_spans=hmm_spans, pass2_seeds=tsd_pass2_names, withdrawn=withdrawn)
     print(f"[Step9b] kept {n_kept} call(s); dropped {n_dropped} that overlapped a stronger "
           f"call without being nested in it -> {Path(conflicts_tsv).name}")
+    if hmm_spans is not None:
+        withdrawn_tsv = str(workdir / f"{out_prefix}.withdrawn_outers.tsv")
+        with open(withdrawn_tsv, "w") as fh:
+            fh.write("#withdrawn\tinners\n")
+            for key, inner_keys in withdrawn.items():
+                fh.write(f"{key}\t{';'.join(inner_keys)}\n")
+        print(f"[Step9b] withdrew {len(withdrawn)} nest-outer(s) TEsorter2 hit only inside "
+              f"their same-round inners, with no TSD -> {Path(withdrawn_tsv).name}")
 
     if nest_rename_map:
         print(f"[Step9b] reclassified {len(nest_rename_map)} element(s) from TEBinSorter "
@@ -4596,6 +4741,8 @@ def main():
         else:
             print(f"[Step9c] no same-round nest-outer relationships found in {k2l_dedup_out}")
 
+    # The per-chunk folders went in the background after Step 6; normally long gone.
+    _wait_for_background_removals()
     _t_total = time.monotonic() - _t_total_start
     print("\nDone.")
     print("Runtimes:")

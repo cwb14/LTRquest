@@ -194,6 +194,29 @@ def test_two_calls_moved_to_the_same_ends_do_not_abort_the_run(tmp_path, k2l_api
     assert side[fx.kind("del_left").key]["decision"] == "moved"     # and the rest went ahead
 
 
+@pytest.mark.parametrize("host_ltr_end, refused", [(20, True), (-10, False)])
+def test_a_move_that_would_share_ltr_bases_with_its_host_is_refused(tmp_path, k2l_api, blastn,
+                                                                    host_ltr_end, refused):
+    """A host whose left LTR ends 20 bp past del_left's true start holds the call as
+    nested. Moved to that start, the call's left LTR would overlap the host's, a conflict
+    under the overlap rule, so it keeps its call. A host LTR ending 10 bp short of the true
+    start lets the same move through."""
+    fx = build(tmp_path / f"syn_ltr_host{host_ltr_end}")
+    e = fx.kind("del_left")
+    host = Element("ltr_host", "syn_fam00009", "+", e.true_start - 300, e.true_end + 300,
+                   e.true_start - 300, e.true_end + 300, e.true_start + host_ltr_end,
+                   e.true_end + 100)
+    _add_call(fx, host)
+    rb.run(str(fx.indir), [fx.prefix], [str(fx.genome)], rb.Settings(threads=2), TOOLS)
+    side = sidecar(fx)
+    if refused:
+        assert (side[e.key]["decision"], side[e.key]["reason"]) == ("rejected", "ltr_conflict")
+        assert table_row(fx, 0, e.name) is not None                # it keeps its call
+        assert side[fx.kind("patch_right").key]["decision"] == "moved"
+    else:
+        assert side[e.key]["decision"] == "moved", side[e.key]
+
+
 def test_intact_and_tsd_bearing_copies_are_left_alone(ran):
     fx, _, _, _ = ran
     side = sidecar(fx)

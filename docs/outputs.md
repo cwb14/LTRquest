@@ -191,6 +191,16 @@ the number of distinct protein domains. The rule is applied within each round an
 again when the rounds are pooled. Each round's dropped calls, and what they lost to,
 are in `<prefix>_r<N>.work/<prefix>_r<N>.conflicts.tsv`.
 
+**Hosts called with their tenant.** A round keeps a call only if TEsorter2
+classifies it. A host found in a later round than its tenant is classified with
+the tenant masked, but one called in the same round is classified with the tenant
+still inside, where the tenant's protein domains can classify it. So a nest-outer
+every one of whose HMM hits lies inside its tenants, and that has no TSD to admit
+it, is withdrawn, and the round's overlapping calls are resolved again without it.
+A later round, with the tenant masked, can still call it and judge it on its own
+sequence. Each round's withdrawn hosts, with their tenants, are in
+`<prefix>_r<N>.work/<prefix>_r<N>.withdrawn_outers.tsv`.
+
 **`confidence`.** A real insertion is born with both hallmarks. Its TSD copies and
 termini then mutate like the rest of the element, so an old element can lose
 them, but a young one keeps them: in a young element (`identity` ≥ 0.99, say)
@@ -518,9 +528,15 @@ How the new ends are chosen:
   count as gaps rather than substitutions, so `k2p` and `k2p_time` are not inflated.
   The move is kept if Kmer2LTR's status is `pass`, both LTRs are ≥ 100 bp, the
   alignment is ≥ 90 bp and the element passes detection's size floor
-  (end − start ≥ 300). Kmer2LTR then supplies the element's columns 1–29 except
-  `orientation`, which stays as stored; `nest_status` follows its neighbours' new
-  names.
+  (end − start ≥ 300). It is refused if the re-measured element would break the
+  overlap rule (*Overlapping calls*, section 4.1) with a call it kept to before the
+  move: an LTR overlapping one of a call nested in it or hosting it, or an end shared
+  with one. Only the re-measurement shows this, because the conflicts above are
+  checked on spans. A pair already in conflict before the move (a tenant left in its
+  host's LTR, section 4.3) is not counted against the move, and when two moves conflict
+  only with each other, the first in genome order wins. Kmer2LTR then supplies the
+  element's columns 1–29 except `orientation`, which stays as stored; `nest_status`
+  follows its neighbours' new names.
 
 The stage runs once, by design. On rice, a second pass over its own output changed
 112 more elements, and a curated LTR library agreed with only 88% of those ends,
@@ -586,6 +602,7 @@ templates imply (a majority vote), else genomic left and right.
 | `kmer2ltr_not_pass` | Kmer2LTR's status for the new record is not `pass` |
 | `kmer2ltr_moved_ends` | Kmer2LTR moved an end it was given (an internal consistency check) |
 | `length_filter` | after re-measuring: an LTR under 100 bp, the alignment under 90 bp, or the element under detection's size floor (end − start < 300) |
+| `ltr_conflict` | after re-measuring: an LTR would overlap one of a call nested in this one or hosting it, or the two would share an end (with a call as it stands, or with a call moved earlier in genome order); this one keeps its call |
 
 ### 8.2 GFF3
 

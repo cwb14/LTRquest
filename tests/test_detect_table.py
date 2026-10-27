@@ -538,3 +538,104 @@ def test_a_call_sharing_an_ltr_with_its_container_is_a_conflict_not_a_nest(tmp_p
     assert list(kept) == ["chr1:1000-9000"]
     assert kept["chr1:1000-9000"]["nest_status"] == "."
     assert conflicts[1].split("\t")[2] == "shared_ltr"
+
+
+def test_two_crossing_inners_of_one_host_keep_only_the_stronger(tmp_path):
+    (_n, n_dropped), kept, conflicts = _dedup(tmp_path, [
+        ("chr1:1000-20000", ".", "NA", "tg...ca", "900"),
+        ("chr1:3000-6000", "AATGC", "0,0", "tg...ca", "500"),
+        ("chr1:4500-8000", ".", "NA", "tg...ca", "700")])
+    assert n_dropped == 1 and sorted(kept) == ["chr1:1000-20000", "chr1:3000-6000"]
+    assert conflicts[1].split("\t")[:3] == ["chr1:4500-8000", "chr1:3000-6000", "crossing"]
+    assert kept["chr1:1000-20000"]["nest_status"] == "nest-outer:chr1:3000-6000"
+
+
+# A same-round host with no TSD and its tenant, which has one. TEsorter2 classified
+# the host on its whole sequence, so the tenant's HMM hits admitted it at Step 9.
+HOST = ("chr1:1000-9000", ".", "NA", "tg...ca", "900")
+TENANT = ("chr1:3000-6000", "AATGC", "0,0", "tg...ca", "500")
+TENANT_HITS = [(3500, 3800), (4000, 4300)]
+
+
+def _dedup_admission(tmp_path, calls, hmm_spans, pass2_seeds=()):
+    src = _calls_k2l(tmp_path, calls)
+    out, conflicts = tmp_path / "d.tsv", tmp_path / "c.tsv"
+    withdrawn = {}
+    detect.dedup_kmer2ltr_tsv(str(src), str(out), ltr_bounds=detect.ltr_bounds_from_table(
+        str(src)), conflicts_tsv=str(conflicts), hmm_spans=hmm_spans,
+        pass2_seeds=pass2_seeds, withdrawn=withdrawn)
+    lines = out.read_text().splitlines()
+    head = lines[0].lstrip("#").split("\t")
+    kept = {r["seq_id"]: r for r in (dict(zip(head, l.split("\t"))) for l in lines[1:])}
+    return kept, withdrawn, conflicts.read_text().splitlines()[1:]
+
+
+def test_a_host_admitted_on_its_tenants_hits_alone_is_withdrawn(tmp_path):
+    kept, withdrawn, _ = _dedup_admission(
+        tmp_path, [HOST, TENANT], {HOST[0]: TENANT_HITS, TENANT[0]: TENANT_HITS},
+        pass2_seeds={TENANT[0]})
+    assert withdrawn == {HOST[0]: [TENANT[0]]}
+    assert list(kept) == [TENANT[0]]
+    assert kept[TENANT[0]]["nest_status"] == "."
+
+
+@pytest.mark.parametrize("host_hits, seeds, spans_given", [
+    (TENANT_HITS + [(1500, 1800)], (), True),    # a hit of its own, outside the tenant
+    (TENANT_HITS, {HOST[0]}, True),              # a TSD seeded it into pass 2
+    ([], (), True),                              # no HMM hit: admitted on other evidence
+    (TENANT_HITS, (), False),                    # check off (--keep-unclassified all)
+])
+def test_a_host_with_admission_evidence_of_its_own_stays(tmp_path, host_hits, seeds,
+                                                         spans_given):
+    spans = {HOST[0]: host_hits, TENANT[0]: TENANT_HITS} if spans_given else None
+    kept, withdrawn, _ = _dedup_admission(tmp_path, [HOST, TENANT], spans, seeds)
+    assert withdrawn == {}
+    assert kept[HOST[0]]["nest_status"] == f"nest-outer:{TENANT[0]}"
+
+
+def test_withdrawing_a_host_lets_a_call_it_beat_stand(tmp_path):
+    # Crosses the host's right LTR and loses to it while the host stands.
+    crossing = ("chr1:8500-12000", ".", "NA", "ga...ct", "100")
+    calls = [HOST, TENANT, crossing]
+    kept, withdrawn, conflicts = _dedup_admission(
+        tmp_path, calls, {HOST[0]: TENANT_HITS, TENANT[0]: TENANT_HITS})
+    assert list(withdrawn) == [HOST[0]]
+    assert sorted(kept) == [TENANT[0], crossing[0]]
+    assert conflicts == []
+
+
+def test_an_inner_is_withdrawn_before_its_host_is_judged(tmp_path):
+    # outer > middle > inner. The middle's only hit lies in the inner; the outer's
+    # lies in the middle but outside the inner, so it is the outer's own once the
+    # middle is gone.
+    outer = ("chr1:1000-20000", ".", "NA", "tg...ca", "900")
+    middle = ("chr1:3000-15000", ".", "NA", "tg...ca", "700")
+    inner = ("chr1:6000-10000", "AATGC", "0,0", "tg...ca", "500")
+    kept, withdrawn, _ = _dedup_admission(
+        tmp_path, [outer, middle, inner],
+        {outer[0]: [(4000, 4500)], middle[0]: [(7000, 7500)], inner[0]: [(7000, 7500)]},
+        pass2_seeds={inner[0]})
+    assert withdrawn == {middle[0]: [inner[0]]}
+    assert sorted(kept) == [outer[0], inner[0]]
+    assert kept[outer[0]]["nest_status"] == f"nest-outer:{inner[0]}"
+
+
+def test_hit_spans_are_read_from_every_hit_in_genome_coordinates(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "x.bounded.fa.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE sequences (name TEXT, length INTEGER)")
+    con.execute("CREATE TABLE legacy_hits (base_seq TEXT, strand TEXT, frame INTEGER, "
+                "env_from INTEGER, env_to INTEGER)")
+    con.execute("INSERT INTO sequences VALUES ('chr1:1001-2000', 1000)")
+    # AA 11-20 of frame 0 forward is element bases 31-60; of frame 1 on the reverse
+    # strand, element bases 940-969 counted from the forward start. AA 15-30 overlaps
+    # the first and is merged with it; AA 31-40 only abuts and stays apart. No
+    # facet_hits table.
+    con.executemany("INSERT INTO legacy_hits VALUES ('chr1:1001-2000', ?, ?, ?, ?)",
+                    [("+", 0, 11, 20), ("-", 1, 11, 20), ("+", 0, 15, 30), ("+", 0, 31, 40)])
+    con.commit()
+    con.close()
+    assert detect.load_tebinsorter_hit_spans_from_db(str(db)) == {
+        "chr1:1001-2000": [(1031, 1090), (1091, 1120), (1940, 1969)]}

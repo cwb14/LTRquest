@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import itertools
+import random
+
 import pytest
 
 from ltrquest import ends
@@ -105,3 +108,39 @@ def test_long_calls_spanning_index_bins_still_meet():
     a = call(50_000, 260_000, rank=(1,))
     b = call(250_000, 300_000, rank=(0,))
     assert ov.resolve([a, b])[0] == [a]
+
+
+@pytest.mark.parametrize("second", [(4500, 8000),      # crosses the first inner
+                                    (3000, 4500),      # inside it, sharing its left LTR
+                                    (3000, 6000)])     # the same span again
+@pytest.mark.parametrize("ranks", list(itertools.permutations((1, 2, 3))))
+def test_inners_of_one_host_still_compete(second, ranks):
+    """Being nested in the same host spares two inners nothing: whatever the order of
+    strength, the host keeps its place and only the stronger inner stays inside it."""
+    host = call(1000, 20000, rank=(ranks[0],))
+    first = call(3000, 6000, rank=(ranks[1],))
+    other = call(*second, rank=(ranks[2],))
+    kept, dropped = ov.resolve([host, first, other])
+    winner, loser = (first, other) if ranks[1] > ranks[2] else (other, first)
+    assert kept == [c for c in (host, first, other) if c is not loser]
+    assert dropped == [(loser, winner)]
+    assert ov.nest_pairs(kept) == [(winner, host)]
+
+
+def test_no_two_kept_calls_ever_conflict():
+    """Dense clusters of hosts, inners and near-duplicates at random strengths: every
+    kept pair is disjoint or nested, and every dropped call lost to a kept one."""
+    rng = random.Random(7)
+    for _ in range(300):
+        calls = []
+        for _ in range(rng.randint(2, 30)):
+            s = rng.randint(1, 30_000)
+            e = s + rng.randint(400, 20_000)
+            calls.append(call(s, e, ltr=rng.randint(100, min(2000, (e - s + 1) // 2)),
+                              rank=(rng.randint(0, 3), rng.randint(0, 3))))
+        kept, dropped = ov.resolve(calls)
+        assert not [(a, b) for a, b in itertools.combinations(kept, 2)
+                    if ov.relation(a, b) == "conflict"]
+        assert all(ov.relation(loser, winner) == "conflict" and winner in kept
+                   for loser, winner in dropped)
+        assert len(kept) + len(dropped) == len(calls)

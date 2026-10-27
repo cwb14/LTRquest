@@ -509,6 +509,54 @@ def test_two_moves_to_one_span_keep_the_first_claim_in_any_input_order():
     assert rio.duplicate_moves([(inner, 1000, 5000), (outer, 1000, 5001)]) == set()
 
 
+def _ltr_conflicts(calls, moves, partner_of=None):
+    return rio.ltr_conflicts(rio.SpanIndex(calls), {m.uid: m for m in calls},
+                             {m.uid: ltrs for m, ltrs in moves}, partner_of or {})
+
+
+HOST, INNER = _mm(1000, 9000, "h"), _mm(3000, 8800, "i")   # LTRs 1000-1099, 8901-9000; 3000-3099, 8701-8800
+
+
+@pytest.mark.parametrize("moved, ltrs, refused", [
+    (INNER, (3000, 3099, 8851, 8950), True),       # its right LTR runs into the host's
+    (INNER, (3000, 3099, 8901, 9000), True),       # it ends where the host ends
+    (INNER, (3000, 3099, 8791, 8890), False),      # clear of the host's LTRs
+    (HOST, (950, 3050, 8901, 9000), True),         # re-measured, the host's LTR reaches the inner's
+    (HOST, (950, 1099, 8901, 9000), False),
+])
+def test_a_move_is_refused_where_its_new_ltrs_overlap_a_host_or_an_inner(moved, ltrs, refused):
+    """Every one of these moves passes the span checks; only the re-measured LTRs show a
+    host and the call nested in it sharing LTR bases, which the overlap rule calls a
+    conflict."""
+    assert rio.conflict(rio.SpanIndex([HOST, INNER]), moved, ltrs[0], ltrs[3]) is None
+    assert _ltr_conflicts([HOST, INNER], [(moved, ltrs)]) == ({moved.uid} if refused else set())
+
+
+def test_a_pair_in_conflict_before_the_move_is_not_held_against_it():
+    """A tenant reconcile left inside its host's LTR (a rejoined host) conflicts with the
+    host as called; a move that leaves it so did not make the conflict."""
+    host, tenant = _mm(1000, 9000, "h"), _mm(1050, 2000, "t")
+    assert _ltr_conflicts([host, tenant], [(tenant, (1050, 1149, 1951, 2050))]) == set()
+
+
+def test_two_moves_that_clash_only_with_each_other_keep_the_first_claim():
+    """Each move is clear of the other call as it stands; only the two moved calls share
+    LTR bases. The first in genome order keeps its move, whatever the input order."""
+    moves = [(HOST, (990, 1099, 8821, 9000)), (INNER, (3000, 3099, 8701, 8850))]
+    assert _ltr_conflicts([HOST, INNER], moves[:1]) == set()
+    assert _ltr_conflicts([HOST, INNER], moves[1:]) == set()
+    assert _ltr_conflicts([HOST, INNER], moves) == {INNER.uid}
+    assert _ltr_conflicts([HOST, INNER], moves[::-1]) == {INNER.uid}
+
+
+def test_the_call_a_move_absorbs_is_not_held_against_it():
+    """A split call's partner ends where the move ends, and leaves with the merge."""
+    x, part = _mm(1000, 5000, "x"), _mm(6000, 8000, "p")
+    move = [(x, (1000, 1099, 7901, 8000))]
+    assert _ltr_conflicts([x, part], move) == {x.uid}
+    assert _ltr_conflicts([x, part], move, {x.uid: part.uid}) == set()
+
+
 def test_sidecar_v2_round_trips_and_legacy_extended_rows_still_map(tmp_path):
     row = dict.fromkeys(rio.SIDECAR_COLUMNS, ".")
     row.update(old_seq_id="c:150-900#LTR/Gypsy/X", new_seq_id="c:100-897#LTR/Gypsy/X",

@@ -163,6 +163,17 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Changed
 
+- **A round no longer waits while its per-chunk folders are deleted.** Each round
+  removes `chunks/` and `ltr_runs/` (a suffix-array index and caller outputs per
+  chunk, tens of thousands of files on a large genome) once stitching is done, and
+  it used to stop until the last file was gone. Each folder is now renamed aside
+  (`<name>.deleting.<pid>`) and deleted on a background thread while the round goes
+  on; the round waits for it only at its end, if it is still running. A run killed
+  mid-delete leaves the renamed folder, which is safe to remove, instead of a
+  half-emptied `ltr_runs/` that a re-run would reuse. On ZFS, removing 3,000
+  chunk-like folders held the round for 5.9-7.0 s before and 1 ms now. Deleting
+  with 4 threads instead of one gained little there (2,000 folders: 3.2 against
+  3.4 s, and 3.7 against 4.4 s, in two runs of three), so one thread does it.
 - **Overlapping calls follow one rule.** Detection used to compare only calls
   overlapping by >= 80% of the shorter (`--dedup-threshold`), and then kept every
   call that took part in a nesting, so 8.8-9.5% of the *Poa* clean calls crossed
@@ -242,6 +253,46 @@ the old one's, which forces the schema, flag and stage changes below.
 
 ### Fixed
 
+- **A host called in the same round as its tenant could pass classification on the
+  tenant's protein domains.** A round keeps a candidate only if TEsorter2 classifies
+  it, and TEsorter2 saw a same-round host with its tenant still inside, so the
+  tenant's HMM hits admitted a host that had none of its own and no TSD. A host found
+  in a later round never could: its tenant is masked before it is classified. Such a
+  host was relabeled `LTR/unknown/unknown` but kept, as a nest-outer, and it also
+  beat the calls it overlapped. Detection now withdraws a nest-outer every one of
+  whose HMM hits lies inside its tenants unless a TSD seeded it into pass 2
+  (`--tsd-pass2`), then resolves the round's overlapping calls again without it. A
+  later round, with the tenant masked, can still call the host and judge it on its
+  own sequence. Withdrawn hosts and their tenants are listed in
+  `<prefix>_r<N>.work/<prefix>_r<N>.withdrawn_outers.tsv`. `--keep-unclassified all`,
+  which admits unclassified candidates anyway, and `--no-tesorter` are unaffected.
+  Pass-2 homology is not re-tested on the host's own sequence; under the driver's
+  `-rule 70-75-80` a match would have to align 75% of the host's length, and 326 of
+  the 331 below have less than 75% of it outside their tenants.
+
+  On the *P. supina* round-1 table (Step 9b replayed on the stored input; with the
+  check off the replay reproduces that run's table), 331 of 1,622 same-round hosts
+  are withdrawn, 36 calls they had beaten come back, and 6 calls lose to one of
+  those. TG..CA does not mark the withdrawn hosts as wrong (65% against 70.5% for
+  nest-outers with hits of their own, all without a TSD); the fix is that they now
+  meet the rule every other call meets.
+- **`--reboundary` could leave a moved call sharing LTR bases, or an end, with a
+  call nested in it or hosting it.** Re-boundarying checked each move's span, but
+  only Kmer2LTR's re-measurement gives a moved call its LTRs, and nothing checked
+  those. A call could keep its nested call inside it and still come to overlap that
+  call's LTR, or end where its host ends. The overlap rule calls such a pair a
+  conflict, at most one of which is a real insertion, yet both stayed in the final
+  tables. A move whose re-measured call would break the rule with a call it kept to
+  before is now refused (reason `ltr_conflict` in `<prefix>_reboundary.tsv`), and
+  the call keeps its called ends. A pair in conflict before the move (a tenant left
+  in its host's LTR) is left as it was, and when two moves conflict only with each
+  other, the first in genome order wins. On *P. supina*, the stage was re-run on its
+  tables rebuilt as they were before re-boundarying; with the check off, the re-run
+  reproduces the original byte for byte. With it on, 112 of 5,918 moves are refused,
+  which removes all 112 conflicts the moves had made and changes nothing else. 66 of
+  the 112 would have put a TSD at their new ends (59%, against 63% of the moves
+  kept), so the refused moves are not marked as wrong; the overlap rule cannot say
+  which of the two calls is.
 - **A capped call that had written output would have failed its chunk.** On a
   timeout, Python's subprocess hands back what the killed call printed as bytes
   even in text mode, and the salvage wrote it with `write_text`, which raises on
