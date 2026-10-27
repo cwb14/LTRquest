@@ -28,24 +28,41 @@ for r in athal.cen180 athal.nor rice.cenh3; do
 done
 
 # CHM13: no uncapped run is feasible; reference = T, support = RepeatMasker LTR pairs. Both runs
-# exceeded the FP threshold and re-ran on an FP-masked genome (TR's rerun was stopped), so each
-# is scored on its complete first attempt, <prefix>_FPstaging/round1 (kept by --dev-keep-fp-rounds).
+# exceed the FP threshold and re-run on an FP-masked genome, so each is scored twice: on its first
+# attempt, <prefix>_FPstaging/round1 (kept by --dev-keep-fp-rounds), with strata from T's
+# first-attempt caps (att1), and on its final output, with strata from T's last attempt (final).
 att=chm13_LTRs_FPstaging/round1
 if [[ -d $B/runs/chm13_T/$att && -d $B/runs/chm13_TR/$att ]]; then
-  mkdir -p chm13_att1
-  for c in T TR; do ln -sfn $B/runs/chm13_$c/$att chm13_att1/chm13_$c; done
-  awk '/re-detecting next attempt/{exit} 1' $B/runs/chm13_T/run.log > chm13_T.att1.log
-  python3 $S/capped_chunks.py chm13_T.att1.log > chm13_T.capped.bed
-  python3 $S/rm_support.py --rm $B/external/chm13v2.0_RepeatMasker_4.1.2p1.2022Apr14.bed \
-      --report $B/inputs/GCA_009914755.4_assembly_report.txt \
-      --out chm13.support.tsv chm13_att1/chm13_{T,TR}/chm13_LTRs_depth*_clean_ltr.tsv
-  python3 $S/analyze.py --genome chm13 --runs chm13_att1 --configs T TR --ref T --capped-from T \
-      --capped-bed chm13_T.capped.bed --fai $B/regions/chm13.fa.fai --arrays $B/regions/chm13.arrays10k.bed \
-      --support chm13.support.tsv --out chm13_vs_T > /dev/null
-  python3 $S/additions.py --genome chm13 --ref chm13_att1/chm13_T --test chm13_att1/chm13_TR \
-      --fai $B/regions/chm13.fa.fai --arrays $B/regions/chm13.arrays10k.bed \
-      --support chm13.support.tsv > chm13_TR_additions.txt
-  grep -m1 "FastLTR searched" $B/runs/chm13_TR/run.log >> chm13_TR_additions.txt || true
+  awk '$4=="long"' $B/regions/chm13.arrays10k.bed > chm13.rdna.bed
+  awk -v OFS='\t' '{print $1, 0, $2}' $B/regions/chm13.fa.fai > chm13.genome.bed
+  mkdir -p chm13_att1 chm13_final
+  for c in T TR; do
+    ln -sfn $B/runs/chm13_$c/$att chm13_att1/chm13_$c
+    ln -sfn $B/runs/chm13_$c chm13_final/chm13_$c
+  done
+  log=$B/runs/chm13_T/run.log
+  n=$(grep -c "re-detecting next attempt" $log || true)
+  awk '/re-detecting next attempt/{exit} 1' $log > chm13_T.att1.log
+  awk -v n="$n" '/re-detecting next attempt/{a++} a==n' $log > chm13_T.final.log
+  for s in att1 final; do
+    python3 $S/capped_chunks.py chm13_T.$s.log > chm13_T.$s.capped.bed
+    python3 $S/rm_support.py --rm $B/external/chm13v2.0_RepeatMasker_4.1.2p1.2022Apr14.bed \
+        --report $B/inputs/GCA_009914755.4_assembly_report.txt \
+        --out chm13_$s.support.tsv chm13_$s/chm13_{T,TR}/chm13_LTRs_depth*_clean_ltr.tsv
+    python3 $S/analyze.py --genome chm13 --runs chm13_$s --configs T TR --ref T --capped-from T \
+        --capped-bed chm13_T.$s.capped.bed --fai $B/regions/chm13.fa.fai \
+        --arrays $B/regions/chm13.arrays10k.bed --support chm13_$s.support.tsv --out chm13_${s}_vs_T > /dev/null
+    python3 $S/additions.py --genome chm13 --ref chm13_$s/chm13_T --test chm13_$s/chm13_TR \
+        --fai $B/regions/chm13.fa.fai --arrays $B/regions/chm13.arrays10k.bed \
+        --support chm13_$s.support.tsv > chm13_${s}_TR_additions.txt
+    # whole genome (clean, supported) and the 45S rDNA arrays
+    for r in genome rdna; do
+      python3 $S/region_counts.py --bed chm13.$r.bed --support chm13_$s.support.tsv \
+          chm13_$s/chm13_{T,TR} > chm13_$s.$r.txt
+    done
+  done
+  grep -H "cut short\|FastLTR searched\|Detection complete\|FP fraction" \
+      $B/runs/chm13_{T,TR}/run.log > chm13_logs.txt || true
 else
   echo "CHM13 skipped: a run lacks its first attempt ($att); rerun with run_one.sh" >&2
 fi

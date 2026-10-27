@@ -125,32 +125,44 @@ unsupported ones (+770).
 
 An uncapped CHM13 run does not finish in reasonable time (single chunks take
 8-40+ min), so `T` is the reference here and RepeatMasker the independent
-check. On a shared machine the 30 s cap cut LTRharvest short on 647 of 6,571
-chunks and LTR_FINDER on 815: far beyond the satellite arrays, since a
+check. On a shared machine the 30 s cap cut LTRharvest short on 678 of 6,571
+round-1 chunks and LTR_FINDER on 904: far beyond the satellite arrays, since a
 loaded machine pushes ordinary chunks past 30 s too. With rescue, FastLTR
-searched 918 chunks and dropped 16,777 array-unit pairs. Both runs then
+searched 1,067 chunks and dropped 23,680 array-unit pairs. Both runs then
 exceeded LTRquest's false-positive threshold (26% of elements in FP families)
-and re-ran on an FP-masked genome; the numbers below are from the first attempt
-of each, computed identically. (LTRquest deletes a run's attempt directories
-when it completes, so `T`'s first attempt was scored while its second ran and
-is no longer on disk; `run_one.sh` now keeps them for CHM13 with
-`--dev-keep-fp-rounds`.)
+and re-ran once on an FP-masked genome (FP fraction then 3.6% for `T`, 1.5% for
+`TR`). `run_one.sh` keeps both attempts for CHM13 (`--dev-keep-fp-rounds`), so
+each run is scored on its first attempt and on its final output.
 
-| | detection wall | clean | RepeatMasker-supported |
-|---|---|---|---|
-| T cap 30 s | 1:32 | 9,129 | 60% |
-| **TR cap + rescue** | 1:17 | 10,165 | 58% |
+| | wall / CPU | first attempt: clean | RepeatMasker-supported | final: clean | RepeatMasker-supported |
+|---|---|---|---|---|---|
+| T cap 30 s | 5.87 h / 108 h | 8,981 | 61% | 15,488 | 57% |
+| **TR cap + rescue** | 5.92 h / 110 h | 10,181 | 58% | 16,797 | 54% |
 
-TR keeps 98.7% of T's elements (99.5% of the RepeatMasker-supported ones) and
-adds 1,154: 743 outside tandem arrays (44% supported, 52 high-confidence), 25 in
-satellite arrays (68%), 11 near telomeres (55%), and 375 in the 45S rDNA arrays
-of the five acrocentric chromosomes (all `LTR/unknown`, low confidence, 20%).
-Those last are copies of a structure inside the 43 kb rDNA unit: the unit is
-longer than FastLTR's 20 kb reach and than the tandem filter's flank test, so
-neither recognizes the array. LTRharvest and LTR_FINDER make the same calls when
-they get through an rDNA chunk (LTRquest 1.0.1 at a 300 s cap: 86 such calls),
-so this is a gap in the tandem filter for long-unit arrays rather than in
-FastLTR; for human, `--fastltr rescue` multiplies it.
+On the first attempt TR keeps 98.7% of T's elements (99.2% of the
+RepeatMasker-supported ones) and adds 1,321: 911 outside tandem arrays (41%
+supported, 60 high-confidence), 25 in satellite arrays (68%), 10 near telomeres
+(60%), and 375 in the 45S rDNA arrays of the five acrocentric chromosomes (all
+`LTR/unknown`, low confidence, 20%). Most of those last are copies of a
+structure inside the 43 kb rDNA unit: the unit is longer than FastLTR's 20 kb
+reach and than the tandem filter's flank test, so neither recognizes the array.
+LTRharvest and LTR_FINDER make the same calls when they get through an rDNA
+chunk (LTRquest 1.0.1 at a 300 s cap: 86 such calls), so this is a gap in the
+tandem filter for long-unit arrays rather than in FastLTR.
+
+LTRquest's FP correction removes most of them: TR's final output keeps 146 rDNA
+calls, and the 101 that RepeatMasker supports are copies of a provirus the rDNA
+unit carries, a HERVIP10FH internal region between MER39B LTRs (5.4 kb; the
+MER39B pairs recur every 38-41 kb). `T`, whose rDNA chunks were capped, has
+none. In the final outputs TR keeps 98.1% of T's elements (98.6% of the
+supported ones) and adds 1,608. Of these, 369 lie in chunks both runs' last
+attempts capped (46% supported), and 1,038 in chunks neither capped (15%), which
+FastLTR did not search on that attempt: those follow from the two runs masking
+different FP families before their second attempt. A replicate `T` run, launched earlier the same day with
+the same settings, differs from this `T` the same way: 1,193 elements added and
+190 lost, 1,025 of the additions in chunks neither run capped (3% supported).
+About 1,000 elements of a capped CHM13 final output thus change from run to
+run; what rescue itself adds is the capped-chunk and array calls.
 
 ## Rerun
 
@@ -183,4 +195,5 @@ ln -s $B/spike/athal_spike.fa $B/inputs/spike.fa
 ```
 
 The tandem-array guard numbers come from runs of the build before the guard
-existed, which `run_analysis.sh` does not reproduce.
+existed, and the CHM13 replicate from an earlier `T` run; `run_analysis.sh`
+reproduces neither.

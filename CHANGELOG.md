@@ -63,8 +63,10 @@ the old one's, which forces the schema, flag and stage changes below.
   +392 supported, +770 unsupported elements). On a simulated genome with no arrays
   it is harmless (F1 0.951 against 0.946), so it stays available for maximum
   recall. Known gap: arrays whose unit is longer than 20 kb (human 45S rDNA,
-  43 kb) escape both the array test and the tandem filter, and on CHM13 rescue
-  calls 375 `LTR/unknown` unit copies there (LTRquest 1.0.1 at a 300 s cap: 86).
+  43 kb) escape both the array test and the tandem filter, and on CHM13 rescue's
+  first attempt calls 375 `LTR/unknown` unit copies there (LTRquest 1.0.1 at a
+  300 s cap: 86); after the FP correction 146 remain, 101 of them a provirus
+  (MER39B LTRs, HERVIP10FH) that the rDNA unit carries.
   Benchmarks: `benchmarks/fastltr/`.
 
 - A tandem-array filter, on by default (`--no-tandem-filter` turns it off).
