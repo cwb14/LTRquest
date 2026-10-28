@@ -293,6 +293,18 @@ the old one's, which forces the schema, flag and stage changes below.
   the 112 would have put a TSD at their new ends (59%, against 63% of the moves
   kept), so the refused moves are not marked as wrong; the overlap rule cannot say
   which of the two calls is.
+- **The Nextflow pipeline did not compile under Nextflow 26.10.** From 26.10,
+  Nextflow refuses a `return` statement in a workflow body, and `main.nf` returned
+  from its workflow after printing `--help`, so every `nextflow run`, not only
+  `--help`, stopped at "Script compilation failed" before any process ran. The
+  workflow now ends `--help` with `exit 0`; the CI stub runs pass under 24.04.4,
+  the oldest version the manifest allows, and 26.10.4.
+- **The container image could not be built once FastLTR was added.** The build
+  checks FastLTR by the marker in its usage text (`FastLTR | grep -q`). Run bare,
+  FastLTR prints that text and exits 1, and the micromamba base image runs every
+  build step with `pipefail`, so the check failed although grep found the marker,
+  and no image was published after 25 Oct (`7a5cca3`, before FastLTR). The check
+  now ignores FastLTR's exit status and lets grep decide.
 - **A capped call that had written output would have failed its chunk.** On a
   timeout, Python's subprocess hands back what the killed call printed as bytes
   even in text mode, and the salvage wrote it with `write_text`, which raises on

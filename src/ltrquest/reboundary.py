@@ -487,7 +487,7 @@ def _rebound(indir: str, prefixes: Sequence[str], tables, g: Genomes, s: Setting
                                       if rows[p.member.uid]["reason"] == "."]):
                 rows[u]["reason"] = "duplicates_move"
             final = [p for p in clear if rows[p.member.uid]["reason"] == "."]
-            for u, pu in list(partner_of.items()):
+            for u in list(partner_of):
                 if rows[u]["reason"] != ".":
                     _unmerge(rows, partner_of.pop(u))
             cigars = {}
@@ -522,7 +522,9 @@ def _rebound(indir: str, prefixes: Sequence[str], tables, g: Genomes, s: Setting
 
     accepted: Dict[str, Dict[str, Accepted]] = defaultdict(dict)
     retired: Dict[str, set] = defaultdict(set)
-    fetch = (lambda prefix, chrom, a, b: g.fetch(prefix, chrom, a, b)[0])
+    def fetch(prefix, chrom, a, b):
+        return g.fetch(prefix, chrom, a, b)[0]
+
     nested = None             # host -> nested elements, built on the first trim that needs it
     for v in verdicts:
         row = rows[v.uid]

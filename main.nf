@@ -64,9 +64,11 @@ def resolveInput(String path, sheetDir) {
 }
 
 workflow {
+    // `exit 0`, not `return`: from 26.10, Nextflow refuses a return statement in
+    // a workflow body.
     if (params.help) {
         helpMessage()
-        return
+        exit 0
     }
 
     if (!params.input)  { error "--input is required: a CSV samplesheet with columns sample,genome,proteins" }

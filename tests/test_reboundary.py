@@ -649,7 +649,8 @@ def test_restore_names_the_derived_output_it_cannot_replace(tmp_path, capsys):
 
 def test_sidecar_rows_are_ordered_without_ties():
     rows = [{"old_seq_id": "c:100-900#x"}, {"old_seq_id": "c:100-500#x"}]
-    assert sorted(rows, key=rb._row_order) == sorted(rows[::-1], key=rb._row_order)
+    flipped = rows[::-1]                # sorted() keeps input order between tied keys
+    assert sorted(rows, key=rb._row_order) == sorted(flipped, key=rb._row_order)
 
 
 def test_verbose_adds_per_step_progress(tmp_path, k2l_api, blastn, capsys):
@@ -679,7 +680,7 @@ def test_a_record_that_does_not_match_its_row_is_not_spliced(tmp_path, k2l_api, 
     fx = build(tmp_path / "syn_flipped")
     e = fx.kind("del_left")
     path = fx.indir / f"{fx.prefix}_depth0_clean_ltr.fa"
-    out, name = [], None
+    name = None
     recs = {}
     for line in path.read_text().splitlines():
         if line.startswith(">"):

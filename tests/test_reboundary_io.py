@@ -291,6 +291,7 @@ def _mini_chain(tmp_path):
     """A 3-level nest written as the pipeline writes it: H2 (depth 2, stored +) holds
     H1 (depth 1, stored -), which holds E (depth 0, stored +)."""
     import random
+
     from reboundary_fixtures import TAIL, Element, _row
     r = random.Random(5)
     seq = "".join(r.choice("ACGT") for _ in range(6000))
@@ -326,7 +327,7 @@ def test_a_trim_gives_each_host_back_what_reconcile_would_have_painted(tmp_path)
     m = next(x for x in ms.values() if x.key == e.key)
     restore = rio.trim_restore(m, [(3898, 3900)], ms, IUPAC_DEPTH_SEQ,
                                lambda prefix, chrom, a, b: seq[a - 1:b])
-    new_name = f"chrS:2001-3897#LTR/Gypsy/Synth"
+    new_name = "chrS:2001-3897#LTR/Gypsy/Synth"
     old_row = tables[0].rows[0]
     acc = rio.Accepted(m, new_name, [new_name] + old_row[1:len(COLUMNS)], seq[2000:3897],
                        2001, 3897, restore=restore)

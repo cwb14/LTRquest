@@ -32,7 +32,10 @@ ARG SDUST_REF=89c42cb41ba598e9cfa07c2ef99ae8c08f769b3e
 ARG FASTAN_REF=843d0ed28b93b05ad428995d986312f02468afcd
 
 # LTRquest's adaptation of FastLTR, compiled against the pinned FASTAN sources
-# below; ltrquest.fastltr builds it the same way outside the container.
+# below; ltrquest.fastltr builds it the same way outside the container. The last
+# line checks the build by the marker in its usage text. Run bare, FastLTR prints
+# that text and exits 1, and this image's build shell sets pipefail, so the exit
+# status is dropped (`|| true`) and grep alone decides.
 COPY src/ltrquest/fastltr/FastLTR.c /tmp/FastLTR.c
 
 ENV TOOLS=/opt/ltrquest/tools
@@ -55,7 +58,7 @@ RUN mkdir -p "$TOOLS" \
  && cd / \
  && find "$TOOLS" -name .git -type d -prune -exec rm -rf {} + \
  && test -x "$TOOLS/TRF-mod/trf-mod" && test -x "$TOOLS/sdust/sdust" \
- && "$TOOLS/FASTAN/FastLTR" 2>&1 | grep -q "LTRquest adaptation"
+ && { "$TOOLS/FASTAN/FastLTR" 2>&1 || true; } | grep -q "LTRquest adaptation"
 
 # --------------------------------------------------------------- runtime stage
 FROM mambaorg/micromamba:1.5.10-jammy

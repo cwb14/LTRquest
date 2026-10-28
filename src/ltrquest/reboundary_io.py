@@ -24,8 +24,19 @@ import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import (Callable, Dict, FrozenSet, Iterable, Iterator, List, NamedTuple, Optional,
-                    Sequence, Set, Tuple)
+from typing import (
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterable,
+    Iterator,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from . import overlaps as ov
 from .annotate import discover_depth_tables, element_key, header_names, read_table, target_mode

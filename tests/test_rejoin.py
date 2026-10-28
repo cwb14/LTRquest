@@ -19,8 +19,7 @@ from typing import Dict, List
 
 import pytest
 
-from ltrquest import kmer2ltr
-from ltrquest import reconcile
+from ltrquest import kmer2ltr, reconcile
 from ltrquest.annotate import REJOIN_SIDECAR_SUFFIX, load_pass2_links, load_tesorter_strands
 from ltrquest.detect import DETECT_COLUMNS, iter_fasta, revcomp
 
@@ -245,8 +244,8 @@ def planted(tmp_path_factory):
     genome = b.genome
     calls = [right.host_called, right.tenant, left.host_called, left.tenant, d1, d2, lone]
     tmp = tmp_path_factory.mktemp("rejoin")
-    return dict(genome=genome, right=right, left=left, decoy=(d1, d2), lone=lone,
-                files=write_round(tmp, genome, calls), tmp=tmp)
+    return {"genome": genome, "right": right, "left": left, "decoy": (d1, d2), "lone": lone,
+            "files": write_round(tmp, genome, calls), "tmp": tmp}
 
 
 @pytest.fixture(scope="module")

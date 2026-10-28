@@ -37,6 +37,9 @@ REQUIRED_TOOLS = ["gt", "ltr_finder", "mmseqs", "hmmsearch", "blastn", "minimap2
 # would exercise detection only.
 ROUNDS = 2
 SLICE_BP = 2_000_000
+# Between rounds the driver paints each call 'N' and everything farther than this
+# from every call 'V' (its default mask distance).
+MASK_DISTANCE = 15_000
 
 
 def _threads() -> str:
@@ -96,16 +99,29 @@ def test_every_round_ran(run_dir):
         assert f"Round {r}: detected" in stdout, f"round {r} did not report a count"
 
 
+def _round_spans(work, r):
+    """(start, end) of every call in round r's table, read off its seq_id."""
+    tsv = work / f"athal_slice_LTRs_r{r}_ltr.tsv"
+    spans = []
+    for ln in tsv.read_text().splitlines():
+        if ln and not ln.startswith("#"):
+            start, end = ln.split("\t", 1)[0].split("#")[0].rsplit(":", 1)[1].split("-")
+            spans.append((int(start), int(end)))
+    return spans
+
+
 def test_the_genome_was_masked_between_rounds(run_dir):
+    """The masked genome is scratch the run deletes, so the masking is read off what
+    round 2 found: nothing round 1 painted 'N', nothing in the 'V' far from it."""
     work, stdout = run_dir
     assert "Masking original genome for next round" in stdout
-    masked = list(work.glob("*_r1.fa"))
-    assert masked, "no masked genome was written for round 2"
-    seq = "".join(
-        line.strip() for line in masked[0].read_text().splitlines() if not line.startswith(">")
-    )
-    # Round 1 paints its hits 'N' and everything far from one 'V'.
-    assert "N" in seq and "V" in seq
+    r1, r2 = _round_spans(work, 1), _round_spans(work, 2)
+    assert r1, "round 1 found nothing to mask"
+    assert not set(r1) & set(r2), "round 2 called an element round 1 had masked"
+    for s, e in r2:
+        assert any(a - MASK_DISTANCE <= e and s <= b + MASK_DISTANCE for a, b in r1), (
+            f"round 2 called {s}-{e}, farther than {MASK_DISTANCE} bp from every round-1 call"
+        )
 
 
 def test_depth_buckets_exist_and_are_populated(run_dir):
